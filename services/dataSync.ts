@@ -1,0 +1,149 @@
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile } from './googleDrive';
+
+const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
+const LEGACY_APPDATA_KEY = 'kpiAppData';
+const SCHEMA_VERSION = 1;
+
+function cacheKey(email: string): string {
+  return `${LOCAL_CACHE_PREFIX}${email}`;
+}
+
+export function readLocalCache<T = any>(email: string): T | null {
+  try {
+    const raw = localStorage.getItem(cacheKey(email));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeLocalCache(email: string, data: unknown): void {
+  try {
+    localStorage.setItem(cacheKey(email), JSON.stringify(data));
+  } catch (err) {
+    console.error('Failed to write local cache', err);
+  }
+}
+
+/** The pre-Google-login localStorage blob, kept around only to power the one-time migration prompt. */
+export function readLegacyAppData(): { users: string[]; userData: Record<string, any> } | null {
+  try {
+    const raw = localStorage.getItem(LEGACY_APPDATA_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface LoadResult<T> {
+  data: T | null;
+  driveFileId: string | null;
+  source: 'drive' | 'cache' | 'new';
+}
+
+/** Loads the signed-in user's own data: Drive is the source of truth, local cache is a fallback. */
+export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>> {
+  try {
+    const existing = await findOwnDataFile();
+    if (existing) {
+      const content = await readFileContent<T>(existing.id);
+      writeLocalCache(email, content);
+      return { data: content, driveFileId: existing.id, source: 'drive' };
+    }
+  } catch (err) {
+    console.error('Failed to load from Drive, falling back to local cache', err);
+    const cached = readLocalCache<T>(email);
+    if (cached) return { data: cached, driveFileId: null, source: 'cache' };
+  }
+  return { data: null, driveFileId: null, source: 'new' };
+}
+
+export async function createInitialDriveFile(email: string, data: unknown): Promise<string> {
+  const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
+  const fileId = await createOwnDataFile(payload, email);
+  writeLocalCache(email, payload);
+  return fileId;
+}
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Writes to the local cache immediately (fast UI), then debounces the Drive sync
+ * (~2s idle) so rapid KPI-entry keystrokes don't hammer the Drive API.
+ */
+export function saveOwnDataDebounced(
+  email: string,
+  driveFileId: string | null,
+  data: unknown,
+  onFileCreated: (id: string) => void
+): void {
+  writeLocalCache(email, data);
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(async () => {
+    try {
+      const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
+      if (driveFileId) {
+        await updateFileContent(driveFileId, payload);
+      } else {
+        const newId = await createOwnDataFile(payload, email);
+        onFileCreated(newId);
+      }
+    } catch (err) {
+      console.error('Failed to sync data to Drive', err);
+    }
+  }, 2000);
+}
+
+export interface TeammateData<T> {
+  email: string;
+  data: T;
+}
+
+/** Fetches every teammate's domain-shared data file (used by the cross-user / team views). */
+export async function loadAllTeammatesData<T = any>(): Promise<TeammateData<T>[]> {
+  const files = await listTeammateDataFiles();
+  const results = await Promise.all(
+    files.map(async (file) => {
+      try {
+        const content = await readFileContent<T>(file.id);
+        return { email: file.ownerEmail || file.name, data: content };
+      } catch (err) {
+        console.error(`Failed to read teammate file ${file.id}`, err);
+        return null;
+      }
+    })
+  );
+  return results.filter((r) => r !== null) as TeammateData<T>[];
+}
+
+export interface TeamsConfigResult<T> {
+  data: T | null;
+  driveFileId: string | null;
+  ownerEmail: string | null;
+}
+
+/** Loads the single shared teams-config file, if one has been created yet. */
+export async function loadTeamsConfig<T = any>(): Promise<TeamsConfigResult<T>> {
+  const existing = await findTeamsConfigFile();
+  if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
+  const content = await readFileContent<T>(existing.id);
+  return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
+}
+
+/**
+ * Creates the shared teams-config file the first time anyone sets up a team, or updates it
+ * if it already exists. Only the original creator's browser can successfully update it
+ * (drive.file scope only grants write access to files this app instance created) — callers
+ * should surface the resulting error as "only the creator can edit teams".
+ */
+export async function saveTeamsConfig(
+  driveFileId: string | null,
+  data: unknown,
+  creatorEmail: string
+): Promise<string> {
+  if (driveFileId) {
+    await updateFileContent(driveFileId, data);
+    return driveFileId;
+  }
+  return createTeamsConfigFile(data, creatorEmail);
+}

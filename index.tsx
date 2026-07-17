@@ -15,6 +15,8 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
+import { signIn, signOut, getCurrentSession, GoogleIdentity } from './services/googleAuth';
+import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig } from './services/dataSync';
 
 ChartJS.register(
   CategoryScale,
@@ -177,10 +179,17 @@ interface UserData {
   candidates: Candidate[];
 }
 
-interface AppData {
-  users: string[];
-  userData: Record<string, UserData>;
-  lastUser: string | null;
+interface Team {
+  id: string;
+  name: string;
+  memberEmails: string[];
+  createdBy: string;
+  createdAt: string;
+}
+
+interface TeamsConfig {
+  schemaVersion: number;
+  teams: Team[];
 }
 
 const getStartOfWeek = (date: Date): Date => {
@@ -1068,128 +1077,146 @@ const CalendarView: React.FC<{
 };
 
 
-const UserCreationModal: React.FC<{
-  onSave: (name: string) => void;
-  onClose: () => void;
-}> = ({ onSave, onClose }) => {
-  const [name, setName] = useState('');
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (name.trim()) {
-      onSave(name.trim());
-    }
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
-      <div className="modal-content" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3 id="user-modal-title">新しいユーザーを追加</h3>
-          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
-        </div>
-        <form id="user-creation-form" onSubmit={handleSubmit} className="modal-body">
-          <div className="form-group">
-            <label htmlFor="user-name">ユーザー名</label>
-            <input
-              type="text"
-              id="user-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例: 山田 太郎"
-              autoFocus
-              required
-            />
-          </div>
-        </form>
-        <div className="modal-footer">
-          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
-          <button type="submit" form="user-creation-form" className="submit-button" disabled={!name.trim()}>保存</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const UserManagementModal: React.FC<{
-  users: string[];
-  currentUser: string | null;
-  onClose: () => void;
-  onUpdateUser: (oldName: string, newName: string) => void;
-  onDeleteUser: (name: string) => void;
-}> = ({ users, currentUser, onClose, onUpdateUser, onDeleteUser }) => {
-    const [editingUser, setEditingUser] = useState<string | null>(null);
+const TeamsModal: React.FC<{
+    teams: Team[];
+    isEditable: boolean;
+    ownerEmail: string | null;
+    onClose: () => void;
+    onCreateTeam: (name: string) => void;
+    onRenameTeam: (teamId: string, name: string) => void;
+    onDeleteTeam: (teamId: string) => void;
+    onAddMember: (teamId: string, email: string) => void;
+    onRemoveMember: (teamId: string, email: string) => void;
+}> = ({ teams, isEditable, ownerEmail, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember }) => {
+    const [newTeamName, setNewTeamName] = useState('');
+    const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
+    const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
 
-    const handleEdit = (user: string) => {
-        setEditingUser(user);
-        setEditedName(user);
+    const handleCreate = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newTeamName.trim()) return;
+        onCreateTeam(newTeamName.trim());
+        setNewTeamName('');
     };
 
-    const handleCancel = () => {
-        setEditingUser(null);
-        setEditedName('');
+    const handleStartEdit = (team: Team) => {
+        setEditingTeamId(team.id);
+        setEditedName(team.name);
     };
 
-    const handleSave = (oldName: string) => {
-        onUpdateUser(oldName, editedName);
-        handleCancel();
+    const handleSaveEdit = (teamId: string) => {
+        if (editedName.trim()) onRenameTeam(teamId, editedName.trim());
+        setEditingTeamId(null);
     };
 
-    const handleDelete = (name: string) => {
-        if (window.confirm(`「${name}」を削除します。このユーザーの実績データもすべて削除されます。よろしいですか？`)) {
-            onDeleteUser(name);
+    const handleAddMember = (teamId: string) => {
+        const email = (memberInputs[teamId] || '').trim();
+        if (!email) return;
+        if (!email.toLowerCase().endsWith('@bloom-firm.com')) {
+            alert('bloom-firm.com のメールアドレスを入力してください。');
+            return;
         }
+        onAddMember(teamId, email);
+        setMemberInputs(prev => ({ ...prev, [teamId]: '' }));
     };
 
     return (
-        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="user-management-title">
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="teams-modal-title">
             <div className="modal-content" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h3 id="user-management-title">ユーザー管理</h3>
+                    <h3 id="teams-modal-title">チーム管理</h3>
                     <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
                 </div>
                 <div className="modal-body">
-                    {users.length === 0 ? (
-                        <p className="no-data-message">管理するユーザーがいません。</p>
+                    {!isEditable && (
+                        <p className="no-data-message">
+                            チーム設定の編集は作成者（{ownerEmail || '不明'}）のみ可能です。閲覧のみできます。
+                        </p>
+                    )}
+                    {isEditable && (
+                        <form onSubmit={handleCreate} className="form-group" style={{ marginBottom: '1rem' }}>
+                            <label htmlFor="new-team-name">新しいチーム名</label>
+                            <input
+                                id="new-team-name"
+                                type="text"
+                                value={newTeamName}
+                                onChange={(e) => setNewTeamName(e.target.value)}
+                                placeholder="例: 営業第一チーム"
+                            />
+                            <button type="submit" className="submit-button" disabled={!newTeamName.trim()} style={{ marginTop: '0.5rem' }}>
+                                チームを作成
+                            </button>
+                        </form>
+                    )}
+                    {teams.length === 0 ? (
+                        <p className="no-data-message">まだチームがありません。</p>
                     ) : (
                         <ul className="user-management-list">
-                            {users.map(user => (
-                                <li key={user} className="user-management-item">
-                                    {editingUser === user ? (
-                                        <input
-                                            type="text"
-                                            value={editedName}
-                                            onChange={(e) => setEditedName(e.target.value)}
-                                            className="user-management-input"
-                                            autoFocus
-                                            onKeyDown={(e) => e.key === 'Enter' && handleSave(user)}
-                                        />
-                                    ) : (
-                                        <span className="user-management-name">
-                                            {user}
-                                            {user === currentUser && <span className="current-user-tag"> (ログイン中)</span>}
-                                        </span>
-                                    )}
-                                    <div className="user-management-actions">
-                                        {editingUser === user ? (
-                                            <>
-                                                <button onClick={() => handleSave(user)} className="save-user-button">保存</button>
-                                                <button onClick={handleCancel} className="cancel-user-button">キャンセル</button>
-                                            </>
+                            {teams.map(team => (
+                                <li key={team.id} className="user-management-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                                        {editingTeamId === team.id ? (
+                                            <input
+                                                type="text"
+                                                value={editedName}
+                                                onChange={(e) => setEditedName(e.target.value)}
+                                                className="user-management-input"
+                                                autoFocus
+                                                onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(team.id)}
+                                            />
                                         ) : (
-                                            <>
-                                                <button onClick={() => handleEdit(user)} className="edit-user-button">編集</button>
-                                                <button onClick={() => handleDelete(user)} className="delete-user-button">削除</button>
-                                            </>
+                                            <span className="user-management-name">{team.name}</span>
+                                        )}
+                                        {isEditable && (
+                                            <div className="user-management-actions">
+                                                {editingTeamId === team.id ? (
+                                                    <>
+                                                        <button onClick={() => handleSaveEdit(team.id)} className="save-user-button">保存</button>
+                                                        <button onClick={() => setEditingTeamId(null)} className="cancel-user-button">キャンセル</button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <button onClick={() => handleStartEdit(team)} className="edit-user-button">編集</button>
+                                                        <button
+                                                            onClick={() => window.confirm(`「${team.name}」を削除しますか？`) && onDeleteTeam(team.id)}
+                                                            className="delete-user-button"
+                                                        >
+                                                            削除
+                                                        </button>
+                                                    </>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
+                                    <ul style={{ marginTop: '0.5rem', paddingLeft: '1rem' }}>
+                                        {team.memberEmails.map(email => (
+                                            <li key={email} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.25rem 0' }}>
+                                                <span>{email}</span>
+                                                {isEditable && (
+                                                    <button onClick={() => onRemoveMember(team.id, email)} className="delete-user-button">削除</button>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                    {isEditable && (
+                                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                            <input
+                                                type="email"
+                                                placeholder="member@bloom-firm.com"
+                                                value={memberInputs[team.id] || ''}
+                                                onChange={(e) => setMemberInputs(prev => ({ ...prev, [team.id]: e.target.value }))}
+                                                onKeyDown={(e) => e.key === 'Enter' && handleAddMember(team.id)}
+                                            />
+                                            <button onClick={() => handleAddMember(team.id)} className="submit-button">追加</button>
+                                        </div>
+                                    )}
                                 </li>
                             ))}
                         </ul>
                     )}
                 </div>
-                 <div className="modal-footer">
+                <div className="modal-footer">
                     <button type="button" onClick={onClose} className="cancel-button">閉じる</button>
                 </div>
             </div>
@@ -3044,21 +3071,32 @@ type SectionVisibilityKeys =
 
 
 const App: React.FC = () => {
-  // Authentication state
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [password, setPassword] = useState('');
+  // Authentication state (Google Sign-In, bloom-firm.com domain only)
+  const [currentIdentity, setCurrentIdentity] = useState<GoogleIdentity | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState('');
-  
-  // Multi-user state
+
+  // Multi-user state (the signed-in Google account is always the current user)
   const [users, setUsers] = useState<string[]>([]);
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [isUserCreationModalOpen, setIsUserCreationModalOpen] = useState(false);
-  const [isUserManagementModalOpen, setIsUserManagementModalOpen] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
 
+  // Google Drive storage state
+  const [driveFileId, setDriveFileId] = useState<string | null>(null);
+  const [isLoadingUserData, setIsLoadingUserData] = useState(false);
+  const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
+  const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
+
   // View state
-  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'pipeline'>('personal_kpi');
+  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline'>('personal_kpi');
   const [allUsersData, setAllUsersData] = useState<Record<string, UserData>>({});
+
+  // Teams state
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [teamsDriveFileId, setTeamsDriveFileId] = useState<string | null>(null);
+  const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
+  const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
 
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
@@ -3092,61 +3130,60 @@ const App: React.FC = () => {
     }));
   };
   
-  // Check auth status and load initial data
+  // Restore Google session (if any)
   useEffect(() => {
-    try {
-      const loggedIn = sessionStorage.getItem('isAuthenticated') === 'true';
-      if (loggedIn) {
-        setIsAuthenticated(true);
-      }
-      
-      const savedData = localStorage.getItem('kpiAppData');
-      if (savedData) {
-        const appData: AppData = JSON.parse(savedData);
-        setUsers(appData.users || []);
-        if (appData.users && appData.users.length > 0) {
-          const userToSelect = appData.lastUser && appData.users.includes(appData.lastUser) ? appData.lastUser : appData.users[0];
-          setCurrentUser(userToSelect);
-        }
-      }
-    } catch (error) {
-      console.error("Failed to load data on init", error);
+    const session = getCurrentSession();
+    if (session) {
+      setCurrentIdentity(session.identity);
     }
     setIsInitialized(true);
   }, []);
 
-
-  // Load data for the current user when currentUser changes
+  // The signed-in Google account's email is always the current user; register it
+  // in the local roster automatically (no manual "create user" step anymore).
   useEffect(() => {
-    if (!currentUser) {
-      setCurrentUserData(null);
+    if (!currentIdentity) {
+      setCurrentUser(null);
       return;
     }
-    try {
-      const savedData = localStorage.getItem('kpiAppData');
-      if (savedData) {
-        const appData: AppData = JSON.parse(savedData);
-        const userData = appData.userData?.[currentUser];
-        if (userData) {
-          setCurrentUserData({
-            entries: userData.entries || [],
-            candidates: userData.candidates || [],
-            kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(userData.kpiTargets || {}) },
-            weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(userData.weeklyKpiTargets || {}) },
-            dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(userData.dailyKpiTargets || {}) },
-          });
-        } else {
-           // New user or user with no data, set default structure
-           setCurrentUserData({
-              entries: [],
-              candidates: [],
-              kpiTargets: DEFAULT_KPI_TARGETS,
-              weeklyKpiTargets: DEFAULT_KPI_TARGETS,
-              dailyKpiTargets: DEFAULT_KPI_TARGETS,
-          });
-        }
+    const email = currentIdentity.email;
+    setCurrentUser(email);
+    setUsers(prev => (prev.includes(email) ? prev : [...prev, email]));
+  }, [currentIdentity]);
+
+
+  // Load the signed-in user's data from Google Drive (Drive is the source of truth;
+  // the local cache inside loadOwnData is only a fallback for offline/error cases).
+  useEffect(() => {
+    if (!currentIdentity) {
+      setCurrentUserData(null);
+      setDriveFileId(null);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingUserData(true);
+    (async () => {
+      const email = currentIdentity.email;
+      const result = await loadOwnData<UserData>(email);
+      if (cancelled) return;
+
+      if (result.data) {
+        const d = result.data;
+        setCurrentUserData({
+          entries: d.entries || [],
+          candidates: d.candidates || [],
+          kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.kpiTargets || {}) },
+          weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.weeklyKpiTargets || {}) },
+          dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.dailyKpiTargets || {}) },
+        });
+        setDriveFileId(result.driveFileId);
       } else {
-        // No data file at all, must be a new user
+        // Brand-new signed-in user: offer to claim any pre-Google-login local data.
+        const legacy = readLegacyAppData();
+        const legacyNames = (legacy?.users || []).filter(name => legacy?.userData?.[name]);
+        if (legacyNames.length > 0) {
+          setLegacyMigrationChoices(legacyNames);
+        }
         setCurrentUserData({
           entries: [],
           candidates: [],
@@ -3154,152 +3191,154 @@ const App: React.FC = () => {
           weeklyKpiTargets: DEFAULT_KPI_TARGETS,
           dailyKpiTargets: DEFAULT_KPI_TARGETS,
         });
+        setDriveFileId(null);
       }
-    } catch (error) {
-      console.error(`Failed to load data for user ${currentUser}`, error);
-    }
-  }, [currentUser]);
+      setIsLoadingUserData(false);
+    })();
+    return () => { cancelled = true; };
+  }, [currentIdentity]);
+
+  const handleClaimLegacyData = (legacyName: string | null) => {
+    setLegacyMigrationChoices(null);
+    if (!legacyName) return;
+    const legacy = readLegacyAppData();
+    const legacyUserData = legacy?.userData?.[legacyName];
+    if (!legacyUserData) return;
+    setCurrentUserData({
+      entries: legacyUserData.entries || [],
+      candidates: legacyUserData.candidates || [],
+      kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.kpiTargets || {}) },
+      weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.weeklyKpiTargets || {}) },
+      dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.dailyKpiTargets || {}) },
+    });
+  };
 
 
-  // Load all users' data when switching to all_users view
+  // Load every teammate's Drive-shared data (domain-wide, cross-device) when switching to
+  // the all-users or team-filtered views.
   useEffect(() => {
-    if (view === 'all_users_kpi' && isInitialized) {
-        try {
-            const savedData = localStorage.getItem('kpiAppData');
-            if (savedData) {
-                const appData: AppData = JSON.parse(savedData);
-                setAllUsersData(appData.userData || {});
-            }
-        } catch (error) {
-            console.error("Failed to load all users data", error);
-            setAllUsersData({});
-        }
-    }
-  }, [view, isInitialized]);
+    if ((view !== 'all_users_kpi' && view !== 'team_kpi') || !isInitialized || !currentIdentity) return;
+    let cancelled = false;
+    setIsLoadingAllUsers(true);
+    (async () => {
+      try {
+        const teammates = await loadAllTeammatesData<UserData>();
+        if (cancelled) return;
+        const merged: Record<string, UserData> = {};
+        teammates.forEach(({ email, data }) => {
+          merged[email] = {
+            entries: data.entries || [],
+            candidates: data.candidates || [],
+            kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.kpiTargets || {}) },
+            weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.weeklyKpiTargets || {}) },
+            dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.dailyKpiTargets || {}) },
+          };
+        });
+        setAllUsersData(merged);
+        setUsers(Object.keys(merged));
+      } catch (error) {
+        console.error("Failed to load teammates' data from Drive", error);
+        setAllUsersData({});
+      } finally {
+        if (!cancelled) setIsLoadingAllUsers(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [view, isInitialized, currentIdentity]);
 
-  // Save all data back to localStorage whenever currentUserData changes
+  // Load the shared teams config when opening the team-filtered view or the Teams management modal.
   useEffect(() => {
-    if (!isInitialized || !currentUser || !currentUserData) return;
+    if (!currentIdentity || !isInitialized) return;
+    if (view !== 'team_kpi' && !isTeamsModalOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await loadTeamsConfig<TeamsConfig>();
+        if (cancelled) return;
+        setTeams(result.data?.teams || []);
+        setTeamsDriveFileId(result.driveFileId);
+        setTeamsOwnerEmail(result.ownerEmail);
+      } catch (error) {
+        console.error('Failed to load teams config from Drive', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentIdentity, isInitialized, view, isTeamsModalOpen]);
+
+  const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
+
+  const persistTeams = async (updatedTeams: Team[]) => {
+    setTeams(updatedTeams);
+    if (!currentIdentity) return;
     try {
-      const existingRaw = localStorage.getItem('kpiAppData');
-      const existingData: AppData = existingRaw ? JSON.parse(existingRaw) : { users: [], userData: {}, lastUser: null };
-      
-      const newAppData: AppData = {
-        ...existingData,
-        users: users,
-        lastUser: currentUser,
-        userData: {
-            ...existingData.userData,
-            [currentUser]: currentUserData,
-        }
-      };
-      
-      localStorage.setItem('kpiAppData', JSON.stringify(newAppData));
+      const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams };
+      const newFileId = await saveTeamsConfig(teamsDriveFileId, payload, currentIdentity.email);
+      setTeamsDriveFileId(newFileId);
+      if (!teamsOwnerEmail) setTeamsOwnerEmail(currentIdentity.email);
     } catch (error) {
-      console.error("Failed to save data to localStorage", error);
+      console.error('Failed to save teams config', error);
+      alert('チーム設定の保存に失敗しました。編集できるのは作成者のみです。');
     }
-  }, [currentUserData, users, currentUser, isInitialized]);
+  };
+
+  const handleCreateTeam = (name: string) => {
+    const newTeam: Team = {
+      id: `team-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name,
+      memberEmails: currentIdentity ? [currentIdentity.email] : [],
+      createdBy: currentIdentity?.email || '',
+      createdAt: new Date().toISOString(),
+    };
+    persistTeams([...teams, newTeam]);
+  };
+
+  const handleRenameTeam = (teamId: string, name: string) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, name } : t)));
+  };
+
+  const handleDeleteTeam = (teamId: string) => {
+    persistTeams(teams.filter(t => t.id !== teamId));
+    if (selectedTeamId === teamId) setSelectedTeamId(null);
+  };
+
+  const handleAddTeamMember = (teamId: string, email: string) => {
+    persistTeams(
+      teams.map(t => (t.id === teamId && !t.memberEmails.includes(email) ? { ...t, memberEmails: [...t.memberEmails, email] } : t))
+    );
+  };
+
+  const handleRemoveTeamMember = (teamId: string, email: string) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t)));
+  };
+
+  // Sync the current user's data to Google Drive (debounced) whenever it changes.
+  // Writes through to a local cache immediately so the UI never waits on the network.
+  useEffect(() => {
+    if (!isInitialized || !currentIdentity || !currentUserData || isLoadingUserData) return;
+    saveOwnDataDebounced(currentIdentity.email, driveFileId, currentUserData, (newFileId) => {
+      setDriveFileId(newFileId);
+    });
+  }, [currentUserData, currentIdentity, isInitialized, isLoadingUserData]);
 
 
-    const handleLogin = (e: React.FormEvent) => {
-        e.preventDefault();
-        if (password === 'Bloom0421') {
-            setIsAuthenticated(true);
-            sessionStorage.setItem('isAuthenticated', 'true');
-            setAuthError('');
-        } else {
-            setAuthError('パスワードが正しくありません。');
+    const handleGoogleSignIn = async () => {
+        setIsSigningIn(true);
+        setAuthError('');
+        try {
+            const identity = await signIn();
+            setCurrentIdentity(identity);
+        } catch (error) {
+            setAuthError(error instanceof Error ? error.message : 'ログインに失敗しました。');
+        } finally {
+            setIsSigningIn(false);
         }
     };
 
     const handleLogout = () => {
-        setIsAuthenticated(false);
-        sessionStorage.removeItem('isAuthenticated');
+        signOut();
+        setCurrentIdentity(null);
         setCurrentUser(null);
-        setPassword('');
     };
-
-  const handleCreateUser = (name: string) => {
-    if (users.includes(name)) {
-      alert('このユーザー名は既に使用されています。');
-      return;
-    }
-    const newUsers = [...users, name];
-    setUsers(newUsers);
-    setCurrentUser(name);
-    setIsUserCreationModalOpen(false);
-  };
-  
-    const handleUpdateUser = (oldName: string, newName: string) => {
-        if (!newName.trim()) {
-            alert('ユーザー名は空にできません。');
-            return;
-        }
-        if (oldName !== newName && users.includes(newName)) {
-            alert('このユーザー名は既に使用されています。');
-            return;
-        }
-
-        try {
-            const rawData = localStorage.getItem('kpiAppData');
-            if (!rawData) return;
-            const appData: AppData = JSON.parse(rawData);
-
-            appData.users = appData.users.map(u => u === oldName ? newName : u);
-
-            if (appData.userData[oldName]) {
-                appData.userData[newName] = appData.userData[oldName];
-                delete appData.userData[oldName];
-            }
-
-            if (appData.lastUser === oldName) {
-                appData.lastUser = newName;
-            }
-
-            localStorage.setItem('kpiAppData', JSON.stringify(appData));
-            
-            setUsers(appData.users);
-            if (currentUser === oldName) {
-                setCurrentUser(newName);
-            }
-
-        } catch (error) {
-            console.error('Failed to update user', error);
-        }
-    };
-
-    const handleDeleteUser = (nameToDelete: string) => {
-        try {
-            const rawData = localStorage.getItem('kpiAppData');
-            if (!rawData) return;
-            const appData: AppData = JSON.parse(rawData);
-            
-            appData.users = appData.users.filter(u => u !== nameToDelete);
-            delete appData.userData[nameToDelete];
-            
-            let nextUser = currentUser;
-            if (currentUser === nameToDelete) {
-                nextUser = appData.users.length > 0 ? appData.users[0] : null;
-            }
-
-            appData.lastUser = nextUser;
-            localStorage.setItem('kpiAppData', JSON.stringify(appData));
-
-            setUsers(appData.users);
-            setCurrentUser(nextUser);
-            if(appData.users.length === 0){
-                setIsUserManagementModalOpen(false);
-            }
-
-        } catch (error) {
-            console.error('Failed to delete user', error);
-        }
-    };
-  
-  const handleUserChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const selectedUser = e.target.value;
-      setCurrentUser(selectedUser);
-  };
 
   const handleTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target as { name: KpiKey; value: string };
@@ -3429,12 +3468,21 @@ const App: React.FC = () => {
     };
   }, [entries]);
 
+  const selectedTeamMemberEmails = useMemo(() => {
+    if (!selectedTeamId) return [];
+    return teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
+  }, [teams, selectedTeamId]);
+
   const dayOfWeekReplyRateData = useMemo(() => {
     const days = ['日', '月', '火', '水', '木', '金', '土'];
     const scoutsByDay = Array(7).fill(0);
     const repliesByDay = Array(7).fill(0);
 
-    const allEntries = view === 'all_users_kpi' ? Object.values(allUsersData).flatMap(d => d.entries) : entries;
+    const allEntries = view === 'all_users_kpi'
+      ? Object.values(allUsersData).flatMap(d => d.entries)
+      : view === 'team_kpi'
+      ? Object.entries(allUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
+      : entries;
     if (allEntries.length === 0) return null;
 
     allEntries.forEach(entry => {
@@ -3459,7 +3507,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, allUsersData]);
+  }, [entries, view, allUsersData, selectedTeamMemberEmails]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -3506,64 +3554,72 @@ const App: React.FC = () => {
       return <div className="loading-container">読み込み中...</div>;
   }
 
-  if (!isAuthenticated) {
+  if (!currentIdentity) {
     return (
         <div className="login-container">
             <div className="login-box">
                 <h1>KPI管理くん</h1>
-                <form onSubmit={handleLogin}>
-                    <p className="login-error">{authError}</p>
-                    <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="パスワード"
-                        className="login-input"
-                        autoFocus
-                    />
-                    <button type="submit" className="login-button">ログイン</button>
-                </form>
+                <p className="login-error">{authError}</p>
+                <button
+                    type="button"
+                    className="login-button"
+                    onClick={handleGoogleSignIn}
+                    disabled={isSigningIn}
+                >
+                    {isSigningIn ? 'ログイン中...' : 'Googleでログイン'}
+                </button>
+                <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: '#666' }}>
+                    bloom-firm.com のGoogleアカウントでログインしてください。
+                </p>
             </div>
         </div>
     );
   }
-  
-  if (users.length === 0) {
-      return (
-          <div className="app-container">
-            <div className="no-user-container">
-                <h2>ようこそ！</h2>
-                <p>最初のユーザーを作成して、KPI管理を始めましょう。</p>
-                <button onClick={() => setIsUserCreationModalOpen(true)} className="submit-button">ユーザーを作成</button>
-                {isUserCreationModalOpen && (
-                  <UserCreationModal
-                    onSave={handleCreateUser}
-                    onClose={() => setIsUserCreationModalOpen(false)}
-                  />
-                )}
-            </div>
-          </div>
-      );
-  }
 
+  if (isLoadingUserData) {
+      return <div className="loading-container">Googleドライブからデータを読み込み中...</div>;
+  }
 
   return (
     <div className="app-container">
-      {isUserCreationModalOpen && (
-          <UserCreationModal
-              onSave={handleCreateUser}
-              onClose={() => setIsUserCreationModalOpen(false)}
-          />
+      {legacyMigrationChoices && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="migration-modal-title">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h3 id="migration-modal-title">ローカルデータの引き継ぎ</h3>
+            </div>
+            <div className="modal-body">
+              <p>このブラウザに以前のバージョンのデータが見つかりました。どのユーザーのデータを引き継ぎますか？</p>
+              <ul className="user-management-list">
+                {legacyMigrationChoices.map(name => (
+                  <li key={name} className="user-management-item">
+                    <span className="user-management-name">{name}</span>
+                    <button className="submit-button" onClick={() => handleClaimLegacyData(name)}>これを引き継ぐ</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="cancel-button" onClick={() => handleClaimLegacyData(null)}>
+                引き継がず新規で始める
+              </button>
+            </div>
+          </div>
+        </div>
       )}
-       {isUserManagementModalOpen && (
-          <UserManagementModal
-              users={users}
-              currentUser={currentUser}
-              onClose={() => setIsUserManagementModalOpen(false)}
-              onUpdateUser={handleUpdateUser}
-              onDeleteUser={handleDeleteUser}
-          />
-       )}
+      {isTeamsModalOpen && (
+        <TeamsModal
+          teams={teams}
+          isEditable={isTeamsEditable}
+          ownerEmail={teamsOwnerEmail}
+          onClose={() => setIsTeamsModalOpen(false)}
+          onCreateTeam={handleCreateTeam}
+          onRenameTeam={handleRenameTeam}
+          onDeleteTeam={handleDeleteTeam}
+          onAddMember={handleAddTeamMember}
+          onRemoveMember={handleRemoveTeamMember}
+        />
+      )}
       {selectedDate && (
         <DateEntryModal
           date={selectedDate}
@@ -3579,15 +3635,17 @@ const App: React.FC = () => {
           <div className="view-switcher">
             <button onClick={() => setView('personal_kpi')} disabled={view === 'personal_kpi'}>個人実績</button>
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
+            <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'}>候補者パイプライン</button>
           </div>
           <div className="user-controls">
-            {currentUser && <label htmlFor="user-select" className="sr-only">ユーザー切り替え</label>}
-            <select id="user-select" value={currentUser || ''} onChange={handleUserChange}>
-                {users.map(user => <option key={user} value={user}>{user}</option>)}
-            </select>
-            <button onClick={() => setIsUserCreationModalOpen(true)}>ユーザー追加</button>
-            <button onClick={() => setIsUserManagementModalOpen(true)}>ユーザー管理</button>
+            {currentIdentity && (
+              <span className="sr-only">{currentIdentity.email}</span>
+            )}
+            {currentIdentity && (
+              <span style={{ fontSize: '0.9rem', color: '#333' }}>{currentIdentity.name}</span>
+            )}
+            <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>
           </div>
         </div>
@@ -3954,13 +4012,45 @@ const App: React.FC = () => {
           </>
         )}
         {view === 'all_users_kpi' && (
-          <AllUsersDashboard
-              users={users}
-              allUsersData={allUsersData}
-              dayOfWeekReplyRateData={dayOfWeekReplyRateData}
-              visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
-              toggleSection={toggleSection}
-          />
+          isLoadingAllUsers ? (
+            <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
+          ) : (
+            <AllUsersDashboard
+                users={users}
+                allUsersData={allUsersData}
+                dayOfWeekReplyRateData={dayOfWeekReplyRateData}
+                visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
+                toggleSection={toggleSection}
+            />
+          )
+        )}
+        {view === 'team_kpi' && (
+          <div>
+            <div className="form-group" style={{ maxWidth: '300px', marginBottom: '1.5rem' }}>
+              <label htmlFor="team-select">チームを選択</label>
+              <select
+                id="team-select"
+                value={selectedTeamId || ''}
+                onChange={(e) => setSelectedTeamId(e.target.value || null)}
+              >
+                <option value="">選択してください</option>
+                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            {!selectedTeamId ? (
+              <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
+            ) : isLoadingAllUsers ? (
+              <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
+            ) : (
+              <AllUsersDashboard
+                  users={selectedTeamMemberEmails.filter(email => allUsersData[email])}
+                  allUsersData={allUsersData}
+                  dayOfWeekReplyRateData={dayOfWeekReplyRateData}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
+                  toggleSection={toggleSection}
+              />
+            )}
+          </div>
         )}
         {view === 'pipeline' && (
             <CandidatePipelineView 
