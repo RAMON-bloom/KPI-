@@ -1,11 +1,32 @@
 import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
+const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
 const LEGACY_APPDATA_KEY = 'kpiAppData';
 const SCHEMA_VERSION = 1;
 
 function cacheKey(email: string): string {
   return `${LOCAL_CACHE_PREFIX}${email}`;
+}
+
+function driveFileIdCacheKey(email: string): string {
+  return `${DRIVE_FILE_ID_CACHE_PREFIX}${email}`;
+}
+
+function getCachedDriveFileId(email: string): string | null {
+  try {
+    return localStorage.getItem(driveFileIdCacheKey(email));
+  } catch {
+    return null;
+  }
+}
+
+function setCachedDriveFileId(email: string, fileId: string): void {
+  try {
+    localStorage.setItem(driveFileIdCacheKey(email), fileId);
+  } catch {
+    // ignore
+  }
 }
 
 export function readLocalCache<T = any>(email: string): T | null {
@@ -41,13 +62,28 @@ export interface LoadResult<T> {
   source: 'drive' | 'cache' | 'new';
 }
 
-/** Loads the signed-in user's own data: Drive is the source of truth, local cache is a fallback. */
+/**
+ * Loads the signed-in user's own data: Drive is the source of truth, local cache is a fallback.
+ * Skips the `files.list` search (one Drive round-trip) whenever we already know the file id from
+ * a previous session, falling back to a full search only if that cached id turns out to be stale.
+ */
 export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>> {
   try {
+    const cachedId = getCachedDriveFileId(email);
+    if (cachedId) {
+      try {
+        const content = await readFileContent<T>(cachedId);
+        writeLocalCache(email, content);
+        return { data: content, driveFileId: cachedId, source: 'drive' };
+      } catch (err) {
+        console.warn('Cached Drive file id is stale, falling back to a full search', err);
+      }
+    }
     const existing = await findOwnDataFile();
     if (existing) {
       const content = await readFileContent<T>(existing.id);
       writeLocalCache(email, content);
+      setCachedDriveFileId(email, existing.id);
       return { data: content, driveFileId: existing.id, source: 'drive' };
     }
   } catch (err) {
@@ -62,6 +98,7 @@ export async function createInitialDriveFile(email: string, data: unknown): Prom
   const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
   const fileId = await createOwnDataFile(payload, email);
   writeLocalCache(email, payload);
+  setCachedDriveFileId(email, fileId);
   return fileId;
 }
 
@@ -86,6 +123,7 @@ export function saveOwnDataDebounced(
         await updateFileContent(driveFileId, payload);
       } else {
         const newId = await createOwnDataFile(payload, email);
+        setCachedDriveFileId(email, newId);
         onFileCreated(newId);
       }
     } catch (err) {

@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
 import {
@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, tryRestoreSession, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache } from './services/dataSync';
 
 ChartJS.register(
   CategoryScale,
@@ -3162,8 +3162,10 @@ const App: React.FC = () => {
   }, [currentIdentity]);
 
 
-  // Load the signed-in user's data from Google Drive (Drive is the source of truth;
-  // the local cache inside loadOwnData is only a fallback for offline/error cases).
+  // Load the signed-in user's data. Drive is the source of truth, but if we have a local
+  // cache from a previous session we show it immediately (no loading spinner) and quietly
+  // upgrade to the fresh Drive copy once it arrives — this removes the "wait for Drive"
+  // delay on every normal app open, which is by far the most common case.
   useEffect(() => {
     if (!currentIdentity) {
       setCurrentUserData(null);
@@ -3171,38 +3173,48 @@ const App: React.FC = () => {
       return;
     }
     let cancelled = false;
-    setIsLoadingUserData(true);
+    const email = currentIdentity.email;
+
+    const normalize = (d: Partial<UserData>): UserData => ({
+      entries: d.entries || [],
+      candidates: d.candidates || [],
+      kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.kpiTargets || {}) },
+      weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.weeklyKpiTargets || {}) },
+      dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.dailyKpiTargets || {}) },
+      displayName: d.displayName || currentIdentity.name,
+    });
+
+    const cached = readLocalCache<UserData>(email);
+    if (cached) {
+      setCurrentUserData(normalize(cached));
+      setIsLoadingUserData(false);
+    } else {
+      setIsLoadingUserData(true);
+    }
+
     (async () => {
-      const email = currentIdentity.email;
       const result = await loadOwnData<UserData>(email);
       if (cancelled) return;
 
       if (result.data) {
-        const d = result.data;
-        setCurrentUserData({
-          entries: d.entries || [],
-          candidates: d.candidates || [],
-          kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.kpiTargets || {}) },
-          weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.weeklyKpiTargets || {}) },
-          dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.dailyKpiTargets || {}) },
-          displayName: d.displayName || currentIdentity.name,
-        });
         setDriveFileId(result.driveFileId);
-      } else {
+        const fresh = normalize(result.data);
+        setCurrentUserData(prev => {
+          // If the user already started editing while this fetch was in flight, keep their
+          // edits instead of clobbering them with the (now slightly stale) Drive snapshot.
+          if (cached && prev && JSON.stringify(prev) !== JSON.stringify(normalize(cached))) {
+            return prev;
+          }
+          return fresh;
+        });
+      } else if (!cached) {
         // Brand-new signed-in user: offer to claim any pre-Google-login local data.
         const legacy = readLegacyAppData();
         const legacyNames = (legacy?.users || []).filter(name => legacy?.userData?.[name]);
         if (legacyNames.length > 0) {
           setLegacyMigrationChoices(legacyNames);
         }
-        setCurrentUserData({
-          entries: [],
-          candidates: [],
-          kpiTargets: DEFAULT_KPI_TARGETS,
-          weeklyKpiTargets: DEFAULT_KPI_TARGETS,
-          dailyKpiTargets: DEFAULT_KPI_TARGETS,
-          displayName: currentIdentity.name,
-        });
+        setCurrentUserData(normalize({}));
         setDriveFileId(null);
       }
       setIsLoadingUserData(false);
@@ -3231,38 +3243,42 @@ const App: React.FC = () => {
   };
 
 
-  // Load every teammate's Drive-shared data (domain-wide, cross-device) when switching to
-  // the all-users or team-filtered views.
+  // Load every teammate's Drive-shared data (domain-wide, cross-device). This is fetched once
+  // per sign-in session the first time either view is opened, not on every tab switch — flipping
+  // back and forth between "全ユーザー"/"チーム別" and other tabs reuses what's already loaded.
+  // Use the "更新" button in those views to force a fresh pull from Drive.
+  const hasFetchedAllUsersRef = useRef(false);
+
+  const fetchAllUsersData = useCallback(async () => {
+    setIsLoadingAllUsers(true);
+    try {
+      const teammates = await loadAllTeammatesData<UserData>();
+      const merged: Record<string, UserData> = {};
+      teammates.forEach(({ email, data }) => {
+        merged[email] = {
+          entries: data.entries || [],
+          candidates: data.candidates || [],
+          kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.kpiTargets || {}) },
+          weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.weeklyKpiTargets || {}) },
+          dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.dailyKpiTargets || {}) },
+          displayName: data.displayName,
+        };
+      });
+      setAllUsersData(merged);
+      setUsers(Object.keys(merged));
+    } catch (error) {
+      console.error("Failed to load teammates' data from Drive", error);
+    } finally {
+      setIsLoadingAllUsers(false);
+    }
+  }, []);
+
   useEffect(() => {
     if ((view !== 'all_users_kpi' && view !== 'team_kpi') || !isInitialized || !currentIdentity) return;
-    let cancelled = false;
-    setIsLoadingAllUsers(true);
-    (async () => {
-      try {
-        const teammates = await loadAllTeammatesData<UserData>();
-        if (cancelled) return;
-        const merged: Record<string, UserData> = {};
-        teammates.forEach(({ email, data }) => {
-          merged[email] = {
-            entries: data.entries || [],
-            candidates: data.candidates || [],
-            kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.kpiTargets || {}) },
-            weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.weeklyKpiTargets || {}) },
-            dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.dailyKpiTargets || {}) },
-            displayName: data.displayName,
-          };
-        });
-        setAllUsersData(merged);
-        setUsers(Object.keys(merged));
-      } catch (error) {
-        console.error("Failed to load teammates' data from Drive", error);
-        setAllUsersData({});
-      } finally {
-        if (!cancelled) setIsLoadingAllUsers(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [view, isInitialized, currentIdentity]);
+    if (hasFetchedAllUsersRef.current) return;
+    hasFetchedAllUsersRef.current = true;
+    fetchAllUsersData();
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData]);
 
   // Load the shared teams config when opening the team-filtered view or the Teams management modal.
   useEffect(() => {
@@ -4081,27 +4097,35 @@ const App: React.FC = () => {
           isLoadingAllUsers ? (
             <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
           ) : (
-            <AllUsersDashboard
-                users={users}
-                allUsersData={displayedAllUsersData}
-                dayOfWeekReplyRateData={dayOfWeekReplyRateData}
-                visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
-                toggleSection={toggleSection}
-            />
+            <>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.5rem' }}>
+                <button onClick={() => fetchAllUsersData()}>更新</button>
+              </div>
+              <AllUsersDashboard
+                  users={users}
+                  allUsersData={displayedAllUsersData}
+                  dayOfWeekReplyRateData={dayOfWeekReplyRateData}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
+                  toggleSection={toggleSection}
+              />
+            </>
           )
         )}
         {view === 'team_kpi' && (
           <div>
-            <div className="form-group" style={{ maxWidth: '300px', marginBottom: '1.5rem' }}>
-              <label htmlFor="team-select">チームを選択</label>
-              <select
-                id="team-select"
-                value={selectedTeamId || ''}
-                onChange={(e) => setSelectedTeamId(e.target.value || null)}
-              >
-                <option value="">選択してください</option>
-                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '1.5rem' }}>
+              <div className="form-group" style={{ maxWidth: '300px', marginBottom: 0 }}>
+                <label htmlFor="team-select">チームを選択</label>
+                <select
+                  id="team-select"
+                  value={selectedTeamId || ''}
+                  onChange={(e) => setSelectedTeamId(e.target.value || null)}
+                >
+                  <option value="">選択してください</option>
+                  {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <button onClick={() => fetchAllUsersData()}>更新</button>
             </div>
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
