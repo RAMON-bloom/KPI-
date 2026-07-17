@@ -1,9 +1,28 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
 const LEGACY_APPDATA_KEY = 'kpiAppData';
+const MEDIA_CONFIG_CACHE_KEY = 'kpiMediaConfigCache';
 const SCHEMA_VERSION = 1;
+
+/** The shared media-config cache is not user-specific — everyone reads the same list. */
+export function readMediaConfigCache<T = any>(): T | null {
+  try {
+    const raw = localStorage.getItem(MEDIA_CONFIG_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMediaConfigCache(data: unknown): void {
+  try {
+    localStorage.setItem(MEDIA_CONFIG_CACHE_KEY, JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
 
 function cacheKey(email: string): string {
   return `${LOCAL_CACHE_PREFIX}${email}`;
@@ -184,4 +203,37 @@ export async function saveTeamsConfig(
     return driveFileId;
   }
   return createTeamsConfigFile(data, creatorEmail);
+}
+
+export interface MediaConfigResult<T> {
+  data: T | null;
+  driveFileId: string | null;
+  ownerEmail: string | null;
+}
+
+/** Loads the single shared media-config file (the scouting media list), if one exists yet. */
+export async function loadMediaConfig<T = any>(): Promise<MediaConfigResult<T>> {
+  const existing = await findMediaConfigFile();
+  if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
+  const content = await readFileContent<T>(existing.id);
+  writeMediaConfigCache(content);
+  return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
+}
+
+/**
+ * Creates the shared media-config file the first time the app runs after this feature
+ * shipped, or updates it if it already exists. Same drive.file-scope constraint as teams:
+ * only the original creator's browser can successfully update it afterwards.
+ */
+export async function saveMediaConfig(
+  driveFileId: string | null,
+  data: unknown,
+  creatorEmail: string
+): Promise<string> {
+  writeMediaConfigCache(data);
+  if (driveFileId) {
+    await updateFileContent(driveFileId, data);
+    return driveFileId;
+  }
+  return createMediaConfigFile(data, creatorEmail);
 }

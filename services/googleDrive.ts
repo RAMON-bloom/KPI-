@@ -2,6 +2,7 @@ import { getCurrentSession, refreshTokenSilently } from './googleAuth';
 
 const DATA_FILE_NAME = 'kpi-manager-data.json';
 const TEAMS_FILE_NAME = 'kpi-manager-teams.json';
+const MEDIA_FILE_NAME = 'kpi-manager-media.json';
 const APP_TAG = 'kpi-manager-v1';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
 
@@ -124,6 +125,26 @@ export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
 /** Creates the shared teams-config file; the creator becomes the only one who can edit it (drive.file scope). */
 export async function createTeamsConfigFile(content: unknown, creatorEmail: string): Promise<string> {
   const fileId = await createJsonFile(TEAMS_FILE_NAME, { app: APP_TAG, kind: 'teams-config' }, { ownerEmail: creatorEmail }, content);
+  await grantDomainPermission(fileId, 'writer');
+  return fileId;
+}
+
+/** Finds the single shared media-config file (the list of scouting media sources), if it exists. */
+export async function findMediaConfigFile(): Promise<DriveFileRef | null> {
+  const q = `name='${MEDIA_FILE_NAME}' and appProperties has { key='kind' and value='media-config' } and trashed=false`;
+  const res = await authorizedFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive`
+  );
+  if (!res.ok) throw new Error('媒体設定ファイルの検索に失敗しました。');
+  const data = await res.json();
+  const file = data.files?.[0];
+  if (!file) return null;
+  return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
+}
+
+/** Creates the shared media-config file; the creator becomes the only one who can edit it (drive.file scope). */
+export async function createMediaConfigFile(content: unknown, creatorEmail: string): Promise<string> {
+  const fileId = await createJsonFile(MEDIA_FILE_NAME, { app: APP_TAG, kind: 'media-config' }, { ownerEmail: creatorEmail }, content);
   await grantDomainPermission(fileId, 'writer');
   return fileId;
 }

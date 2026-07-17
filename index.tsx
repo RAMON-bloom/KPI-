@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, tryRestoreSession, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 
 ChartJS.register(
   CategoryScale,
@@ -40,52 +40,71 @@ const GENERAL_KPIS = {
   placements: { label: '内定承諾数', target: 3 },
 };
 
-const MEDIA_SOURCES = ['RDS', 'Doda', 'Liiga', 'BIZ', 'Linkedin', 'AMBI', 'Green'] as const;
+// A scouting media source (e.g. "RDS", "Doda"). User-editable and persisted to Google
+// Drive (see services/dataSync.ts loadMediaConfig/saveMediaConfig). `id` is generated once
+// and never changes, so renaming a media never breaks its historical KPI data; `name` is the
+// editable display label.
+interface MediaEntry {
+  id: string;
+  name: string;
+  isArchived: boolean;
+  createdAt: string;
+}
 
-type MediaSource = typeof MEDIA_SOURCES[number];
-type MediaKpiKey = `${Lowercase<MediaSource>}_scoutsSent` | `${Lowercase<MediaSource>}_scoutReplies` | `${Lowercase<MediaSource>}_effectiveReplies` | `${Lowercase<MediaSource>}_documentsCollected` | `${Lowercase<MediaSource>}_effectiveDocumentsCollected` | `${Lowercase<MediaSource>}_initialInterviews` | `${Lowercase<MediaSource>}_effectiveInitialInterviews`;
+interface MediaConfig {
+  schemaVersion: number;
+  media: MediaEntry[];
+}
 
-// FIX: Correctly type MEDIA_KPIS to ensure KpiKey is a union of string literals, not a broad string type.
-const MEDIA_KPIS = MEDIA_SOURCES.reduce((acc, source) => {
-  const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
-  acc[`${sourceKey}_scoutsSent`] = { label: `${source} スカウト数` };
-  acc[`${sourceKey}_scoutReplies`] = { label: `${source} スカウト返信数` };
-  acc[`${sourceKey}_effectiveReplies`] = { label: `${source} 有効返信数` };
-  acc[`${sourceKey}_documentsCollected`] = { label: `${source} 書類回収数` };
-  acc[`${sourceKey}_effectiveDocumentsCollected`] = { label: `${source} 有効書類回収数` };
-  acc[`${sourceKey}_initialInterviews`] = { label: `${source} 初回面談数` };
-  acc[`${sourceKey}_effectiveInitialInterviews`] = { label: `${source} 初回有効面談数` };
-  return acc;
-}, {} as Record<MediaKpiKey, { label: string }>);
+// Seeded once into the shared Drive media-config file the first time it's created, so
+// existing installs keep working with zero migration: these ids match the exact lowercase
+// prefixes ("rds_scoutsSent" etc.) that historical KPI data already uses.
+const SEED_MEDIA: MediaEntry[] = [
+  { id: 'rds', name: 'RDS', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'doda', name: 'Doda', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'liiga', name: 'Liiga', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'biz', name: 'BIZ', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'linkedin', name: 'Linkedin', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'ambi', name: 'AMBI', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+  { id: 'green', name: 'Green', isArchived: false, createdAt: '2024-01-01T00:00:00.000Z' },
+];
 
+const MEDIA_KPI_SUFFIXES = [
+  'scoutsSent', 'scoutReplies', 'effectiveReplies',
+  'documentsCollected', 'effectiveDocumentsCollected',
+  'initialInterviews', 'effectiveInitialInterviews',
+] as const;
 
-const ALL_KPI_DEFINITIONS = { ...GENERAL_KPIS, ...MEDIA_KPIS };
-type KpiKey = keyof typeof ALL_KPI_DEFINITIONS;
+type KpiKey = string;
 
+/** Every KPI key that exists for a given media list: general KPIs plus 7 per media source. */
+const buildAllKpiKeys = (media: MediaEntry[]): KpiKey[] => [
+  ...Object.keys(GENERAL_KPIS),
+  ...media.flatMap(m => MEDIA_KPI_SUFFIXES.map(suffix => `${m.id}_${suffix}`)),
+];
 
-const DEFAULT_KPI_TARGETS = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-    const kpiKey = key as KpiKey;
-    if (kpiKey in GENERAL_KPIS) {
-        acc[kpiKey] = GENERAL_KPIS[kpiKey as keyof typeof GENERAL_KPIS].target;
-    } else {
-        if (kpiKey.endsWith('_scoutsSent')) {
-            acc[kpiKey] = 200;
-        } else if (kpiKey.endsWith('_scoutReplies')) {
-            acc[kpiKey] = 20;
-        } else if (kpiKey.endsWith('_effectiveReplies')) {
-            acc[kpiKey] = 5;
-        } else if (kpiKey.endsWith('_documentsCollected')) {
-            acc[kpiKey] = 6;
-        } else if (kpiKey.endsWith('_effectiveDocumentsCollected')) {
-            acc[kpiKey] = 4;
-        } else if (kpiKey.endsWith('_initialInterviews')) {
-            acc[kpiKey] = 8;
-        } else if (kpiKey.endsWith('_effectiveInitialInterviews')) {
-            acc[kpiKey] = 7;
+const buildDefaultKpiTargets = (media: MediaEntry[]): Record<KpiKey, number> => {
+    return buildAllKpiKeys(media).reduce((acc, key) => {
+        if (key in GENERAL_KPIS) {
+            acc[key] = GENERAL_KPIS[key as keyof typeof GENERAL_KPIS].target;
+        } else if (key.endsWith('_scoutsSent')) {
+            acc[key] = 200;
+        } else if (key.endsWith('_scoutReplies')) {
+            acc[key] = 20;
+        } else if (key.endsWith('_effectiveReplies')) {
+            acc[key] = 5;
+        } else if (key.endsWith('_documentsCollected')) {
+            acc[key] = 6;
+        } else if (key.endsWith('_effectiveDocumentsCollected')) {
+            acc[key] = 4;
+        } else if (key.endsWith('_initialInterviews')) {
+            acc[key] = 8;
+        } else if (key.endsWith('_effectiveInitialInterviews')) {
+            acc[key] = 7;
         }
-    }
-    return acc;
-}, {} as Record<KpiKey, number>);
+        return acc;
+    }, {} as Record<KpiKey, number>);
+};
 
 
 interface KpiEntry {
@@ -96,20 +115,21 @@ interface KpiEntry {
 
 type KpiTotals = { [key in KpiKey]: number };
 
-const calculateMonthlyTotals = (entries: KpiEntry[]): KpiTotals => {
+const calculateMonthlyTotals = (entries: KpiEntry[], allMedia: MediaEntry[]): KpiTotals => {
     const now = new Date();
     const currentMonth = now.getMonth();
     const currentYear = now.getFullYear();
+    const allKeys = buildAllKpiKeys(allMedia);
 
-    const totals = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-      acc[key as KpiKey] = 0;
+    const totals = allKeys.reduce((acc, key) => {
+      acc[key] = 0;
       return acc;
     }, {} as KpiTotals);
 
     entries.forEach(entry => {
       const entryDate = new Date(entry.date);
       if (entryDate.getMonth() === currentMonth && entryDate.getFullYear() === currentYear) {
-        (Object.keys(ALL_KPI_DEFINITIONS) as KpiKey[]).forEach(key => {
+        allKeys.forEach(key => {
           totals[key] += entry.values[key] || 0;
         });
       }
@@ -121,7 +141,8 @@ const calculateMonthlyTotals = (entries: KpiEntry[]): KpiTotals => {
 
 // Types for Weekly Summary
 interface WeeklyMediaStats {
-  source: MediaSource;
+  source: string; // display name
+  id: string; // stable media id, used to look up KPI keys
   scoutsSent: number;
   scoutReplies: number;
   effectiveReplies: number;
@@ -157,7 +178,7 @@ interface Candidate {
   currentSalary: number; // in JPY万
   currentCompany: string;
   education: string;
-  source: MediaSource | 'Other' | '';
+  source: string; // a MediaEntry.id, 'Other', or ''
   usingOtherAgents: boolean;
   applications: CompanyApplication[];
   summary: string;
@@ -265,36 +286,37 @@ const CurrentMonthPerformanceChart: React.FC<{ data: any }> = ({ data }) => {
     );
 };
 
-const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[] }> = ({ entries }) => {
+const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] }> = ({ entries, allMedia }) => {
     const { chartData, maxReplyRate } = useMemo(() => {
         const monthlyData: Record<string, KpiTotals> = {};
+        const allKeys = buildAllKpiKeys(allMedia);
 
         entries.forEach(entry => {
             const month = entry.date.substring(0, 7); // YYYY-MM
             if (!monthlyData[month]) {
-                monthlyData[month] = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-                  acc[key as KpiKey] = 0;
+                monthlyData[month] = allKeys.reduce((acc, key) => {
+                  acc[key] = 0;
                   return acc;
                 }, {} as KpiTotals);
             }
-            
+
             (Object.keys(entry.values) as KpiKey[]).forEach(key => {
                 monthlyData[month][key] += entry.values[key] || 0;
             });
         });
 
         const sortedMonths = Object.keys(monthlyData).sort();
-        
+
         const labels = sortedMonths;
-        const scoutRepliesData = sortedMonths.map(month => getTotalFromLump(monthlyData[month], '_scoutReplies'));
+        const scoutRepliesData = sortedMonths.map(month => getTotalFromLump(monthlyData[month], '_scoutReplies', allMedia));
         const docScreeningPassedData = sortedMonths.map(month => monthlyData[month].documentScreeningPassed || 0);
         const firstInterviewPassedData = sortedMonths.map(month => monthlyData[month].firstInterviewPassed || 0);
         const secondInterviewPassedData = sortedMonths.map(month => monthlyData[month].secondInterviewPassed || 0);
         const offersExtendedData = sortedMonths.map(month => monthlyData[month].offersExtended || 0);
         const placementsData = sortedMonths.map(month => monthlyData[month].placements || 0);
         const replyRateData = sortedMonths.map(month => {
-            const scoutsSent = getTotalFromLump(monthlyData[month], '_scoutsSent');
-            const scoutReplies = getTotalFromLump(monthlyData[month], '_scoutReplies');
+            const scoutsSent = getTotalFromLump(monthlyData[month], '_scoutsSent', allMedia);
+            const scoutReplies = getTotalFromLump(monthlyData[month], '_scoutReplies', allMedia);
             return scoutsSent > 0 ? (scoutReplies / scoutsSent) * 100 : 0;
         });
 
@@ -400,8 +422,8 @@ const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[] }> = ({ ent
             ],
         };
         return { chartData: data, maxReplyRate: currentMaxReplyRate };
-    }, [entries]);
-    
+    }, [entries, allMedia]);
+
     const options = useMemo(() => ({
         responsive: true,
         maintainAspectRatio: false,
@@ -563,11 +585,11 @@ const WeeklySummary: React.FC<{
             </tr>
           </thead>
           <tbody>
-            {data.mediaStats.map(({ source, scoutsSent, scoutReplies, effectiveReplies, documentsCollected, effectiveDocumentsCollected, initialInterviews, effectiveInitialInterviews }) => {
+            {data.mediaStats.map(({ source, id, scoutsSent, scoutReplies, effectiveReplies, documentsCollected, effectiveDocumentsCollected, initialInterviews, effectiveInitialInterviews }) => {
               const replyRate = scoutsSent > 0 ? (scoutReplies / scoutsSent) * 100 : 0;
               const effectiveReplyRate = scoutReplies > 0 ? (effectiveReplies / scoutReplies) * 100 : 0;
-              const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
-              
+              const sourceKey = id;
+
               const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
               const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
               const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
@@ -648,11 +670,11 @@ const WeeklySummary: React.FC<{
 
 
 const MediaKpiCard: React.FC<{
-    source: MediaSource;
+    source: MediaEntry;
     monthlyTotals: KpiTotals;
     kpiTargets: Record<KpiKey, number>;
 }> = ({ source, monthlyTotals, kpiTargets }) => {
-    const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+    const sourceKey = source.id;
     const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
     const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
     const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
@@ -689,8 +711,8 @@ const MediaKpiCard: React.FC<{
     const effectiveInterviewsProgress = effectiveInterviewsTarget > 0 ? Math.min((effectiveInitialInterviews / effectiveInterviewsTarget) * 100, 100) : 0;
 
     return (
-        <div className="media-kpi-card" aria-label={`${source}の進捗`}>
-            <h3>{source}</h3>
+        <div className="media-kpi-card" aria-label={`${source.name}の進捗`}>
+            <h3>{source.name}</h3>
              <div className="reply-rate-group">
                 <div className="reply-rate-section">
                     <span className="reply-rate-value" aria-label={`返信率 ${replyRate.toFixed(1)}パーセント`}>{replyRate.toFixed(1)}%</span>
@@ -772,9 +794,10 @@ const MediaKpiCard: React.FC<{
 const DateEntryModal: React.FC<{
   date: string;
   initialValues: KpiTotals | null;
+  activeMedia: MediaEntry[];
   onSave: (date: string, values: KpiTotals) => void;
   onClose: () => void;
-}> = ({ date, initialValues, onSave, onClose }) => {
+}> = ({ date, initialValues, activeMedia, onSave, onClose }) => {
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
@@ -789,23 +812,27 @@ const DateEntryModal: React.FC<{
     const { name, value } = e.target as { name: KpiKey; value: string };
     setEntryValues(prev => ({ ...prev, [name]: value === '' ? undefined : Number(value) }));
   };
-  
+
+  // Only zero/overwrite general + currently-active-media fields; any archived media's
+  // historical value for this day (present in initialValues) is left untouched since
+  // there's no input for it in this form anymore.
+  const buildEditableKeys = (): KpiKey[] => [
+    ...Object.keys(GENERAL_KPIS),
+    ...activeMedia.flatMap(media => MEDIA_KPI_SUFFIXES.map(suffix => `${media.id}_${suffix}`)),
+  ];
+
   const handleClear = () => {
       if (window.confirm('この日の実績をすべてクリアします。よろしいですか？')) {
-          const emptyValues = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-              acc[key as KpiKey] = 0;
-              return acc;
-          }, {} as KpiTotals);
+          const emptyValues: KpiTotals = { ...(initialValues || {}) };
+          buildEditableKeys().forEach(key => { emptyValues[key] = 0; });
           onSave(date, emptyValues);
       }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const valuesWithDefaults = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-      acc[key as KpiKey] = entryValues[key as KpiKey] || 0;
-      return acc;
-    }, {} as KpiTotals);
+    const valuesWithDefaults: KpiTotals = { ...(initialValues || {}) };
+    buildEditableKeys().forEach(key => { valuesWithDefaults[key] = entryValues[key] || 0; });
     onSave(date, valuesWithDefaults);
   };
 
@@ -843,8 +870,8 @@ const DateEntryModal: React.FC<{
           <div className="media-kpi-section">
             <h3 className="sub-section-title">媒体別実績</h3>
             <div className="media-kpi-grid">
-              {MEDIA_SOURCES.map(source => {
-                const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+              {activeMedia.map(source => {
+                const sourceKey = source.id;
                 const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
                 const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
                 const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
@@ -853,8 +880,8 @@ const DateEntryModal: React.FC<{
                 const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
                 const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
                 return (
-                  <fieldset key={source} className="media-fieldset">
-                    <legend>{source}</legend>
+                  <fieldset key={source.id} className="media-fieldset">
+                    <legend>{source.name}</legend>
                     <div className="inputs-wrapper">
                       <div className="form-group">
                         <label htmlFor={`modal-${scoutsKey}`}>スカウト数</label>
@@ -866,7 +893,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} スカウト数を入力`}
+                          aria-label={`${source.name} スカウト数を入力`}
                         />
                       </div>
                       <div className="form-group">
@@ -879,7 +906,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} スカウト返信数を入力`}
+                          aria-label={`${source.name} スカウト返信数を入力`}
                         />
                       </div>
                       <div className="form-group">
@@ -892,7 +919,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} 有効返信数を入力`}
+                          aria-label={`${source.name} 有効返信数を入力`}
                         />
                       </div>
                       <div className="form-group">
@@ -905,7 +932,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} 書類回収数を入力`}
+                          aria-label={`${source.name} 書類回収数を入力`}
                         />
                       </div>
                       <div className="form-group">
@@ -918,7 +945,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} 有効書類回収数を入力`}
+                          aria-label={`${source.name} 有効書類回収数を入力`}
                         />
                       </div>
                        <div className="form-group">
@@ -931,7 +958,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} 初回面談数を入力`}
+                          aria-label={`${source.name} 初回面談数を入力`}
                         />
                       </div>
                       <div className="form-group">
@@ -944,7 +971,7 @@ const DateEntryModal: React.FC<{
                           onChange={handleInputChange}
                           min="0"
                           placeholder="0"
-                          aria-label={`${source} 初回有効面談数を入力`}
+                          aria-label={`${source.name} 初回有効面談数を入力`}
                         />
                       </div>
                     </div>
@@ -965,11 +992,10 @@ const DateEntryModal: React.FC<{
 };
 
 
-const getTotalFromLump = (lump: { [key: string]: number | undefined }, kpiSuffix: string): number => {
+const getTotalFromLump = (lump: { [key: string]: number | undefined }, kpiSuffix: string, allMedia: MediaEntry[]): number => {
     if (!lump) return 0;
-    return MEDIA_SOURCES.reduce((acc, source) => {
-        const sourceKey = source.toLowerCase();
-        const kpiKey = `${sourceKey}${kpiSuffix}`;
+    return allMedia.reduce((acc, media) => {
+        const kpiKey = `${media.id}${kpiSuffix}`;
         return acc + (lump[kpiKey] || 0);
     }, 0);
 };
@@ -977,10 +1003,11 @@ const getTotalFromLump = (lump: { [key: string]: number | undefined }, kpiSuffix
 const CalendarView: React.FC<{
   viewDate: Date;
   entriesByDate: Map<string, KpiTotals>;
+  allMedia: MediaEntry[];
   onDayClick: (date: string) => void;
   onPrevMonth: () => void;
   onNextMonth: () => void;
-}> = ({ viewDate, entriesByDate, onDayClick, onPrevMonth, onNextMonth }) => {
+}> = ({ viewDate, entriesByDate, allMedia, onDayClick, onPrevMonth, onNextMonth }) => {
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth();
   
@@ -1005,11 +1032,11 @@ const CalendarView: React.FC<{
     const dayClasses = `calendar-day ${isToday ? 'today' : ''} ${hasData ? 'has-data' : ''}`;
     
     const summaryKpis = {
-      interviewed: data ? getTotalFromLump(data, '_initialInterviews') : 0,
-      effectiveInterviewed: data ? getTotalFromLump(data, '_effectiveInitialInterviews') : 0,
+      interviewed: data ? getTotalFromLump(data, '_initialInterviews', allMedia) : 0,
+      effectiveInterviewed: data ? getTotalFromLump(data, '_effectiveInitialInterviews', allMedia) : 0,
       submitted: data?.candidatesSubmitted || 0,
-      collected: data ? getTotalFromLump(data, '_documentsCollected') : 0,
-      effectiveCollected: data ? getTotalFromLump(data, '_effectiveDocumentsCollected') : 0,
+      collected: data ? getTotalFromLump(data, '_documentsCollected', allMedia) : 0,
+      effectiveCollected: data ? getTotalFromLump(data, '_effectiveDocumentsCollected', allMedia) : 0,
       placed: data?.placements || 0,
     };
 
@@ -1225,13 +1252,146 @@ const TeamsModal: React.FC<{
     );
 };
 
+const MediaModal: React.FC<{
+    allMedia: MediaEntry[];
+    isEditable: boolean;
+    ownerEmail: string | null;
+    onClose: () => void;
+    onCreateMedia: (name: string) => void;
+    onRenameMedia: (id: string, name: string) => void;
+    onArchiveMedia: (id: string) => void;
+    onUnarchiveMedia: (id: string) => void;
+}> = ({ allMedia, isEditable, ownerEmail, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia }) => {
+    const [newMediaName, setNewMediaName] = useState('');
+    const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
+    const [editedName, setEditedName] = useState('');
+
+    const activeMedia = allMedia.filter(m => !m.isArchived);
+    const archivedMedia = allMedia.filter(m => m.isArchived);
+
+    const handleCreate = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newMediaName.trim()) return;
+        onCreateMedia(newMediaName.trim());
+        setNewMediaName('');
+    };
+
+    const handleStartEdit = (media: MediaEntry) => {
+        setEditingMediaId(media.id);
+        setEditedName(media.name);
+    };
+
+    const handleSaveEdit = (id: string) => {
+        if (editedName.trim()) onRenameMedia(id, editedName.trim());
+        setEditingMediaId(null);
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="media-modal-title">
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h3 id="media-modal-title">媒体管理</h3>
+                    <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+                </div>
+                <div className="modal-body">
+                    {!isEditable && (
+                        <p className="no-data-message">
+                            媒体設定の編集は作成者（{ownerEmail || '不明'}）のみ可能です。閲覧のみできます。
+                        </p>
+                    )}
+                    {isEditable && (
+                        <form onSubmit={handleCreate} className="form-group" style={{ marginBottom: '1rem' }}>
+                            <label htmlFor="new-media-name">新しい媒体名</label>
+                            <input
+                                id="new-media-name"
+                                type="text"
+                                value={newMediaName}
+                                onChange={(e) => setNewMediaName(e.target.value)}
+                                placeholder="例: リクナビNEXT"
+                            />
+                            <button type="submit" className="submit-button" disabled={!newMediaName.trim()} style={{ marginTop: '0.5rem' }}>
+                                媒体を追加
+                            </button>
+                        </form>
+                    )}
+
+                    <h4 className="sub-section-title">利用中の媒体</h4>
+                    {activeMedia.length === 0 ? (
+                        <p className="no-data-message">媒体がありません。</p>
+                    ) : (
+                        <ul className="user-management-list">
+                            {activeMedia.map(media => (
+                                <li key={media.id} className="user-management-item">
+                                    {editingMediaId === media.id ? (
+                                        <input
+                                            type="text"
+                                            value={editedName}
+                                            onChange={(e) => setEditedName(e.target.value)}
+                                            className="user-management-input"
+                                            autoFocus
+                                            onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(media.id)}
+                                        />
+                                    ) : (
+                                        <span className="user-management-name">{media.name}</span>
+                                    )}
+                                    {isEditable && (
+                                        <div className="user-management-actions">
+                                            {editingMediaId === media.id ? (
+                                                <>
+                                                    <button onClick={() => handleSaveEdit(media.id)} className="save-user-button">保存</button>
+                                                    <button onClick={() => setEditingMediaId(null)} className="cancel-user-button">キャンセル</button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <button onClick={() => handleStartEdit(media)} className="edit-user-button">改称</button>
+                                                    <button
+                                                        onClick={() => window.confirm(`「${media.name}」をアーカイブします。過去の実績データは保持されますが、入力フォームには表示されなくなります。よろしいですか？`) && onArchiveMedia(media.id)}
+                                                        className="delete-user-button"
+                                                    >
+                                                        アーカイブ
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+
+                    {archivedMedia.length > 0 && (
+                        <>
+                            <h4 className="sub-section-title">アーカイブ済みの媒体</h4>
+                            <ul className="user-management-list">
+                                {archivedMedia.map(media => (
+                                    <li key={media.id} className="user-management-item">
+                                        <span className="user-management-name">{media.name}</span>
+                                        {isEditable && (
+                                            <div className="user-management-actions">
+                                                <button onClick={() => onUnarchiveMedia(media.id)} className="edit-user-button">復元</button>
+                                            </div>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        </>
+                    )}
+                </div>
+                <div className="modal-footer">
+                    <button type="button" onClick={onClose} className="cancel-button">閉じる</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 const DailyProgressCard: React.FC<{
-    source: MediaSource;
+    source: MediaEntry;
     todayTotals: KpiTotals;
     dailyKpiTargets: Record<KpiKey, number>;
 }> = ({ source, todayTotals, dailyKpiTargets }) => {
-    const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+    const sourceKey = source.id;
     const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
     const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
     const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
@@ -1252,7 +1412,7 @@ const DailyProgressCard: React.FC<{
 
     return (
         <div className="daily-progress-card">
-            <h3>{source}</h3>
+            <h3>{source.name}</h3>
             <div className="reply-rate-group">
                 <div className="reply-rate-section" style={{ borderBottom: 'none' }}>
                     <span className="reply-rate-value" style={{ fontSize: '1.75rem' }}>{replyRate.toFixed(1)}%</span>
@@ -1295,15 +1455,16 @@ const DailyProgressCard: React.FC<{
 };
 
 const DailyProgress: React.FC<{
+    activeMedia: MediaEntry[];
     todayTotals: KpiTotals;
     dailyKpiTargets: Record<KpiKey, number>;
-}> = ({ todayTotals, dailyKpiTargets }) => {
-    const hasTargets = MEDIA_SOURCES.some(source => {
-         const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+}> = ({ activeMedia, todayTotals, dailyKpiTargets }) => {
+    const hasTargets = activeMedia.some(source => {
+         const sourceKey = source.id;
          const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
          const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
          const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
-         return (dailyKpiTargets[scoutsKey] || 0) > 0 
+         return (dailyKpiTargets[scoutsKey] || 0) > 0
             || (dailyKpiTargets[repliesKey] || 0) > 0
             || (dailyKpiTargets[effectiveRepliesKey] || 0) > 0;
     });
@@ -1314,9 +1475,9 @@ const DailyProgress: React.FC<{
 
     return (
         <div className="daily-progress-container">
-            {MEDIA_SOURCES.map(source => (
+            {activeMedia.map(source => (
                 <DailyProgressCard
-                    key={source}
+                    key={source.id}
                     source={source}
                     todayTotals={todayTotals}
                     dailyKpiTargets={dailyKpiTargets}
@@ -1331,7 +1492,9 @@ const CandidateModal: React.FC<{
     onSave: (candidate: Candidate) => void;
     onClose: () => void;
     initialData?: Candidate | null;
-}> = ({ onSave, onClose, initialData }) => {
+    allMedia: MediaEntry[];
+}> = ({ onSave, onClose, initialData, allMedia }) => {
+    const activeMedia = allMedia.filter(m => !m.isArchived);
     const defaultCandidate: Candidate = {
         id: initialData?.id || `candidate_${Date.now()}`,
         name: '',
@@ -1716,7 +1879,12 @@ const CandidateModal: React.FC<{
                     <label htmlFor="source">集客媒体</label>
                     <select id="source" name="source" value={candidate.source} onChange={handleChange}>
                         <option value="">選択してください</option>
-                        {MEDIA_SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+                        {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                        {candidate.source && candidate.source !== 'Other' && !activeMedia.some(m => m.id === candidate.source) && (
+                            <option value={candidate.source}>
+                                {(allMedia.find(m => m.id === candidate.source)?.name || candidate.source) + '（アーカイブ済み）'}
+                            </option>
+                        )}
                         <option value="Other">その他</option>
                     </select>
                 </div>
@@ -1992,26 +2160,33 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
 };
 
 
-const SourceEffectivenessReport: React.FC<{ candidates: Candidate[] }> = ({ candidates }) => {
+const SourceEffectivenessReport: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
     const reportData = useMemo(() => {
         const visibleCandidates = candidates.filter(c => !c.isHidden);
-        const sources = [...MEDIA_SOURCES, 'Other', ''];
-        
-        const stats = sources.map(source => {
-            const sourceName = source || '未設定';
-            const sourceCandidates = visibleCandidates.filter(c => (c.source || '未設定') === sourceName);
+        // Group by media name (active or archived — this is historical data, so archived
+        // media must still be included). Falls back to the raw stored value for candidates
+        // whose source predates the current media list.
+        const mediaNameById = new Map<string, string>(allMedia.map(m => [m.id, m.name] as [string, string]));
+        const resolveSourceLabel = (source: string) => source ? (mediaNameById.get(source) || source) : '未設定';
+
+        const grouped = new Map<string, Candidate[]>();
+        visibleCandidates.forEach(c => {
+            const label = resolveSourceLabel(c.source);
+            if (!grouped.has(label)) grouped.set(label, []);
+            grouped.get(label)!.push(c);
+        });
+
+        const stats = Array.from(grouped.entries()).map(([sourceName, sourceCandidates]) => {
             const total = sourceCandidates.length;
 
-            if (total === 0) return null;
-
-            const reachedInterview = sourceCandidates.filter(c => 
+            const reachedInterview = sourceCandidates.filter(c =>
                 c.applications.some(app => !app.isHidden && PIPELINE_STAGES.indexOf(app.stage) >= PIPELINE_STAGES.indexOf('1次面接'))
             ).length;
 
             const receivedOffer = sourceCandidates.filter(c =>
                 c.applications.some(app => !app.isHidden && PIPELINE_STAGES.indexOf(app.stage) >= PIPELINE_STAGES.indexOf('内定'))
             ).length;
-            
+
             const placements = sourceCandidates.filter(c =>
                 c.applications.some(app => !app.isHidden && app.stage === '内定承諾')
             ).length;
@@ -2026,11 +2201,10 @@ const SourceEffectivenessReport: React.FC<{ candidates: Candidate[] }> = ({ cand
                 placements,
                 placementRate,
             };
-        }).filter((stat): stat is NonNullable<typeof stat> => stat !== null)
-          .sort((a, b) => b.placements - a.placements || b.total - a.total);
+        }).sort((a, b) => b.placements - a.placements || b.total - a.total);
 
         return stats;
-    }, [candidates]);
+    }, [candidates, allMedia]);
 
     if (reportData.length === 0) {
         return <p className="no-data-message">分析対象の候補者データがありません。</p>;
@@ -2077,9 +2251,10 @@ const SourceEffectivenessReport: React.FC<{ candidates: Candidate[] }> = ({ cand
 
 const CandidatePipelineView: React.FC<{
     candidates: Candidate[];
+    allMedia: MediaEntry[];
     onSave: (candidate: Candidate) => void;
     onToggleVisibility: (candidateId: string) => void;
-}> = ({ candidates, onSave, onToggleVisibility }) => {
+}> = ({ candidates, allMedia, onSave, onToggleVisibility }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -2332,6 +2507,7 @@ const CandidatePipelineView: React.FC<{
                   onSave={onSave}
                   onClose={() => setIsModalOpen(false)}
                   initialData={editingCandidate}
+                  allMedia={allMedia}
               />
             )}
             
@@ -2376,7 +2552,7 @@ const CandidatePipelineView: React.FC<{
                     <span className={`toggle-icon ${isReportVisible ? 'open' : ''}`}>▼</span>
                 </h3>
                 <div id="source-effectiveness-content" className={`collapsible-content ${isReportVisible ? 'open' : ''}`}>
-                    <SourceEffectivenessReport candidates={candidates} />
+                    <SourceEffectivenessReport candidates={candidates} allMedia={allMedia} />
                 </div>
             </div>
 
@@ -2585,10 +2761,11 @@ const CandidatePipelineView: React.FC<{
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
+  allMedia: MediaEntry[];
   dayOfWeekReplyRateData: any | null;
   visibility: { progress: boolean; dowRate: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate') => void;
-}> = ({ users, allUsersData, dayOfWeekReplyRateData, visibility, toggleSection }) => {
+}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, visibility, toggleSection }) => {
   return (
     <>
       <section aria-labelledby="all-users-dashboard-title">
@@ -2630,41 +2807,29 @@ const AllUsersDashboard: React.FC<{
                     return <tr key={user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{displayName}のデータがありません。</td></tr>;
                   }
 
-                  const monthlyTotals = calculateMonthlyTotals(userData.entries || []);
-                  const kpiTargets = { ...DEFAULT_KPI_TARGETS, ...(userData.kpiTargets || {}) };
-                  
-                  const sent = MEDIA_SOURCES.reduce((acc, source) => {
-                      const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
-                      const sentKey = `${sourceKey}_scoutsSent` as KpiKey;
-                      return acc + (monthlyTotals[sentKey] || 0);
-                  }, 0);
-                  const replies = MEDIA_SOURCES.reduce((acc, source) => {
-                      const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
-                      const replyKey = `${sourceKey}_scoutReplies` as KpiKey;
-                      return acc + (monthlyTotals[replyKey] || 0);
-                  }, 0);
-                  const effectiveReplies = MEDIA_SOURCES.reduce((acc, source) => {
-                      const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
-                      const effectiveReplyKey = `${sourceKey}_effectiveReplies` as KpiKey;
-                      return acc + (monthlyTotals[effectiveReplyKey] || 0);
-                  }, 0);
-                  
+                  const monthlyTotals = calculateMonthlyTotals(userData.entries || [], allMedia);
+                  const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
+
+                  const sent = getTotalFromLump(monthlyTotals, '_scoutsSent', allMedia);
+                  const replies = getTotalFromLump(monthlyTotals, '_scoutReplies', allMedia);
+                  const effectiveReplies = getTotalFromLump(monthlyTotals, '_effectiveReplies', allMedia);
+
                   const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
                   const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
 
-                  const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected');
-                  const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected');
+                  const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected', allMedia);
+                  const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', allMedia);
                   const documentsCollectedProgress = documentsCollectedTarget > 0 ? Math.min((documentsCollected / documentsCollectedTarget) * 100, 100) : 0;
-                  
-                  const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected');
-                  const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected');
+
+                  const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected', allMedia);
+                  const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', allMedia);
                   const effectiveDocumentsCollectedProgress = effectiveDocumentsCollectedTarget > 0 ? Math.min((effectiveDocumentsCollected / effectiveDocumentsCollectedTarget) * 100, 100) : 0;
 
-                  const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews');
-                  const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews');
+                  const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', allMedia);
+                  const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews', allMedia);
                   const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
 
-                  const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews');
+                  const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', allMedia);
                   const initialInterviewsProgress = initialInterviewsTarget > 0 ? Math.min((initialInterviews / initialInterviewsTarget) * 100, 100) : 0;
 
                   return (
@@ -2762,12 +2927,13 @@ const AllUsersDashboard: React.FC<{
 
 interface CustomPeriodReportProps {
   entries: KpiEntry[];
+  allMedia: MediaEntry[];
 }
 
 interface ReportData {
   generalTotals: KpiTotals;
   mediaStats: Array<{
-    source: MediaSource;
+    source: string;
     scoutsSent: number;
     scoutReplies: number;
     effectiveReplies: number;
@@ -2786,7 +2952,7 @@ interface ReportData {
 }
 
 
-const CustomPeriodReport: React.FC<CustomPeriodReportProps> = ({ entries }) => {
+const CustomPeriodReport: React.FC<CustomPeriodReportProps> = ({ entries, allMedia }) => {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [reportData, setReportData] = useState<ReportData | null>(null);
@@ -2812,19 +2978,20 @@ const CustomPeriodReport: React.FC<CustomPeriodReportProps> = ({ entries }) => {
         return;
     }
 
-    const totals = Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-      acc[key as KpiKey] = 0;
+    const allKeys = buildAllKpiKeys(allMedia);
+    const totals = allKeys.reduce((acc, key) => {
+      acc[key] = 0;
       return acc;
     }, {} as KpiTotals);
 
     filteredEntries.forEach(entry => {
-      (Object.keys(ALL_KPI_DEFINITIONS) as KpiKey[]).forEach(key => {
+      allKeys.forEach(key => {
         totals[key] += entry.values[key] || 0;
       });
     });
 
-    const mediaStats = MEDIA_SOURCES.map(source => {
-      const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+    const mediaStats = allMedia.map(source => {
+      const sourceKey = source.id;
       const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
       const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
       const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
@@ -2833,7 +3000,7 @@ const CustomPeriodReport: React.FC<CustomPeriodReportProps> = ({ entries }) => {
       const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
       const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
       return {
-        source,
+        source: source.name,
         scoutsSent: totals[scoutsKey],
         scoutReplies: totals[repliesKey],
         effectiveReplies: totals[effectiveRepliesKey],
@@ -3102,6 +3269,13 @@ const App: React.FC = () => {
   const [isEditingDisplayName, setIsEditingDisplayName] = useState(false);
   const [editedDisplayName, setEditedDisplayName] = useState('');
 
+  // Media (scouting source) state — shared across all users, Drive-backed like Teams
+  const [allMedia, setAllMedia] = useState<MediaEntry[]>(() => readMediaConfigCache<MediaConfig>()?.media || []);
+  const [mediaDriveFileId, setMediaDriveFileId] = useState<string | null>(null);
+  const [mediaOwnerEmail, setMediaOwnerEmail] = useState<string | null>(null);
+  const [isLoadingMediaConfig, setIsLoadingMediaConfig] = useState(allMedia.length === 0);
+  const [isMediaModalOpen, setIsMediaModalOpen] = useState(false);
+
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
   
@@ -3178,9 +3352,9 @@ const App: React.FC = () => {
     const normalize = (d: Partial<UserData>): UserData => ({
       entries: d.entries || [],
       candidates: d.candidates || [],
-      kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.kpiTargets || {}) },
-      weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.dailyKpiTargets || {}) },
+      kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
+      weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
+      dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
       displayName: d.displayName || currentIdentity.name,
     });
 
@@ -3231,9 +3405,9 @@ const App: React.FC = () => {
     setCurrentUserData({
       entries: legacyUserData.entries || [],
       candidates: legacyUserData.candidates || [],
-      kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.kpiTargets || {}) },
-      weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.dailyKpiTargets || {}) },
+      kpiTargets: { ...defaultKpiTargets, ...(legacyUserData.kpiTargets || {}) },
+      weeklyKpiTargets: { ...defaultKpiTargets, ...(legacyUserData.weeklyKpiTargets || {}) },
+      dailyKpiTargets: { ...defaultKpiTargets, ...(legacyUserData.dailyKpiTargets || {}) },
       displayName: legacyName,
     });
   };
@@ -3258,9 +3432,9 @@ const App: React.FC = () => {
         merged[email] = {
           entries: data.entries || [],
           candidates: data.candidates || [],
-          kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.kpiTargets || {}) },
-          weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.weeklyKpiTargets || {}) },
-          dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.dailyKpiTargets || {}) },
+          kpiTargets: { ...defaultKpiTargets, ...(data.kpiTargets || {}) },
+          weeklyKpiTargets: { ...defaultKpiTargets, ...(data.weeklyKpiTargets || {}) },
+          dailyKpiTargets: { ...defaultKpiTargets, ...(data.dailyKpiTargets || {}) },
           displayName: data.displayName,
         };
       });
@@ -3300,6 +3474,89 @@ const App: React.FC = () => {
   }, [currentIdentity, isInitialized, view, isTeamsModalOpen]);
 
   const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
+
+  // Load the shared media list once per sign-in. Unlike Teams, this is required for the KPI
+  // forms to render at all, so it loads unconditionally after login (not gated by view/modal),
+  // and auto-creates the Drive file (seeded with the original 7 sources) the very first time
+  // anyone runs the app after this feature shipped.
+  useEffect(() => {
+    if (!currentIdentity || !isInitialized) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await loadMediaConfig<MediaConfig>();
+        if (cancelled) return;
+        if (result.data) {
+          setAllMedia(result.data.media || []);
+          setMediaDriveFileId(result.driveFileId);
+          setMediaOwnerEmail(result.ownerEmail);
+        } else {
+          const seeded: MediaConfig = { schemaVersion: 1, media: SEED_MEDIA };
+          const newFileId = await saveMediaConfig(null, seeded, currentIdentity.email);
+          if (cancelled) return;
+          setAllMedia(SEED_MEDIA);
+          setMediaDriveFileId(newFileId);
+          setMediaOwnerEmail(currentIdentity.email);
+        }
+      } catch (error) {
+        console.error('Failed to load media config from Drive', error);
+      } finally {
+        if (!cancelled) setIsLoadingMediaConfig(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentIdentity, isInitialized]);
+
+  const isMediaEditable = !mediaOwnerEmail || mediaOwnerEmail === currentIdentity?.email;
+  const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
+  const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
+
+  const persistMedia = async (updatedMedia: MediaEntry[]) => {
+    setAllMedia(updatedMedia);
+    if (!currentIdentity) return;
+    try {
+      const payload: MediaConfig = { schemaVersion: 1, media: updatedMedia };
+      const newFileId = await saveMediaConfig(mediaDriveFileId, payload, currentIdentity.email);
+      setMediaDriveFileId(newFileId);
+      if (!mediaOwnerEmail) setMediaOwnerEmail(currentIdentity.email);
+    } catch (error) {
+      console.error('Failed to save media config', error);
+      alert('媒体設定の保存に失敗しました。編集できるのは作成者のみです。');
+    }
+  };
+
+  const slugifyMediaName = (name: string): string => {
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'media';
+    let candidate = base;
+    let i = 1;
+    while (allMedia.some(m => m.id === candidate)) {
+      candidate = `${base}${i}`;
+      i += 1;
+    }
+    return candidate;
+  };
+
+  const handleCreateMedia = (name: string) => {
+    const newMedia: MediaEntry = {
+      id: slugifyMediaName(name),
+      name,
+      isArchived: false,
+      createdAt: new Date().toISOString(),
+    };
+    persistMedia([...allMedia, newMedia]);
+  };
+
+  const handleRenameMedia = (id: string, name: string) => {
+    persistMedia(allMedia.map(m => (m.id === id ? { ...m, name } : m)));
+  };
+
+  const handleArchiveMedia = (id: string) => {
+    persistMedia(allMedia.map(m => (m.id === id ? { ...m, isArchived: true } : m)));
+  };
+
+  const handleUnarchiveMedia = (id: string) => {
+    persistMedia(allMedia.map(m => (m.id === id ? { ...m, isArchived: false } : m)));
+  };
 
   // The signed-in user's own Drive file can lag a few seconds behind (debounced sync), so
   // always show our own in-memory copy in aggregate views instead of whatever Drive last
@@ -3439,25 +3696,25 @@ const App: React.FC = () => {
     // Extract data for child components from the single source of truth
     const { entries, kpiTargets, weeklyKpiTargets, dailyKpiTargets, candidates } = useMemo(() => ({
       entries: currentUserData?.entries || [],
-      kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(currentUserData?.kpiTargets || {}) },
-      weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(currentUserData?.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(currentUserData?.dailyKpiTargets || {}) },
+      kpiTargets: { ...defaultKpiTargets, ...(currentUserData?.kpiTargets || {}) },
+      weeklyKpiTargets: { ...defaultKpiTargets, ...(currentUserData?.weeklyKpiTargets || {}) },
+      dailyKpiTargets: { ...defaultKpiTargets, ...(currentUserData?.dailyKpiTargets || {}) },
       candidates: currentUserData?.candidates || [],
     }), [currentUserData]);
 
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
-    return calculateMonthlyTotals(entries);
-  }, [entries]);
+    return calculateMonthlyTotals(entries, allMedia);
+  }, [entries, allMedia]);
 
   const todayTotals = useMemo<KpiTotals>(() => {
     const todayStr = new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD format
     const todayEntry = entries.find(e => e.date === todayStr);
-    return todayEntry ? todayEntry.values : Object.keys(ALL_KPI_DEFINITIONS).reduce((acc, key) => {
-      acc[key as KpiKey] = 0;
+    return todayEntry ? todayEntry.values : buildAllKpiKeys(allMedia).reduce((acc, key) => {
+      acc[key] = 0;
       return acc;
     }, {} as KpiTotals);
-  }, [entries]);
+  }, [entries, allMedia]);
 
 
   const currentMonthPerformanceChartData = useMemo(() => {
@@ -3474,9 +3731,9 @@ const App: React.FC = () => {
         const entryDate = new Date(entry.date);
         if (entryDate.getMonth() === currentMonth && entryDate.getFullYear() === currentYear) {
             const day = entryDate.getDate() - 1;
-            const scouts = MEDIA_SOURCES.reduce((sum, source) => sum + (entry.values[`${source.toLowerCase()}_scoutsSent` as KpiKey] || 0), 0);
-            const replies = MEDIA_SOURCES.reduce((sum, source) => sum + (entry.values[`${source.toLowerCase()}_scoutReplies` as KpiKey] || 0), 0);
-            
+            const scouts = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutsSent` as KpiKey] || 0), 0);
+            const replies = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutReplies` as KpiKey] || 0), 0);
+
             cumulativeScouts[day] += scouts;
             cumulativeReplies[day] += replies;
         }
@@ -3508,7 +3765,7 @@ const App: React.FC = () => {
             },
         ],
     };
-  }, [entries]);
+  }, [entries, allMedia]);
 
   const selectedTeamMemberEmails = useMemo(() => {
     if (!selectedTeamId) return [];
@@ -3529,8 +3786,8 @@ const App: React.FC = () => {
 
     allEntries.forEach(entry => {
         const dayOfWeek = new Date(entry.date).getDay();
-        const scouts = MEDIA_SOURCES.reduce((sum, source) => sum + (entry.values[`${source.toLowerCase()}_scoutsSent` as KpiKey] || 0), 0);
-        const replies = MEDIA_SOURCES.reduce((sum, source) => sum + (entry.values[`${source.toLowerCase()}_scoutReplies` as KpiKey] || 0), 0);
+        const scouts = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutsSent` as KpiKey] || 0), 0);
+        const replies = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutReplies` as KpiKey] || 0), 0);
         scoutsByDay[dayOfWeek] += scouts;
         repliesByDay[dayOfWeek] += replies;
     });
@@ -3549,7 +3806,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -3561,17 +3818,19 @@ const App: React.FC = () => {
           return entryTime >= weekStart && entryTime <= weekEnd;
       });
 
+      const allKeys = buildAllKpiKeys(activeMedia);
       const weeklyTotals = weeklyEntries.reduce((acc, entry) => {
-          (Object.keys(ALL_KPI_DEFINITIONS) as KpiKey[]).forEach(key => {
+          allKeys.forEach(key => {
               acc[key] = (acc[key] || 0) + (entry.values[key] || 0);
           });
           return acc;
       }, {} as KpiTotals);
 
-      const mediaStats = MEDIA_SOURCES.map(source => {
-          const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+      const mediaStats = activeMedia.map(source => {
+          const sourceKey = source.id;
           return {
-              source,
+              source: source.name,
+              id: source.id,
               scoutsSent: weeklyTotals[`${sourceKey}_scoutsSent` as KpiKey] || 0,
               scoutReplies: weeklyTotals[`${sourceKey}_scoutReplies` as KpiKey] || 0,
               effectiveReplies: weeklyTotals[`${sourceKey}_effectiveReplies` as KpiKey] || 0,
@@ -3581,12 +3840,12 @@ const App: React.FC = () => {
               effectiveInitialInterviews: weeklyTotals[`${sourceKey}_effectiveInitialInterviews` as KpiKey] || 0,
           };
       });
-      
+
       const totalCandidatesSubmitted = weeklyTotals.candidatesSubmitted || 0;
       const totalInitialInterviews = mediaStats.reduce((sum, stat) => sum + stat.initialInterviews, 0);
 
       return { mediaStats, totalCandidatesSubmitted, totalInitialInterviews };
-  }, [entries, viewWeekStartDate]);
+  }, [entries, viewWeekStartDate, activeMedia]);
   
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
@@ -3620,6 +3879,10 @@ const App: React.FC = () => {
 
   if (isLoadingUserData) {
       return <div className="loading-container">Googleドライブからデータを読み込み中...</div>;
+  }
+
+  if (isLoadingMediaConfig) {
+      return <div className="loading-container">媒体設定を読み込み中...</div>;
   }
 
   return (
@@ -3662,10 +3925,23 @@ const App: React.FC = () => {
           onRemoveMember={handleRemoveTeamMember}
         />
       )}
+      {isMediaModalOpen && (
+        <MediaModal
+          allMedia={allMedia}
+          isEditable={isMediaEditable}
+          ownerEmail={mediaOwnerEmail}
+          onClose={() => setIsMediaModalOpen(false)}
+          onCreateMedia={handleCreateMedia}
+          onRenameMedia={handleRenameMedia}
+          onArchiveMedia={handleArchiveMedia}
+          onUnarchiveMedia={handleUnarchiveMedia}
+        />
+      )}
       {selectedDate && (
         <DateEntryModal
           date={selectedDate}
           initialValues={entriesByDate.get(selectedDate) || null}
+          activeMedia={activeMedia}
           onSave={handleSaveEntry}
           onClose={() => setSelectedDate(null)}
         />
@@ -3728,6 +4004,7 @@ const App: React.FC = () => {
               )
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
+            <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>
           </div>
         </div>
@@ -3748,7 +4025,7 @@ const App: React.FC = () => {
                   <span className={`toggle-icon ${sectionVisibility.dailyProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="daily-progress-content" className={`collapsible-content ${sectionVisibility.dailyProgress ? 'open' : ''}`}>
-                   <DailyProgress todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
+                   <DailyProgress activeMedia={activeMedia} todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
                 </div>
             </section>
             
@@ -3770,6 +4047,7 @@ const App: React.FC = () => {
                 <CalendarView
                   viewDate={viewDate}
                   entriesByDate={entriesByDate}
+                  allMedia={allMedia}
                   onDayClick={setSelectedDate}
                   onPrevMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
                   onNextMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
@@ -3812,9 +4090,9 @@ const App: React.FC = () => {
                 </h2>
                 <div id="media-progress-content" className={`collapsible-content ${sectionVisibility.mediaProgress ? 'open' : ''}`}>
                   <div className="media-dashboard kpi-dashboard">
-                     {MEDIA_SOURCES.map(source => (
+                     {activeMedia.map(source => (
                           <MediaKpiCard
-                              key={source}
+                              key={source.id}
                               source={source}
                               monthlyTotals={monthlyTotals}
                               kpiTargets={kpiTargets}
@@ -3858,7 +4136,7 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="month-over-month-performance-content" className={`collapsible-content ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>
-                 <MonthOverMonthPerformanceChart entries={entries} />
+                 <MonthOverMonthPerformanceChart entries={entries} allMedia={allMedia} />
               </div>
             </section>
             
@@ -3900,7 +4178,7 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.customPeriodReport ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="custom-report-content" className={`collapsible-content ${sectionVisibility.customPeriodReport ? 'open' : ''}`}>
-                <CustomPeriodReport entries={entries} />
+                <CustomPeriodReport entries={entries} allMedia={allMedia} />
               </div>
             </section>
             
@@ -3941,8 +4219,8 @@ const App: React.FC = () => {
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 目標</h3>
                            <div className="media-kpi-grid">
-                             {MEDIA_SOURCES.map(source => {
-                                 const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+                             {activeMedia.map(source => {
+                                 const sourceKey = source.id;
                                  const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
                                      {key: `${sourceKey}_scoutReplies`, label: 'スカウト返信数'},
@@ -3953,8 +4231,8 @@ const App: React.FC = () => {
                                      {key: `${sourceKey}_effectiveInitialInterviews`, label: '初回有効面談数'},
                                  ];
                                 return (
-                                 <fieldset key={source} className="media-fieldset">
-                                     <legend>{source}</legend>
+                                 <fieldset key={source.id} className="media-fieldset">
+                                     <legend>{source.name}</legend>
                                      <div className="inputs-wrapper">
                                      {fields.map(field => (
                                           <div key={field.key} className="form-group">
@@ -3999,8 +4277,8 @@ const App: React.FC = () => {
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 週間目標</h3>
                            <div className="media-kpi-grid">
-                             {MEDIA_SOURCES.map(source => {
-                                 const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+                             {activeMedia.map(source => {
+                                 const sourceKey = source.id;
                                   const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
                                      {key: `${sourceKey}_scoutReplies`, label: 'スカウト返信数'},
@@ -4011,8 +4289,8 @@ const App: React.FC = () => {
                                      {key: `${sourceKey}_effectiveInitialInterviews`, label: '初回有効面談数'},
                                  ];
                                 return (
-                                 <fieldset key={source} className="media-fieldset">
-                                     <legend>{source}</legend>
+                                 <fieldset key={source.id} className="media-fieldset">
+                                     <legend>{source.name}</legend>
                                      <div className="inputs-wrapper">
                                      {fields.map(field => (
                                           <div key={field.key} className="form-group">
@@ -4057,16 +4335,16 @@ const App: React.FC = () => {
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 日次目標</h3>
                            <div className="media-kpi-grid">
-                             {MEDIA_SOURCES.map(source => {
-                                 const sourceKey = source.toLowerCase() as Lowercase<MediaSource>;
+                             {activeMedia.map(source => {
+                                 const sourceKey = source.id;
                                  const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
                                      {key: `${sourceKey}_scoutReplies`, label: 'スカウト返信数'},
                                      {key: `${sourceKey}_effectiveReplies`, label: '有効返信数'},
                                  ];
                                 return (
-                                 <fieldset key={source} className="media-fieldset">
-                                     <legend>{source}</legend>
+                                 <fieldset key={source.id} className="media-fieldset">
+                                     <legend>{source.name}</legend>
                                      <div className="inputs-wrapper">
                                      {fields.map(field => (
                                           <div key={field.key} className="form-group">
@@ -4104,6 +4382,7 @@ const App: React.FC = () => {
               <AllUsersDashboard
                   users={users}
                   allUsersData={displayedAllUsersData}
+                  allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
                   toggleSection={toggleSection}
@@ -4135,6 +4414,7 @@ const App: React.FC = () => {
               <AllUsersDashboard
                   users={selectedTeamMemberEmails.filter(email => displayedAllUsersData[email])}
                   allUsersData={displayedAllUsersData}
+                  allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
                   toggleSection={toggleSection}
@@ -4143,8 +4423,9 @@ const App: React.FC = () => {
           </div>
         )}
         {view === 'pipeline' && (
-            <CandidatePipelineView 
+            <CandidatePipelineView
                 candidates={candidates}
+                allMedia={allMedia}
                 onSave={handleSaveCandidate}
                 onToggleVisibility={handleToggleCandidateVisibility}
             />
