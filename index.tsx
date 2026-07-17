@@ -3285,6 +3285,14 @@ const App: React.FC = () => {
 
   const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
 
+  // The signed-in user's own Drive file can lag a few seconds behind (debounced sync), so
+  // always show our own in-memory copy in aggregate views instead of whatever Drive last
+  // returned for us — this keeps things like a just-edited display name visible immediately.
+  const displayedAllUsersData = useMemo(() => {
+    if (!currentIdentity || !currentUserData) return allUsersData;
+    return { ...allUsersData, [currentIdentity.email]: currentUserData };
+  }, [allUsersData, currentIdentity, currentUserData]);
+
   const persistTeams = async (updatedTeams: Team[]) => {
     setTeams(updatedTeams);
     if (!currentIdentity) return;
@@ -3497,9 +3505,9 @@ const App: React.FC = () => {
     const repliesByDay = Array(7).fill(0);
 
     const allEntries = view === 'all_users_kpi'
-      ? Object.values(allUsersData).flatMap(d => d.entries)
+      ? Object.values(displayedAllUsersData).flatMap(d => d.entries)
       : view === 'team_kpi'
-      ? Object.entries(allUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
+      ? Object.entries(displayedAllUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
       : entries;
     if (allEntries.length === 0) return null;
 
@@ -3525,7 +3533,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, allUsersData, selectedTeamMemberEmails]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -4075,7 +4083,7 @@ const App: React.FC = () => {
           ) : (
             <AllUsersDashboard
                 users={users}
-                allUsersData={allUsersData}
+                allUsersData={displayedAllUsersData}
                 dayOfWeekReplyRateData={dayOfWeekReplyRateData}
                 visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
                 toggleSection={toggleSection}
@@ -4101,8 +4109,8 @@ const App: React.FC = () => {
               <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
             ) : (
               <AllUsersDashboard
-                  users={selectedTeamMemberEmails.filter(email => allUsersData[email])}
-                  allUsersData={allUsersData}
+                  users={selectedTeamMemberEmails.filter(email => displayedAllUsersData[email])}
+                  allUsersData={displayedAllUsersData}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
                   toggleSection={toggleSection}
