@@ -15,7 +15,7 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { signIn, signOut, getCurrentSession, GoogleIdentity } from './services/googleAuth';
+import { signIn, signOut, getCurrentSession, tryRestoreSession, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig } from './services/dataSync';
 
 ChartJS.register(
@@ -177,6 +177,7 @@ interface UserData {
   weeklyKpiTargets: Record<KpiKey, number>;
   dailyKpiTargets: Record<KpiKey, number>;
   candidates: Candidate[];
+  displayName?: string;
 }
 
 interface Team {
@@ -2624,8 +2625,9 @@ const AllUsersDashboard: React.FC<{
               <tbody>
                 {users.map(user => {
                   const userData = allUsersData[user];
+                  const displayName = userData?.displayName || user;
                   if (!userData) {
-                    return <tr key={user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{user}のデータがありません。</td></tr>;
+                    return <tr key={user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{displayName}のデータがありません。</td></tr>;
                   }
 
                   const monthlyTotals = calculateMonthlyTotals(userData.entries || []);
@@ -2667,7 +2669,7 @@ const AllUsersDashboard: React.FC<{
 
                   return (
                     <tr key={user}>
-                      <td>{user}</td>
+                      <td>{displayName}</td>
                       <td className="progress-cell">
                         <span>{replyRate.toFixed(1)}%</span>
                         <div className="mini-progress-bar">
@@ -3097,6 +3099,8 @@ const App: React.FC = () => {
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [isEditingDisplayName, setIsEditingDisplayName] = useState(false);
+  const [editedDisplayName, setEditedDisplayName] = useState('');
 
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
@@ -3130,13 +3134,19 @@ const App: React.FC = () => {
     }));
   };
   
-  // Restore Google session (if any)
+  // Restore the Google session (if any), including silently re-authenticating with the
+  // last-known account so users stay signed in across browser restarts.
   useEffect(() => {
-    const session = getCurrentSession();
-    if (session) {
-      setCurrentIdentity(session.identity);
-    }
-    setIsInitialized(true);
+    let cancelled = false;
+    (async () => {
+      const identity = await tryRestoreSession();
+      if (cancelled) return;
+      if (identity) {
+        setCurrentIdentity(identity);
+      }
+      setIsInitialized(true);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // The signed-in Google account's email is always the current user; register it
@@ -3175,6 +3185,7 @@ const App: React.FC = () => {
           kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.kpiTargets || {}) },
           weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.weeklyKpiTargets || {}) },
           dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(d.dailyKpiTargets || {}) },
+          displayName: d.displayName || currentIdentity.name,
         });
         setDriveFileId(result.driveFileId);
       } else {
@@ -3190,6 +3201,7 @@ const App: React.FC = () => {
           kpiTargets: DEFAULT_KPI_TARGETS,
           weeklyKpiTargets: DEFAULT_KPI_TARGETS,
           dailyKpiTargets: DEFAULT_KPI_TARGETS,
+          displayName: currentIdentity.name,
         });
         setDriveFileId(null);
       }
@@ -3210,7 +3222,12 @@ const App: React.FC = () => {
       kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.kpiTargets || {}) },
       weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.weeklyKpiTargets || {}) },
       dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(legacyUserData.dailyKpiTargets || {}) },
+      displayName: legacyName,
     });
+  };
+
+  const handleSaveDisplayName = (name: string) => {
+    setCurrentUserData(prev => (prev ? { ...prev, displayName: name } : prev));
   };
 
 
@@ -3232,6 +3249,7 @@ const App: React.FC = () => {
             kpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.kpiTargets || {}) },
             weeklyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.weeklyKpiTargets || {}) },
             dailyKpiTargets: { ...DEFAULT_KPI_TARGETS, ...(data.dailyKpiTargets || {}) },
+            displayName: data.displayName,
           };
         });
         setAllUsersData(merged);
@@ -3643,7 +3661,47 @@ const App: React.FC = () => {
               <span className="sr-only">{currentIdentity.email}</span>
             )}
             {currentIdentity && (
-              <span style={{ fontSize: '0.9rem', color: '#333' }}>{currentIdentity.name}</span>
+              isEditingDisplayName ? (
+                <span style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    value={editedDisplayName}
+                    onChange={(e) => setEditedDisplayName(e.target.value)}
+                    autoFocus
+                    style={{ width: '8rem' }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && editedDisplayName.trim()) {
+                        handleSaveDisplayName(editedDisplayName.trim());
+                        setIsEditingDisplayName(false);
+                      } else if (e.key === 'Escape') {
+                        setIsEditingDisplayName(false);
+                      }
+                    }}
+                  />
+                  <button
+                    className="save-user-button"
+                    disabled={!editedDisplayName.trim()}
+                    onClick={() => {
+                      handleSaveDisplayName(editedDisplayName.trim());
+                      setIsEditingDisplayName(false);
+                    }}
+                  >
+                    保存
+                  </button>
+                  <button className="cancel-user-button" onClick={() => setIsEditingDisplayName(false)}>キャンセル</button>
+                </span>
+              ) : (
+                <span
+                  style={{ fontSize: '0.9rem', color: '#333', cursor: 'pointer' }}
+                  title="クリックして表示名を変更"
+                  onClick={() => {
+                    setEditedDisplayName(currentUserData?.displayName || currentIdentity.name);
+                    setIsEditingDisplayName(true);
+                  }}
+                >
+                  {currentUserData?.displayName || currentIdentity.name} ✎
+                </span>
+              )
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>

@@ -11,6 +11,7 @@ interface StoredSession {
 }
 
 const SESSION_KEY = 'kpiGoogleSession';
+const LAST_EMAIL_KEY = 'kpiLastSignedInEmail';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
 const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly';
 
@@ -60,6 +61,30 @@ function clearSession() {
   sessionStorage.removeItem(SESSION_KEY);
 }
 
+function getLastKnownEmail(): string | null {
+  try {
+    return localStorage.getItem(LAST_EMAIL_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setLastKnownEmail(email: string) {
+  try {
+    localStorage.setItem(LAST_EMAIL_KEY, email);
+  } catch {
+    // ignore storage failures (e.g. private browsing) — just means silent restore won't work later
+  }
+}
+
+function clearLastKnownEmail() {
+  try {
+    localStorage.removeItem(LAST_EMAIL_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 async function fetchIdentity(accessToken: string): Promise<GoogleIdentity> {
   const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -75,7 +100,7 @@ function assertAllowedDomain(identity: GoogleIdentity) {
   }
 }
 
-function requestToken(prompt: '' | 'consent'): Promise<GoogleIdentity> {
+function requestToken(prompt: '' | 'consent', hint?: string): Promise<GoogleIdentity> {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   if (!clientId) {
     return Promise.reject(new Error('GOOGLE_CLIENT_IDが設定されていません（.env.local を確認してください）。'));
@@ -90,14 +115,17 @@ function requestToken(prompt: '' | 'consent'): Promise<GoogleIdentity> {
     };
     // initTokenClient's callback is never invoked if the popup fails to open (e.g. blocked
     // by the browser), so without this the UI would be stuck showing "signing in" forever.
+    // A silent (prompt: '') restore attempt should fail fast rather than wait the full 30s.
+    const timeoutMs = prompt === '' ? 8000 : 30000;
     const timeoutId = setTimeout(() => {
       finish(() => reject(new Error('ログイン用のポップアップを開けませんでした。ポップアップブロッカーを解除してもう一度お試しください。')));
-    }, 30000);
+    }, timeoutMs);
 
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: SCOPES,
       hd: ALLOWED_DOMAIN,
+      hint,
       callback: async (response: any) => {
         if (response.error) {
           finish(() => reject(new Error('Googleログインが完了しませんでした。もう一度お試しください。')));
@@ -108,6 +136,7 @@ function requestToken(prompt: '' | 'consent'): Promise<GoogleIdentity> {
           assertAllowedDomain(identity);
           const expiresAt = Date.now() + ((response.expires_in ?? 3600) * 1000);
           storeSession({ accessToken: response.access_token, expiresAt, identity });
+          setLastKnownEmail(identity.email);
           finish(() => resolve(identity));
         } catch (err) {
           clearSession();
@@ -123,7 +152,7 @@ function requestToken(prompt: '' | 'consent'): Promise<GoogleIdentity> {
         finish(() => reject(new Error(message)));
       },
     } as any);
-    client.requestAccessToken({ prompt });
+    client.requestAccessToken({ prompt, hint } as any);
   });
 }
 
@@ -143,12 +172,37 @@ export async function signIn(): Promise<GoogleIdentity> {
 /** Silently re-requests an access token using the existing browser session (no prompt shown). */
 export async function refreshTokenSilently(): Promise<GoogleIdentity> {
   await waitForGis();
-  return requestToken('');
+  const lastEmail = getLastKnownEmail() ?? undefined;
+  return requestToken('', lastEmail);
+}
+
+/**
+ * Called once on app load to keep users signed in across browser restarts. The access token
+ * itself is short-lived and only lives in sessionStorage, but as long as the browser still has
+ * an active Google session (and the user hasn't revoked access), a silent token request using
+ * the last-known email as a hint re-authenticates without showing any prompt. Returns null if
+ * there's nothing to restore or the silent attempt fails, in which case the caller should show
+ * the normal "Googleでログイン" screen.
+ */
+export async function tryRestoreSession(): Promise<GoogleIdentity | null> {
+  const existing = getCurrentSession();
+  if (existing) return existing.identity;
+
+  const lastEmail = getLastKnownEmail();
+  if (!lastEmail) return null;
+
+  try {
+    await waitForGis();
+    return await requestToken('', lastEmail);
+  } catch {
+    return null;
+  }
 }
 
 export function signOut() {
   const session = getStoredSession();
   clearSession();
+  clearLastKnownEmail();
   if (session?.accessToken && window.google?.accounts?.oauth2?.revoke) {
     window.google.accounts.oauth2.revoke(session.accessToken, () => {});
   }
