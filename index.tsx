@@ -3043,7 +3043,7 @@ const CandidatePipelineView: React.FC<{
             {scheduleModalDate && (
                 <PipelineDateScheduleModal
                     date={scheduleModalDate}
-                    ownCandidates={candidates.filter(isOwn)}
+                    ownCandidates={candidates.filter(c => isOwn(c) && !c.isHidden)}
                     onClose={() => setScheduleModalDate(null)}
                     onPickApplication={handlePickApplicationForSchedule}
                 />
