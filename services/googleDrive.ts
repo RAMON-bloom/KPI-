@@ -82,15 +82,15 @@ export async function findOwnDataFile(): Promise<DriveFileRef | null> {
 
 /**
  * Finds every teammate's kpi-manager-data.json shared domain-wide (requires drive.readonly).
- * Deliberately matches on filename alone, NOT `appProperties` — appProperties set by another
- * user's client are not reliably visible to this query (this was the root cause of the
- * "全ユーザー" cross-user visibility bug: a domain-shared file's appProperties were invisible
- * to everyone except the file's own creator, so this search silently found nothing for
- * teammates even though the file itself was correctly shared).
+ * Deliberately matches on filename alone, NOT `appProperties` (see history below), and uses
+ * `corpora=domain` — the default `files.list` corpus only covers files the caller owns or
+ * that were shared with them individually; files shared via a `type: domain` permission (our
+ * sharing model) only show up when `corpora=domain` is explicitly requested. This — not the
+ * appProperties issue — was the actual root cause of the "全ユーザー" cross-user visibility bug.
  */
 export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
   const q = `name='${DATA_FILE_NAME}' and trashed=false`;
-  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,properties,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,properties,owners(emailAddress))&spaces=drive&corpora=domain`;
   const res = await authorizedFetch(url);
   console.log('[listTeammateDataFiles] query:', q, 'status:', res.status);
   if (!res.ok) throw new Error('チームメンバーのデータ検索に失敗しました。');
@@ -146,12 +146,13 @@ export async function updateFileContent(fileId: string, content: unknown): Promi
 
 /**
  * Finds the single shared teams-config file (created by whoever first set up teams), if it exists.
- * Matches on filename alone (not `appProperties` — see the comment on listTeammateDataFiles for why).
+ * Matches on filename alone (not `appProperties`) and uses `corpora=domain` — see the comment
+ * on listTeammateDataFiles for why both of those matter for a domain-shared file.
  */
 export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
   const q = `name='${TEAMS_FILE_NAME}' and trashed=false`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=domain`
   );
   if (!res.ok) throw new Error('チーム設定ファイルの検索に失敗しました。');
   const data = await res.json();
@@ -169,12 +170,13 @@ export async function createTeamsConfigFile(content: unknown, creatorEmail: stri
 
 /**
  * Finds the single shared media-config file (the list of scouting media sources), if it exists.
- * Matches on filename alone (not `appProperties` — see the comment on listTeammateDataFiles for why).
+ * Matches on filename alone (not `appProperties`) and uses `corpora=domain` — see the comment
+ * on listTeammateDataFiles for why both of those matter for a domain-shared file.
  */
 export async function findMediaConfigFile(): Promise<DriveFileRef | null> {
   const q = `name='${MEDIA_FILE_NAME}' and trashed=false`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=domain`
   );
   if (!res.ok) throw new Error('媒体設定ファイルの検索に失敗しました。');
   const data = await res.json();
