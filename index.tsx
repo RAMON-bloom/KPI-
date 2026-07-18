@@ -2340,7 +2340,7 @@ const ApplicationModal: React.FC<{
         onClose();
     };
 
-    const modalTitle = `${candidateName}さん - ${initialData ? '選考情報を編集' : '選考情報を追加'}`;
+    const modalTitle = `${candidateName}さん - ${initialData && initialData.companyName ? '選考情報を編集' : '選考情報を追加'}`;
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -2408,6 +2408,82 @@ const ApplicationModal: React.FC<{
                 <div className="modal-footer">
                     <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
                     <button type="submit" form="application-form" className="submit-button">保存</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+/**
+ * Opened by clicking a date on the pipeline calendar. Lets the signed-in user pick one of
+ * their own candidates, then either an existing application (to reschedule/edit) or a brand
+ * new one, for that date — the actual company/stage/memo fields are edited via the existing
+ * ApplicationModal once a choice is made here.
+ */
+const PipelineDateScheduleModal: React.FC<{
+    date: string;
+    ownCandidates: Candidate[];
+    onClose: () => void;
+    onPickApplication: (candidate: Candidate, application: CompanyApplication | null) => void;
+}> = ({ date, ownCandidates, onClose, onPickApplication }) => {
+    const [selectedCandidateId, setSelectedCandidateId] = useState('');
+    const selectedCandidate = ownCandidates.find(c => c.id === selectedCandidateId) || null;
+    const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h3 id="schedule-modal-title">{dateLabel}の選考予定を入力</h3>
+                    <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+                </div>
+                <div className="modal-body">
+                    {ownCandidates.length === 0 ? (
+                        <p className="no-data-message">自分のパイプラインに候補者がいません。まず候補者を登録してください。</p>
+                    ) : (
+                        <>
+                            <div className="form-group">
+                                <label htmlFor="schedule-candidate-select">候補者を選択</label>
+                                <select
+                                    id="schedule-candidate-select"
+                                    value={selectedCandidateId}
+                                    onChange={e => setSelectedCandidateId(e.target.value)}
+                                    autoFocus
+                                >
+                                    <option value="">選択してください</option>
+                                    {ownCandidates.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                            {selectedCandidate && (
+                                <div className="form-group">
+                                    <label>選考企業を選択（既存を選ぶか、新しく追加）</label>
+                                    <div className="schedule-modal-application-list">
+                                        {selectedCandidate.applications.filter(app => !app.isHidden).map(app => (
+                                            <button
+                                                key={app.id}
+                                                type="button"
+                                                className="secondary-action-button"
+                                                onClick={() => onPickApplication(selectedCandidate, app)}
+                                            >
+                                                {app.companyName} ({app.stage})
+                                            </button>
+                                        ))}
+                                        <button
+                                            type="button"
+                                            className="add-button"
+                                            onClick={() => onPickApplication(selectedCandidate, null)}
+                                        >
+                                            + 新しい選考を追加
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+                <div className="modal-footer">
+                    <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
                 </div>
             </div>
         </div>
@@ -2486,13 +2562,16 @@ interface PipelineCalendarEvent {
  * Month calendar of every visible application's manually-set scheduledDate. Reads whatever
  * `candidates` list the caller passes in, so it's automatically scoped by the pipeline's
  * existing 自分/全ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here.
+ * Clicking a day lets the signed-in user schedule (or edit) one of their own candidates'
+ * applications for that date, via onDayClick.
  */
 const PipelineCalendarView: React.FC<{
     candidates: Candidate[];
     viewDate: Date;
     onPrevMonth: () => void;
     onNextMonth: () => void;
-}> = ({ candidates, viewDate, onPrevMonth, onNextMonth }) => {
+    onDayClick: (dateStr: string) => void;
+}> = ({ candidates, viewDate, onPrevMonth, onNextMonth, onDayClick }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
@@ -2526,7 +2605,15 @@ const PipelineCalendarView: React.FC<{
         const isToday = dateStr === todayLocalString;
 
         days.push(
-            <div key={i} className={`calendar-day pipeline-calendar-day ${isToday ? 'today' : ''} ${events.length > 0 ? 'has-data' : ''}`}>
+            <div
+                key={i}
+                className={`calendar-day pipeline-calendar-day ${isToday ? 'today' : ''} ${events.length > 0 ? 'has-data' : ''}`}
+                onClick={() => onDayClick(dateStr)}
+                role="button"
+                tabIndex={0}
+                aria-label={`${i}日, 選考予定を入力`}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDayClick(dateStr); } }}
+            >
                 <div className="day-number">{i}</div>
                 {events.length > 0 && (
                     <div className="pipeline-calendar-events">
@@ -2690,6 +2777,9 @@ const CandidatePipelineView: React.FC<{
         application: CompanyApplication | null
     }>({ candidate: null, application: null });
 
+    // State for scheduling from a pipeline-calendar date click
+    const [scheduleModalDate, setScheduleModalDate] = useState<string | null>(null);
+
     const handleAdd = () => {
         setEditingCandidate(null);
         setIsModalOpen(true);
@@ -2712,6 +2802,16 @@ const CandidatePipelineView: React.FC<{
     const handleOpenApplicationModal = (candidate: Candidate, application: CompanyApplication | null) => {
         if (!isOwn(candidate)) return;
         setApplicationModalData({ candidate, application });
+        setIsApplicationModalOpen(true);
+    };
+
+    const handlePickApplicationForSchedule = (candidate: Candidate, application: CompanyApplication | null) => {
+        if (!isOwn(candidate) || !scheduleModalDate) return;
+        const prefilled: CompanyApplication = application
+            ? { ...application, scheduledDate: scheduleModalDate }
+            : { id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '', scheduledDate: scheduleModalDate, memo: '' };
+        setScheduleModalDate(null);
+        setApplicationModalData({ candidate, application: prefilled });
         setIsApplicationModalOpen(true);
     };
 
@@ -2940,6 +3040,15 @@ const CandidatePipelineView: React.FC<{
                 />
             )}
 
+            {scheduleModalDate && (
+                <PipelineDateScheduleModal
+                    date={scheduleModalDate}
+                    ownCandidates={candidates.filter(isOwn)}
+                    onClose={() => setScheduleModalDate(null)}
+                    onPickApplication={handlePickApplicationForSchedule}
+                />
+            )}
+
             <div className="pipeline-header">
                 <h2 id="pipeline-title" className="section-title">候補者パイプライン</h2>
                 <div className="pipeline-controls">
@@ -3011,6 +3120,7 @@ const CandidatePipelineView: React.FC<{
                         viewDate={calendarViewDate}
                         onPrevMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
                         onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                        onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
                     />
                 </div>
             </div>

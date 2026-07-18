@@ -427,12 +427,6 @@ section {
     font-weight: bold;
 }
 
-.pipeline-calendar-day {
-  cursor: default;
-}
-.pipeline-calendar-day:not(.empty):hover {
-  background-color: inherit;
-}
 .pipeline-calendar-events {
   display: flex;
   flex-direction: column;
@@ -1337,6 +1331,12 @@ section {
 .add-button:hover {
   background-color: var(--primary-color);
   color: white;
+}
+.schedule-modal-application-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
 }
 
 /* --- Candidate Pipeline Detail View --- */
