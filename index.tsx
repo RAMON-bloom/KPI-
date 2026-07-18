@@ -4940,6 +4940,13 @@ const App: React.FC = () => {
           if (cached && prev && JSON.stringify(prev) !== JSON.stringify(normalize(cached))) {
             return prev;
           }
+          // A prior save never made it to Drive (e.g. the session expired/was revoked first)
+          // — the local cache is newer than what Drive just returned, so keep showing it rather
+          // than flashing back to the stale Drive snapshot while retryPendingSyncIfNeeded below
+          // pushes the correct data.
+          if (cached && hasPendingSync(email)) {
+            return normalize(cached);
+          }
           return fresh;
         });
         // A prior save may have failed (e.g. an expired session right as it fired) and never
@@ -5554,6 +5561,8 @@ const App: React.FC = () => {
   }
 
   if (!currentIdentity) {
+    const lastEmail = getLastKnownEmail();
+    const pendingOnThisDevice = lastEmail ? hasPendingSync(lastEmail) : false;
     return (
         <div className="login-container">
             <div className="login-box">
@@ -5567,13 +5576,24 @@ const App: React.FC = () => {
                 >
                     {isSigningIn
                         ? 'ログイン中...'
-                        : getLastKnownEmail()
-                        ? `${getLastKnownEmail()} で続ける`
+                        : lastEmail
+                        ? `${lastEmail} で続ける`
                         : 'Googleでログイン'}
                 </button>
                 <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: '#666' }}>
                     bloom-firm.com のGoogleアカウントでログインしてください。
                 </p>
+                {pendingOnThisDevice && (
+                    <div className="sync-error-banner" style={{ marginTop: '1rem', textAlign: 'left' }}>
+                        <strong>⚠️ この端末に、まだGoogleドライブへ保存されていない入力データがあります。</strong>
+                        <p style={{ margin: '0.5rem 0 0' }}>データを消さずに復旧するには：</p>
+                        <ol style={{ margin: '0.25rem 0 0', paddingLeft: '1.25rem' }}>
+                            <li>この<strong>同じ端末・同じブラウザ</strong>で、上のボタンから{lastEmail ? `「${lastEmail}」` : ''}で再度ログインしてください（別の端末やブラウザでログインしても、この端末に残っているデータは反映されません）。</li>
+                            <li>ログインすると自動的に保存が再試行されます。この警告が消えれば保存完了です。</li>
+                            <li>ログインし直すまでは、ブラウザの履歴・データ消去やシークレットモードでのアクセスは避けてください。</li>
+                        </ol>
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -5653,7 +5673,12 @@ const App: React.FC = () => {
       
       {hasSyncError && (
         <div className="sync-error-banner">
-          ⚠️ 一部の変更をGoogleドライブへ保存できていません（ログインし直すと解決する場合があります）。データはこの端末には残っています。
+          <strong>⚠️ 一部の変更がまだGoogleドライブに保存されていません。</strong>
+          <p style={{ margin: '0.5rem 0 0' }}>自動で再試行していますが、解決しない場合は次の手順をお試しください：</p>
+          <ol style={{ margin: '0.25rem 0 0', paddingLeft: '1.25rem' }}>
+            <li>この<strong>同じ端末・同じブラウザ</strong>のまま、一度ログアウトして再度ログインしてください（別の端末・別のブラウザではこのデータは見られません）。</li>
+            <li>この警告が消えれば保存完了です。消えない場合はネットワーク接続を確認し、しばらく待ってから再度お試しください。</li>
+          </ol>
         </div>
       )}
       <header className="app-main-header">
