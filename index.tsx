@@ -177,6 +177,20 @@ const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
     '選考辞退': 'salmon',
 };
 
+/** Short labels for the pipeline calendar, where space is tight — e.g. "1次面接" → "1次". */
+const STAGE_SHORT_LABELS: Record<PipelineStage, string> = {
+    '打診': '打診',
+    '書類選考': '書類',
+    'カジュアル面談': 'カジュアル',
+    '1次面接': '1次',
+    '2次面接': '2次',
+    '最終面接': '最終',
+    '内定': 'オファー',
+    '内定承諾': '承諾',
+    'お見送り': '見送り',
+    '選考辞退': '辞退',
+};
+
 interface CompanyApplication {
   id: string;
   companyName: string;
@@ -2523,6 +2537,7 @@ const PipelineCalendarView: React.FC<{
                                 style={{ '--badge-color': STAGE_COLOR_MAP[ev.stage] } as React.CSSProperties}
                                 title={`${ev.candidateName} / ${ev.companyName} / ${ev.stage}${ev.ownerLabel ? ` (${ev.ownerLabel})` : ''}`}
                             >
+                                <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.stage]}</span>
                                 {ev.candidateName} - {ev.companyName}
                             </div>
                         ))}

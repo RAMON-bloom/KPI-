@@ -450,6 +450,14 @@ section {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.pipeline-calendar-event-stage {
+  display: inline-block;
+  font-weight: bold;
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 0.2rem;
+  padding: 0 0.3rem;
+  margin-right: 0.3rem;
+}
 .detail-card-item-memo {
   align-items: flex-start;
 }
