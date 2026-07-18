@@ -1534,7 +1534,8 @@ const MediaModal: React.FC<{
     onArchiveMedia: (id: string) => void;
     onUnarchiveMedia: (id: string) => void;
     onSetFeeRate: (id: string, feeRate: number | undefined) => void;
-}> = ({ allMedia, isEditable, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate }) => {
+    onRefresh: () => void;
+}> = ({ allMedia, isEditable, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate, onRefresh }) => {
     const [newMediaName, setNewMediaName] = useState('');
     const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -1576,7 +1577,10 @@ const MediaModal: React.FC<{
             <div className="modal-content" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <h3 id="media-modal-title">媒体管理</h3>
-                    <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <button onClick={onRefresh} className="secondary-action-button">更新</button>
+                        <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+                    </div>
                 </div>
                 <div className="modal-body">
                     {!isEditable && (
@@ -4901,6 +4905,28 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [currentIdentity, isInitialized]);
 
+  const refreshMediaConfig = useCallback(async () => {
+    if (!currentIdentity) return;
+    try {
+      const result = await loadMediaConfig<MediaConfig>();
+      if (result.data) {
+        setAllMedia(result.data.media || []);
+        setMediaDriveFileId(result.driveFileId);
+        setMediaOwnerEmail(result.ownerEmail);
+      }
+    } catch (error) {
+      console.error('Failed to refresh media config from Drive', error);
+    }
+  }, [currentIdentity]);
+
+  // The initial load above only runs once per sign-in, so anyone with the app already open in
+  // a tab would otherwise keep seeing whatever media config was current when they loaded the
+  // page — re-fetch every time the 媒体管理 modal is opened so changes the admin made since
+  // then (e.g. a new fee rate) show up without a full page reload.
+  useEffect(() => {
+    if (isMediaModalOpen) refreshMediaConfig();
+  }, [isMediaModalOpen, refreshMediaConfig]);
+
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
@@ -5363,6 +5389,7 @@ const App: React.FC = () => {
           onArchiveMedia={handleArchiveMedia}
           onUnarchiveMedia={handleUnarchiveMedia}
           onSetFeeRate={handleSetMediaFeeRate}
+          onRefresh={refreshMediaConfig}
         />
       )}
       {selectedDate && (
