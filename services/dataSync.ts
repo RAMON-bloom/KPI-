@@ -3,12 +3,35 @@ import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent,
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
 const PENDING_SYNC_PREFIX = 'kpiPendingSync:';
+const LAST_SYNCED_AT_PREFIX = 'kpiLastSyncedAt:';
 const LEGACY_APPDATA_KEY = 'kpiAppData';
 const MEDIA_CONFIG_CACHE_KEY = 'kpiMediaConfigCache';
 const SCHEMA_VERSION = 1;
 
 function pendingSyncKey(email: string): string {
   return `${PENDING_SYNC_PREFIX}${email}`;
+}
+
+function lastSyncedAtKey(email: string): string {
+  return `${LAST_SYNCED_AT_PREFIX}${email}`;
+}
+
+/** Epoch ms of the last successful Drive write for this user, or null if there's never been one. */
+export function getLastSyncedAt(email: string): number | null {
+  try {
+    const raw = localStorage.getItem(lastSyncedAtKey(email));
+    return raw ? Number(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setLastSyncedAt(email: string, timestamp: number): void {
+  try {
+    localStorage.setItem(lastSyncedAtKey(email), String(timestamp));
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -205,6 +228,7 @@ async function performSave(
       onFileCreated(newId);
     }
     clearPendingSync(email);
+    setLastSyncedAt(email, Date.now());
     notifySyncStatus(email, false);
   } catch (err) {
     // The data is still safe in this browser's local cache — just flag that Drive hasn't seen
@@ -257,6 +281,26 @@ export async function flushPendingSave(): Promise<void> {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
+  await enqueuePendingSave();
+}
+
+/**
+ * Pushes the given data to Drive right now, regardless of whether anything is actually
+ * pending — for a manual "同期" button, where the user wants to confirm/force a write rather
+ * than wait for the debounce or a change to trigger one.
+ */
+export async function forceSyncNow(
+  email: string,
+  driveFileId: string | null,
+  data: unknown,
+  onFileCreated: (id: string) => void
+): Promise<void> {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  writeLocalCache(email, data);
+  pendingSave = { email, driveFileId, data, onFileCreated };
   await enqueuePendingSave();
 }
 

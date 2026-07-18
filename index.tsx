@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 
 ChartJS.register(
@@ -4836,6 +4836,8 @@ const App: React.FC = () => {
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
   const [hasSyncError, setHasSyncError] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [isForcingSync, setIsForcingSync] = useState(false);
   
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
@@ -5274,11 +5276,14 @@ const App: React.FC = () => {
   // below is just a recovery safety net (e.g. the session becomes valid again on its own,
   // without the user touching anything) — it's not the primary detection path.
   useEffect(() => {
-    if (!currentIdentity) { setHasSyncError(false); return; }
+    if (!currentIdentity) { setHasSyncError(false); setLastSyncedAt(null); return; }
     const email = currentIdentity.email;
     setHasSyncError(hasPendingSync(email));
+    setLastSyncedAt(getLastSyncedAt(email));
     const unsubscribe = onSyncStatusChange((changedEmail, hasPending) => {
-      if (changedEmail === email) setHasSyncError(hasPending);
+      if (changedEmail !== email) return;
+      setHasSyncError(hasPending);
+      setLastSyncedAt(getLastSyncedAt(email));
     });
     const intervalId = setInterval(() => {
       if (hasPendingSync(email)) retryPendingSyncIfNeeded(email, driveFileId, setDriveFileId);
@@ -5311,6 +5316,16 @@ const App: React.FC = () => {
         signOut();
         setCurrentIdentity(null);
         setCurrentUser(null);
+    };
+
+    const handleForceSync = async () => {
+        if (!currentIdentity || !currentUserData) return;
+        setIsForcingSync(true);
+        try {
+            await forceSyncNow(currentIdentity.email, driveFileId, currentUserData, setDriveFileId);
+        } finally {
+            setIsForcingSync(false);
+        }
     };
 
   const handleTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -5769,6 +5784,15 @@ const App: React.FC = () => {
                 </div>
             </section>
             
+             <div className="sync-status-bar">
+               <span>
+                 最終同期: {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString('ja-JP') : '未同期'}
+               </span>
+               <button type="button" onClick={handleForceSync} disabled={isForcingSync} className="secondary-action-button">
+                 {isForcingSync ? '同期中...' : '今すぐ同期'}
+               </button>
+             </div>
+
              <section aria-labelledby="calendar-title">
               <h2
                 id="calendar-title"

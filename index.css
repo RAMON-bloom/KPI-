@@ -89,6 +89,18 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.sync-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.25rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;
