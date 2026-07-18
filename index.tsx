@@ -17,6 +17,7 @@ import {
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 
 ChartJS.register(
   CategoryScale,
@@ -1539,6 +1540,9 @@ const CandidateModal: React.FC<{
     const [audioDragActive, setAudioDragActive] = useState(false);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isGeneratingInterviewSummary, setIsGeneratingInterviewSummary] = useState(false);
+    const [isSearchingInterviewLogs, setIsSearchingInterviewLogs] = useState(false);
+    const [interviewLogResults, setInterviewLogResults] = useState<InterviewLogFile[] | null>(null);
+    const [isSummarizingInterviewLog, setIsSummarizingInterviewLog] = useState(false);
     const resumeInputRef = useRef<HTMLInputElement>(null);
     const audioInputRef = useRef<HTMLInputElement>(null);
 
@@ -1784,6 +1788,51 @@ const CandidateModal: React.FC<{
         audioInputRef.current?.click();
     };
 
+    const handleSearchInterviewLogs = async () => {
+        if (!candidate.name.trim()) {
+            alert('先に候補者名を入力してください。');
+            return;
+        }
+        setIsSearchingInterviewLogs(true);
+        setInterviewLogResults(null);
+        try {
+            const results = await searchInterviewLogsByName(candidate.name.trim());
+            setInterviewLogResults(results);
+            if (results.length === 0) {
+                alert('Googleドライブ内に該当する面談ログ（Google Meetの議事録）が見つかりませんでした。');
+            }
+        } catch (error) {
+            console.error('Error searching interview logs:', error);
+            alert('面談ログの検索中にエラーが発生しました。');
+        } finally {
+            setIsSearchingInterviewLogs(false);
+        }
+    };
+
+    const handleUseInterviewLog = async (file: InterviewLogFile) => {
+        setIsSummarizingInterviewLog(true);
+        try {
+            const text = await exportGoogleDocAsText(file.id);
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: `以下はGoogle Meetの面談議事録です。候補者「${candidate.name}」について、強み、弱み、懸念事項、そして特筆すべきスキルや経験を箇条書きで簡潔にまとめてください。\n\n---\n${text}`,
+            });
+            const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
+            const entry = `--- 面談ログ「${file.name}」(${dateLabel}) より ---\n${response.text.trim()}`;
+            setCandidate(prev => ({
+                ...prev,
+                interviewSummary: prev.interviewSummary ? `${prev.interviewSummary}\n\n${entry}` : entry,
+            }));
+            setInterviewLogResults(null);
+        } catch (error) {
+            console.error('Error summarizing interview log:', error);
+            alert('面談ログの要約生成中にエラーが発生しました。');
+        } finally {
+            setIsSummarizingInterviewLog(false);
+        }
+    };
+
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -1855,6 +1904,42 @@ const CandidateModal: React.FC<{
                         <p onClick={onAudioButtonClick}>ここに音声ファイルをドラッグ＆ドロップ、またはクリックして選択</p>
                       )}
                     </div>
+                  </div>
+                  <div className="form-group form-group-span-3">
+                    <label>面談ログ（Google Meet議事録）</label>
+                    <p className="form-helper-text">候補者名でGoogleドライブ内のMeet議事録を検索し、面談要約に追記できます。</p>
+                    <button
+                        type="button"
+                        onClick={handleSearchInterviewLogs}
+                        disabled={isSearchingInterviewLogs || isSummarizingInterviewLog}
+                        className="secondary-action-button"
+                    >
+                        {isSearchingInterviewLogs ? '検索中...' : '候補者名でGoogleドライブを検索'}
+                    </button>
+                    {interviewLogResults && interviewLogResults.length > 0 && (
+                        <ul className="user-management-list" style={{ marginTop: '0.5rem' }}>
+                            {interviewLogResults.map(file => (
+                                <li key={file.id} className="user-management-item">
+                                    <span className="user-management-name">
+                                        {file.name}
+                                        <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>
+                                            {new Date(file.modifiedTime).toLocaleDateString('ja-JP')}
+                                        </span>
+                                    </span>
+                                    <div className="user-management-actions">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleUseInterviewLog(file)}
+                                            disabled={isSummarizingInterviewLog}
+                                            className="save-user-button"
+                                        >
+                                            {isSummarizingInterviewLog ? '要約中...' : 'この面談ログを使う'}
+                                        </button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                   </div>
               </div>
 

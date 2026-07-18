@@ -174,3 +174,39 @@ export async function createMediaConfigFile(content: unknown, creatorEmail: stri
   await grantDomainPermission(fileId, 'writer');
   return fileId;
 }
+
+function escapeDriveQueryValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+export interface InterviewLogFile {
+  id: string;
+  name: string;
+  modifiedTime: string;
+  webViewLink?: string;
+}
+
+/**
+ * Searches the signed-in user's own Drive (drive.readonly — this app was never granted
+ * access to files it didn't create, so this only ever searches the current user's Drive,
+ * not other users') for Google Docs whose name or content mentions the candidate. Google
+ * Meet saves auto-generated transcripts/notes as Google Docs, so this is restricted to that
+ * mimeType.
+ */
+export async function searchInterviewLogsByName(candidateName: string): Promise<InterviewLogFile[]> {
+  const escaped = escapeDriveQueryValue(candidateName);
+  const q = `mimeType='application/vnd.google-apps.document' and trashed=false and (name contains '${escaped}' or fullText contains '${escaped}')`;
+  const res = await authorizedFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=5&spaces=drive`
+  );
+  if (!res.ok) throw new Error('面談ログの検索に失敗しました。');
+  const data = await res.json();
+  return data.files ?? [];
+}
+
+/** Exports a native Google Doc's content as plain text (Meet transcripts/notes are Google Docs). */
+export async function exportGoogleDocAsText(fileId: string): Promise<string> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/plain`);
+  if (!res.ok) throw new Error('面談ログの読み込みに失敗しました。');
+  return res.text();
+}
