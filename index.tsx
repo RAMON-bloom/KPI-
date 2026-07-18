@@ -2934,6 +2934,176 @@ const CandidatePipelineView: React.FC<{
 };
 
 
+const FUNNEL_STAGE_KEYS = Object.keys(GENERAL_KPIS) as (keyof typeof GENERAL_KPIS)[];
+
+/** Rate at index i is "stage[i] / stage[i-1]"; index 0 has no previous stage, so it's null. */
+const computeConversionRates = (values: number[]): (number | null)[] =>
+  values.map((v, i) => (i === 0 ? null : (values[i - 1] > 0 ? (v / values[i - 1]) * 100 : null)));
+
+const findBottleneckIndex = (rates: (number | null)[]): number => {
+  let minIdx = -1;
+  let minVal = Infinity;
+  rates.forEach((r, i) => {
+    if (r !== null && r < minVal) {
+      minVal = r;
+      minIdx = i;
+    }
+  });
+  return minIdx;
+};
+
+const FunnelAnalysisSection: React.FC<{
+  users: string[];
+  allUsersData: Record<string, UserData>;
+  allMedia: MediaEntry[];
+}> = ({ users, allUsersData, allMedia }) => {
+  const [isVisible, setIsVisible] = useState(true);
+  const [aiSuggestion, setAiSuggestion] = useState('');
+  const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
+
+  const { totalStageValues, perUserStageValues } = useMemo(() => {
+    const perUser: Record<string, number[]> = {};
+    const totals = FUNNEL_STAGE_KEYS.map(() => 0);
+    users.forEach(email => {
+      const data = allUsersData[email];
+      if (!data) return;
+      const monthlyTotals = calculateMonthlyTotals(data.entries || [], allMedia);
+      const values = FUNNEL_STAGE_KEYS.map(key => monthlyTotals[key] || 0);
+      perUser[email] = values;
+      values.forEach((v, i) => { totals[i] += v; });
+    });
+    return { totalStageValues: totals, perUserStageValues: perUser };
+  }, [users, allUsersData, allMedia]);
+
+  const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
+  const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
+
+  const handleGenerateSuggestion = async () => {
+    setIsGeneratingSuggestion(true);
+    setAiSuggestion('');
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const lines: string[] = ['【全体ファネル実績（今月・全ユーザー合計）】'];
+      FUNNEL_STAGE_KEYS.forEach((key, i) => {
+        const rate = totalConversionRates[i];
+        lines.push(`${GENERAL_KPIS[key].label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
+      });
+      lines.push('', '【ユーザー別実績（今月）】');
+      users.forEach(email => {
+        const data = allUsersData[email];
+        if (!data) return;
+        const label = data.displayName || email;
+        const values = perUserStageValues[email] || FUNNEL_STAGE_KEYS.map(() => 0);
+        const rates = computeConversionRates(values);
+        const parts = FUNNEL_STAGE_KEYS.map((key, i) =>
+          `${GENERAL_KPIS[key].label} ${values[i]}件${rates[i] !== null ? `(${rates[i]!.toFixed(1)}%)` : ''}`
+        );
+        lines.push(`${label}: ${parts.join(', ')}`);
+      });
+
+      const prompt = `以下は採用エージェントの求人紹介パイプラインにおける、今月の全体ファネル実績とユーザー別実績です。各ステップの歩留まり（前段階からの通過率）を踏まえて、ボトルネックとなっている工程を指摘し、改善のための具体的な施策を日本語で3〜5点、簡潔に提案してください。\n\n${lines.join('\n')}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      setAiSuggestion(response.text.trim());
+    } catch (error) {
+      console.error('Error generating improvement suggestion:', error);
+      alert('AIによる改善提案の生成中にエラーが発生しました。');
+    } finally {
+      setIsGeneratingSuggestion(false);
+    }
+  };
+
+  return (
+    <section aria-labelledby="funnel-analysis-title">
+      <h2
+        id="funnel-analysis-title"
+        className="section-title collapsible-header"
+        onClick={() => setIsVisible(prev => !prev)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsVisible(prev => !prev); } }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={isVisible}
+        aria-controls="funnel-analysis-content"
+      >
+        <span>歩留まり分析（ファネル）</span>
+        <span className={`toggle-icon ${isVisible ? 'open' : ''}`}>▼</span>
+      </h2>
+      <div id="funnel-analysis-content" className={`collapsible-content ${isVisible ? 'open' : ''}`}>
+        <h3 className="sub-section-title">全体ファネル（全ユーザー合計・今月）</h3>
+        <div className="all-users-table-container">
+          <table className="all-users-table">
+            <thead>
+              <tr><th>指標</th><th>件数</th><th>前段階からの歩留まり</th></tr>
+            </thead>
+            <tbody>
+              {FUNNEL_STAGE_KEYS.map((key, i) => (
+                <tr key={key}>
+                  <td>{GENERAL_KPIS[key].label}</td>
+                  <td>{totalStageValues[i]}</td>
+                  <td style={i === bottleneckIndex ? { color: 'crimson', fontWeight: 'bold' } : undefined}>
+                    {totalConversionRates[i] !== null
+                      ? `${totalConversionRates[i]!.toFixed(1)}%${i === bottleneckIndex ? '（ボトルネック）' : ''}`
+                      : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（今月の歩留まり %）</h3>
+        <div className="all-users-table-container">
+          <table className="all-users-table">
+            <thead>
+              <tr>
+                <th>ユーザー</th>
+                {FUNNEL_STAGE_KEYS.slice(1).map(key => <th key={key}>{GENERAL_KPIS[key].label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {users.map(email => {
+                const data = allUsersData[email];
+                if (!data) return null;
+                const label = data.displayName || email;
+                const values = perUserStageValues[email] || FUNNEL_STAGE_KEYS.map(() => 0);
+                const rates = computeConversionRates(values);
+                const userBottleneckIndex = findBottleneckIndex(rates);
+                return (
+                  <tr key={email}>
+                    <td>{label}</td>
+                    {rates.slice(1).map((rate, idx) => {
+                      const i = idx + 1;
+                      return (
+                        <td key={i} style={i === userBottleneckIndex ? { color: 'crimson', fontWeight: 'bold' } : undefined}>
+                          {rate !== null ? `${rate.toFixed(1)}%` : '—'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ marginTop: '1.5rem' }}>
+          <button type="button" onClick={handleGenerateSuggestion} disabled={isGeneratingSuggestion} className="submit-button">
+            {isGeneratingSuggestion ? 'AIが分析中...' : 'AIに改善提案をもらう'}
+          </button>
+          {aiSuggestion && (
+            <div className="summary-wrapper" style={{ marginTop: '1rem' }}>
+              <p className="info-value summary-text" style={{ whiteSpace: 'pre-wrap' }}>{aiSuggestion}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+};
+
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -3076,7 +3246,9 @@ const AllUsersDashboard: React.FC<{
           </div>
         </div>
       </section>
-      
+
+      <FunnelAnalysisSection users={users} allUsersData={allUsersData} allMedia={allMedia} />
+
       {dayOfWeekReplyRateData && (
         <section aria-labelledby="all-users-dow-title">
           <h2 
