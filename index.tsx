@@ -188,6 +188,10 @@ interface Candidate {
   interviewSummary?: string;
   createdAt: string; // ISO string
   isHidden?: boolean;
+  // Only set when viewing the all-users/team-aggregated pipeline (never persisted) —
+  // identifies whose data this candidate belongs to, for display and edit-permission checks.
+  ownerEmail?: string;
+  ownerLabel?: string;
 }
 
 
@@ -2254,7 +2258,15 @@ const CandidatePipelineView: React.FC<{
     allMedia: MediaEntry[];
     onSave: (candidate: Candidate) => void;
     onToggleVisibility: (candidateId: string) => void;
-}> = ({ candidates, allMedia, onSave, onToggleVisibility }) => {
+    currentUserEmail: string;
+    scope: 'personal' | 'all_users' | 'team';
+    onScopeChange: (scope: 'personal' | 'all_users' | 'team') => void;
+    teams: Team[];
+    selectedTeamId: string | null;
+    onSelectedTeamIdChange: (teamId: string | null) => void;
+    isLoadingAggregate: boolean;
+}> = ({ candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId, onSelectedTeamIdChange, isLoadingAggregate }) => {
+    const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -2277,6 +2289,7 @@ const CandidatePipelineView: React.FC<{
     };
     
     const handleEdit = (candidate: Candidate) => {
+        if (!isOwn(candidate)) return;
         setEditingCandidate(candidate);
         setIsModalOpen(true);
     };
@@ -2290,6 +2303,7 @@ const CandidatePipelineView: React.FC<{
     };
 
     const handleOpenApplicationModal = (candidate: Candidate, application: CompanyApplication | null) => {
+        if (!isOwn(candidate)) return;
         setApplicationModalData({ candidate, application });
         setIsApplicationModalOpen(true);
     };
@@ -2318,6 +2332,7 @@ const CandidatePipelineView: React.FC<{
     };
 
     const handleToggleApplicationVisibility = (candidate: Candidate, applicationId: string) => {
+        if (!isOwn(candidate)) return;
         const updatedApplications = candidate.applications.map(app =>
             app.id === applicationId ? { ...app, isHidden: !app.isHidden } : app
         );
@@ -2524,17 +2539,39 @@ const CandidatePipelineView: React.FC<{
             <div className="pipeline-header">
                 <h2 id="pipeline-title" className="section-title">候補者パイプライン</h2>
                 <div className="pipeline-controls">
-                    <input 
-                        type="text" 
-                        placeholder="候補者名で検索..." 
-                        value={searchTerm} 
-                        onChange={e => setSearchTerm(e.target.value)} 
+                    <input
+                        type="text"
+                        placeholder="候補者名で検索..."
+                        value={searchTerm}
+                        onChange={e => setSearchTerm(e.target.value)}
                         className="search-input"
                     />
                      <button onClick={handleExportCSV} className="export-button">CSV出力</button>
                 </div>
             </div>
 
+            <div className="view-switcher" style={{ marginBottom: '1rem' }}>
+                <button onClick={() => onScopeChange('personal')} disabled={scope === 'personal'}>自分</button>
+                <button onClick={() => onScopeChange('all_users')} disabled={scope === 'all_users'}>全ユーザー</button>
+                <button onClick={() => onScopeChange('team')} disabled={scope === 'team'}>チーム</button>
+                {scope === 'team' && (
+                    <select
+                        value={selectedTeamId || ''}
+                        onChange={(e) => onSelectedTeamIdChange(e.target.value || null)}
+                        style={{ marginLeft: '0.75rem' }}
+                    >
+                        <option value="">チームを選択</option>
+                        {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                )}
+            </div>
+
+            {scope !== 'personal' && isLoadingAggregate ? (
+                <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
+            ) : scope === 'team' && !selectedTeamId ? (
+                <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
+            ) : (
+            <>
             <PipelineDashboard candidates={candidates} />
 
             <div className="source-effectiveness-section">
@@ -2556,12 +2593,14 @@ const CandidatePipelineView: React.FC<{
                 </div>
             </div>
 
+            {scope === 'personal' && (
             <div className="add-candidate-action-bar">
                 <button onClick={handleAdd} className="add-candidate-large-button">
                     + 新規候補者を追加
                 </button>
             </div>
-            
+            )}
+
              <div className="pipeline-list-controls">
                 <div className="pipeline-sort-controls">
                   <span>並び替え:</span>
@@ -2590,6 +2629,7 @@ const CandidatePipelineView: React.FC<{
                 {sortedCandidates.length > 0 ? sortedCandidates.map(c => {
                     const isExpanded = expandedCandidateId === c.id;
                     const visibleApplications = c.applications.filter(app => !app.isHidden);
+                    const candidateIsOwn = isOwn(c);
 
                     return (
                         <div key={c.id} className="candidate-list-item">
@@ -2597,22 +2637,25 @@ const CandidatePipelineView: React.FC<{
                                 <div className="candidate-card-header">
                                     <h3
                                       onClick={() => handleEdit(c)}
-                                      className="candidate-name-clickable"
-                                      role="button"
-                                      tabIndex={0}
-                                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEdit(c); }}}
-                                      title={`${c.name}を編集`}
+                                      className={candidateIsOwn ? 'candidate-name-clickable' : ''}
+                                      role={candidateIsOwn ? 'button' : undefined}
+                                      tabIndex={candidateIsOwn ? 0 : undefined}
+                                      onKeyDown={(e) => { if (candidateIsOwn && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); handleEdit(c); }}}
+                                      title={candidateIsOwn ? `${c.name}を編集` : c.name}
                                     >
                                       {c.name}
                                     </h3>
+                                    {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
                                     {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
-                                    <div className="candidate-card-actions">
-                                        <button onClick={() => handleOpenApplicationModal(c, null)} className="add-selection-button">+ 選考追加</button>
-                                        <button onClick={() => handleEdit(c)} className="edit-user-button">編集</button>
-                                        <button onClick={() => onToggleVisibility(c.id)} className={showHidden ? "secondary-action-button" : "delete-user-button"}>
-                                            {showHidden ? '再表示' : '非表示'}
-                                        </button>
-                                    </div>
+                                    {candidateIsOwn && (
+                                        <div className="candidate-card-actions">
+                                            <button onClick={() => handleOpenApplicationModal(c, null)} className="add-selection-button">+ 選考追加</button>
+                                            <button onClick={() => handleEdit(c)} className="edit-user-button">編集</button>
+                                            <button onClick={() => onToggleVisibility(c.id)} className={showHidden ? "secondary-action-button" : "delete-user-button"}>
+                                                {showHidden ? '再表示' : '非表示'}
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="candidate-card-body">
                                     <div className="candidate-key-info">
@@ -2703,12 +2746,14 @@ const CandidatePipelineView: React.FC<{
                                                   <div key={app.id} className={`detail-application-card ${app.isHidden ? 'is-hidden' : ''}`}>
                                                       <div className="detail-card-header">
                                                           <strong>{app.companyName}</strong>
+                                                          {candidateIsOwn && (
                                                           <div className="detail-card-actions">
                                                             <button onClick={() => handleOpenApplicationModal(c, app)} className="edit-user-button">編集</button>
                                                             <button onClick={() => handleToggleApplicationVisibility(c, app.id)} className={app.isHidden ? "secondary-action-button" : "delete-user-button"}>
                                                                 {app.isHidden ? '再表示' : '非表示'}
                                                             </button>
                                                           </div>
+                                                          )}
                                                       </div>
                                                       <div className="detail-card-body">
                                                           <div className="detail-card-item">
@@ -2753,6 +2798,8 @@ const CandidatePipelineView: React.FC<{
                     )
                 )}
             </div>
+            </>
+            )}
         </section>
     );
 };
@@ -3266,6 +3313,8 @@ const App: React.FC = () => {
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team'>('personal');
+  const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [isEditingDisplayName, setIsEditingDisplayName] = useState(false);
   const [editedDisplayName, setEditedDisplayName] = useState('');
 
@@ -3448,16 +3497,20 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if ((view !== 'all_users_kpi' && view !== 'team_kpi') || !isInitialized || !currentIdentity) return;
+    const needsAggregateData =
+      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal');
+    if (!needsAggregateData || !isInitialized || !currentIdentity) return;
     if (hasFetchedAllUsersRef.current) return;
     hasFetchedAllUsersRef.current = true;
     fetchAllUsersData();
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope]);
 
-  // Load the shared teams config when opening the team-filtered view or the Teams management modal.
+  // Load the shared teams config when opening the team-filtered view, the pipeline's team
+  // scope, or the Teams management modal.
   useEffect(() => {
     if (!currentIdentity || !isInitialized) return;
-    if (view !== 'team_kpi' && !isTeamsModalOpen) return;
+    const needsTeams = view === 'team_kpi' || isTeamsModalOpen || (view === 'pipeline' && pipelineScope === 'team');
+    if (!needsTeams) return;
     let cancelled = false;
     (async () => {
       try {
@@ -3471,7 +3524,7 @@ const App: React.FC = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [currentIdentity, isInitialized, view, isTeamsModalOpen]);
+  }, [currentIdentity, isInitialized, view, isTeamsModalOpen, pipelineScope]);
 
   const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
 
@@ -3701,6 +3754,22 @@ const App: React.FC = () => {
       dailyKpiTargets: { ...defaultKpiTargets, ...(currentUserData?.dailyKpiTargets || {}) },
       candidates: currentUserData?.candidates || [],
     }), [currentUserData]);
+
+    // Candidates shown in the pipeline view, scoped to self / all users / a team. Non-personal
+    // scopes flatten every in-scope teammate's candidates and tag each with its owner, so the
+    // pipeline UI can label them and disable editing on candidates that aren't the viewer's own.
+    const pipelineCandidates = useMemo(() => {
+      if (pipelineScope === 'personal') return candidates;
+      const emailsInScope = pipelineScope === 'team'
+        ? (teams.find(t => t.id === pipelineSelectedTeamId)?.memberEmails || [])
+        : Object.keys(displayedAllUsersData);
+      return emailsInScope.flatMap(email => {
+        const data = displayedAllUsersData[email];
+        if (!data) return [];
+        const ownerLabel = data.displayName || email;
+        return (data.candidates || []).map(c => ({ ...c, ownerEmail: email, ownerLabel }));
+      });
+    }, [pipelineScope, pipelineSelectedTeamId, teams, displayedAllUsersData, candidates]);
 
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
@@ -4428,10 +4497,17 @@ const App: React.FC = () => {
         )}
         {view === 'pipeline' && (
             <CandidatePipelineView
-                candidates={candidates}
+                candidates={pipelineCandidates}
                 allMedia={allMedia}
                 onSave={handleSaveCandidate}
                 onToggleVisibility={handleToggleCandidateVisibility}
+                currentUserEmail={currentIdentity?.email || ''}
+                scope={pipelineScope}
+                onScopeChange={setPipelineScope}
+                teams={teams}
+                selectedTeamId={pipelineSelectedTeamId}
+                onSelectedTeamIdChange={setPipelineSelectedTeamId}
+                isLoadingAggregate={isLoadingAllUsers}
             />
         )}
       </main>
