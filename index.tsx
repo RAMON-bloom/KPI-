@@ -1336,17 +1336,20 @@ const TeamsModal: React.FC<{
     teams: Team[];
     isEditable: boolean;
     ownerEmail: string | null;
+    userOptions: { email: string; label: string }[];
     onClose: () => void;
     onCreateTeam: (name: string) => void;
     onRenameTeam: (teamId: string, name: string) => void;
     onDeleteTeam: (teamId: string) => void;
     onAddMember: (teamId: string, email: string) => void;
     onRemoveMember: (teamId: string, email: string) => void;
-}> = ({ teams, isEditable, ownerEmail, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember }) => {
+}> = ({ teams, isEditable, ownerEmail, userOptions, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
+
+    const labelByEmail = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
 
     const handleCreate = (e: React.FormEvent) => {
         e.preventDefault();
@@ -1365,8 +1368,8 @@ const TeamsModal: React.FC<{
         setEditingTeamId(null);
     };
 
-    const handleAddMember = (teamId: string) => {
-        const email = (memberInputs[teamId] || '').trim();
+    const handleAddMember = (teamId: string, emailOverride?: string) => {
+        const email = (emailOverride ?? memberInputs[teamId] ?? '').trim();
         if (!email) return;
         if (!email.toLowerCase().endsWith('@bloom-firm.com')) {
             alert('bloom-firm.com のメールアドレスを入力してください。');
@@ -1447,7 +1450,10 @@ const TeamsModal: React.FC<{
                                     <ul style={{ marginTop: '0.5rem', paddingLeft: '1rem' }}>
                                         {team.memberEmails.map(email => (
                                             <li key={email} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.25rem 0' }}>
-                                                <span>{email}</span>
+                                                <span>
+                                                    {labelByEmail.get(email) || email}
+                                                    {labelByEmail.has(email) && <small style={{ color: 'var(--text-muted-color)' }}> ({email})</small>}
+                                                </span>
                                                 {isEditable && (
                                                     <button onClick={() => onRemoveMember(team.id, email)} className="delete-user-button">削除</button>
                                                 )}
@@ -1455,7 +1461,18 @@ const TeamsModal: React.FC<{
                                         ))}
                                     </ul>
                                     {isEditable && (
-                                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem', alignItems: 'center' }}>
+                                            <select
+                                                value=""
+                                                onChange={(e) => { if (e.target.value) handleAddMember(team.id, e.target.value); }}
+                                                aria-label="登録済みユーザーから選択して追加"
+                                            >
+                                                <option value="">登録済みユーザーから選択...</option>
+                                                {userOptions
+                                                    .filter(u => !team.memberEmails.includes(u.email))
+                                                    .map(u => <option key={u.email} value={u.email}>{u.label}</option>)}
+                                            </select>
+                                            <span style={{ color: 'var(--text-muted-color)', fontSize: '0.85rem' }}>または</span>
                                             <input
                                                 type="email"
                                                 placeholder="member@bloom-firm.com"
@@ -4468,12 +4485,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const needsAggregateData =
-      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal');
+      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen;
     if (!needsAggregateData || !isInitialized || !currentIdentity) return;
     if (hasFetchedAllUsersRef.current) return;
     hasFetchedAllUsersRef.current = true;
     fetchAllUsersData();
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen]);
 
   // Load the shared teams config when opening the team-filtered view, the pipeline's team
   // scope, or the Teams management modal.
@@ -4969,6 +4986,7 @@ const App: React.FC = () => {
           teams={teams}
           isEditable={isTeamsEditable}
           ownerEmail={teamsOwnerEmail}
+          userOptions={pipelineUserOptions}
           onClose={() => setIsTeamsModalOpen(false)}
           onCreateTeam={handleCreateTeam}
           onRenameTeam={handleRenameTeam}
