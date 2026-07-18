@@ -427,6 +427,37 @@ section {
     font-weight: bold;
 }
 
+.pipeline-calendar-day {
+  cursor: default;
+}
+.pipeline-calendar-day:not(.empty):hover {
+  background-color: inherit;
+}
+.pipeline-calendar-events {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+  overflow-y: auto;
+}
+.pipeline-calendar-event {
+  font-size: 0.75rem;
+  color: white;
+  background-color: var(--badge-color, var(--secondary-color));
+  border-radius: 0.3rem;
+  padding: 0.15rem 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detail-card-item-memo {
+  align-items: flex-start;
+}
+.detail-card-memo-text {
+  white-space: pre-wrap;
+  text-align: right;
+}
+
 
 /* --- Modals --- */
 .modal-overlay {

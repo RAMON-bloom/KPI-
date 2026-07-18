@@ -164,11 +164,29 @@ interface WeeklyData {
 const PIPELINE_STAGES = ['打診', '書類選考', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾', 'お見送り', '選考辞退'] as const;
 type PipelineStage = typeof PIPELINE_STAGES[number];
 
+const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
+    '打診': 'grey',
+    '書類選考': 'cadetblue',
+    'カジュアル面談': 'lightblue',
+    '1次面接': 'dodgerblue',
+    '2次面接': 'royalblue',
+    '最終面接': 'mediumblue',
+    '内定': 'orange',
+    '内定承諾': 'limegreen',
+    'お見送り': 'crimson',
+    '選考辞退': 'salmon',
+};
+
 interface CompanyApplication {
   id: string;
   companyName: string;
   stage: PipelineStage;
   nextAction: string;
+  // Manually-set date of the next scheduled interview/action for this application, shown on
+  // the pipeline calendar. Free-form text notes about the current status, separate from
+  // nextAction (which is more of a short "what's next" label).
+  scheduledDate?: string; // ISO yyyy-mm-dd
+  memo?: string;
   isHidden?: boolean;
 }
 
@@ -1901,7 +1919,7 @@ const CandidateModal: React.FC<{
             };
 
             const textPart = {
-                text: 'この面談の音声データを要約してください。候補者の強み、弱み、懸念事項、そして特筆すべきスキルや経験について、箇条書きで簡潔にまとめてください。',
+                text: 'この面談の音声データの内容を、シンプルに要約してください。',
             };
 
             const response = await ai.models.generateContent({
@@ -1979,7 +1997,7 @@ const CandidateModal: React.FC<{
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
-                contents: `以下はGoogle Meetの面談議事録です。候補者「${candidate.name}」について、強み、弱み、懸念事項、そして特筆すべきスキルや経験を箇条書きで簡潔にまとめてください。\n\n---\n${text}`,
+                contents: `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
             });
             const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
             const entry = `--- 面談ログ「${file.name}」(${dateLabel}) より ---\n${response.text.trim()}`;
@@ -2224,6 +2242,27 @@ const CandidateModal: React.FC<{
                             aria-label={`次アクション ${index + 1}`}
                           />
                        </div>
+                       <div className="form-group">
+                          <label htmlFor={`scheduledDate-${app.id}`}>選考予定日</label>
+                          <input
+                            id={`scheduledDate-${app.id}`}
+                            type="date"
+                            value={app.scheduledDate || ''}
+                            onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
+                            aria-label={`選考予定日 ${index + 1}`}
+                          />
+                       </div>
+                       <div className="form-group form-group-span-2">
+                          <label htmlFor={`memo-${app.id}`}>メモ</label>
+                          <textarea
+                            id={`memo-${app.id}`}
+                            placeholder="選考状況に関するメモ"
+                            value={app.memo || ''}
+                            onChange={e => handleApplicationChange(index, 'memo', e.target.value)}
+                            aria-label={`メモ ${index + 1}`}
+                            rows={2}
+                          />
+                       </div>
                     </div>
                 ))}
                 <button type="button" onClick={addApplication} className="add-button">+ 選考企業を追加</button>
@@ -2249,7 +2288,7 @@ const ApplicationModal: React.FC<{
   initialData: CompanyApplication | null; // null for new, object for edit
 }> = ({ isOpen, onClose, onSave, candidateName, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
-        id: '', companyName: '', stage: '打診', nextAction: ''
+        id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
 
     useEffect(() => {
@@ -2262,7 +2301,9 @@ const ApplicationModal: React.FC<{
                     id: `app_${Date.now()}`,
                     companyName: '',
                     stage: '打診',
-                    nextAction: ''
+                    nextAction: '',
+                    scheduledDate: '',
+                    memo: ''
                 });
             }
         }
@@ -2270,7 +2311,7 @@ const ApplicationModal: React.FC<{
 
     if (!isOpen) return null;
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
         setApplication(prev => ({ ...prev, [name]: value }));
     };
@@ -2328,6 +2369,27 @@ const ApplicationModal: React.FC<{
                             onChange={handleChange}
                         />
                     </div>
+                    <div className="form-group">
+                        <label htmlFor="scheduledDate">選考予定日</label>
+                        <input
+                            type="date"
+                            id="scheduledDate"
+                            name="scheduledDate"
+                            value={application.scheduledDate || ''}
+                            onChange={handleChange}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="memo">メモ</label>
+                        <textarea
+                            id="memo"
+                            name="memo"
+                            value={application.memo || ''}
+                            onChange={handleChange}
+                            rows={3}
+                            placeholder="選考状況に関するメモ"
+                        />
+                    </div>
                 </form>
                 <div className="modal-footer">
                     <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
@@ -2351,19 +2413,6 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
         '内定承諾': 8,
         'お見送り': 0,
         '選考辞退': 0,
-    };
-
-    const stageColorMap: Record<PipelineStage, string> = {
-        '打診': 'grey',
-        '書類選考': 'cadetblue',
-        'カジュアル面談': 'lightblue',
-        '1次面接': 'dodgerblue',
-        '2次面接': 'royalblue',
-        '最終面接': 'mediumblue',
-        '内定': 'orange',
-        '内定承諾': 'limegreen',
-        'お見送り': 'crimson',
-        '選考辞退': 'salmon',
     };
 
     const stageCounts = useMemo(() => {
@@ -2402,11 +2451,100 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
     return (
         <div className="pipeline-dashboard">
             {PIPELINE_STAGES.map(stage => (
-                <div key={stage} className="pipeline-stage-card" style={{'--badge-color': stageColorMap[stage]} as React.CSSProperties}>
+                <div key={stage} className="pipeline-stage-card" style={{'--badge-color': STAGE_COLOR_MAP[stage]} as React.CSSProperties}>
                     <span className="stage-name">{stage}</span>
                     <span className="stage-count">{stageCounts[stage]}</span>
                 </div>
             ))}
+        </div>
+    );
+};
+
+
+interface PipelineCalendarEvent {
+    candidateName: string;
+    companyName: string;
+    stage: PipelineStage;
+    ownerLabel?: string;
+}
+
+/**
+ * Month calendar of every visible application's manually-set scheduledDate. Reads whatever
+ * `candidates` list the caller passes in, so it's automatically scoped by the pipeline's
+ * existing 自分/全ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here.
+ */
+const PipelineCalendarView: React.FC<{
+    candidates: Candidate[];
+    viewDate: Date;
+    onPrevMonth: () => void;
+    onNextMonth: () => void;
+}> = ({ candidates, viewDate, onPrevMonth, onNextMonth }) => {
+    const year = viewDate.getFullYear();
+    const month = viewDate.getMonth();
+
+    const eventsByDate = useMemo(() => {
+        const map = new Map<string, PipelineCalendarEvent[]>();
+        candidates.filter(c => !c.isHidden).forEach(c => {
+            c.applications.filter(app => !app.isHidden && app.scheduledDate).forEach(app => {
+                const list = map.get(app.scheduledDate!) || [];
+                list.push({ candidateName: c.name, companyName: app.companyName, stage: app.stage, ownerLabel: c.ownerLabel });
+                map.set(app.scheduledDate!, list);
+            });
+        });
+        return map;
+    }, [candidates]);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayLocalString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    const firstDayOfMonth = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    const days = [];
+    for (let i = 0; i < firstDayOfMonth; i++) {
+        days.push(<div key={`empty-${i}`} className="calendar-day empty"></div>);
+    }
+
+    for (let i = 1; i <= daysInMonth; i++) {
+        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+        const events = eventsByDate.get(dateStr) || [];
+        const isToday = dateStr === todayLocalString;
+
+        days.push(
+            <div key={i} className={`calendar-day pipeline-calendar-day ${isToday ? 'today' : ''} ${events.length > 0 ? 'has-data' : ''}`}>
+                <div className="day-number">{i}</div>
+                {events.length > 0 && (
+                    <div className="pipeline-calendar-events">
+                        {events.map((ev, idx) => (
+                            <div
+                                key={idx}
+                                className="pipeline-calendar-event"
+                                style={{ '--badge-color': STAGE_COLOR_MAP[ev.stage] } as React.CSSProperties}
+                                title={`${ev.candidateName} / ${ev.companyName} / ${ev.stage}${ev.ownerLabel ? ` (${ev.ownerLabel})` : ''}`}
+                            >
+                                {ev.candidateName} - {ev.companyName}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    return (
+        <div className="calendar-container pipeline-calendar-container">
+            <div className="calendar-header">
+                <button onClick={onPrevMonth} aria-label="前の月へ">&lt; 前月</button>
+                <h2>{`${year}年 ${month + 1}月`}</h2>
+                <button onClick={onNextMonth} aria-label="次の月へ">次月 &gt;</button>
+            </div>
+            <div className="calendar-grid-header">
+                {['日', '月', '火', '水', '木', '金', '土'].map(day => <div key={day}>{day}</div>)}
+            </div>
+            <div className="calendar-grid pipeline-calendar-grid">
+                {days}
+            </div>
         </div>
     );
 };
@@ -2526,6 +2664,8 @@ const CandidatePipelineView: React.FC<{
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(true);
+    const [isCalendarVisible, setIsCalendarVisible] = useState(true);
+    const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
     
     // State for the new Application Modal
@@ -2757,19 +2897,6 @@ const CandidatePipelineView: React.FC<{
         return sortConfig.direction === 'asc' ? ' ▲' : ' ▼';
     };
 
-    const stageColorMap: Record<PipelineStage, string> = {
-        '打診': 'grey',
-        '書類選考': 'cadetblue',
-        'カジュアル面談': 'lightblue',
-        '1次面接': 'dodgerblue',
-        '2次面接': 'royalblue',
-        '最終面接': 'mediumblue',
-        '内定': 'orange',
-        '内定承諾': 'limegreen',
-        'お見送り': 'crimson',
-        '選考辞退': 'salmon',
-    };
-
     const sortOptions: { key: keyof Candidate, label: string }[] = [
       { key: 'createdAt', label: '登録日' },
       { key: 'name', label: '氏名' },
@@ -2848,6 +2975,30 @@ const CandidatePipelineView: React.FC<{
             ) : (
             <>
             <PipelineDashboard candidates={candidates} />
+
+            <div className="source-effectiveness-section">
+                <h3
+                    id="pipeline-calendar-title"
+                    className="section-title collapsible-header"
+                    onClick={() => setIsCalendarVisible(prev => !prev)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCalendarVisible(prev => !prev); }}}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isCalendarVisible}
+                    aria-controls="pipeline-calendar-content"
+                >
+                    <span>選考スケジュール カレンダー</span>
+                    <span className={`toggle-icon ${isCalendarVisible ? 'open' : ''}`}>▼</span>
+                </h3>
+                <div id="pipeline-calendar-content" className={`collapsible-content ${isCalendarVisible ? 'open' : ''}`}>
+                    <PipelineCalendarView
+                        candidates={candidates}
+                        viewDate={calendarViewDate}
+                        onPrevMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+                        onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                    />
+                </div>
+            </div>
 
             <div className="source-effectiveness-section">
                 <h3
@@ -2964,7 +3115,7 @@ const CandidatePipelineView: React.FC<{
                                                     <span 
                                                         key={app.id} 
                                                         className="status-badge" 
-                                                        style={{'--badge-color': stageColorMap[app.stage]} as React.CSSProperties}
+                                                        style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
                                                         title={`${app.companyName}: ${app.stage}`}
                                                     >
                                                         {app.companyName}: {app.stage}
@@ -3052,7 +3203,7 @@ const CandidatePipelineView: React.FC<{
                                                               <span>進捗状況:</span>
                                                               <span 
                                                                   className="status-badge" 
-                                                                  style={{'--badge-color': stageColorMap[app.stage]} as React.CSSProperties}
+                                                                  style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
                                                               >
                                                                   {app.stage}
                                                               </span>
@@ -3061,6 +3212,16 @@ const CandidatePipelineView: React.FC<{
                                                               <span>次アクション:</span>
                                                               <span>{app.nextAction || '未設定'}</span>
                                                           </div>
+                                                          <div className="detail-card-item">
+                                                              <span>選考予定日:</span>
+                                                              <span>{app.scheduledDate ? new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                                                          </div>
+                                                          {app.memo && (
+                                                              <div className="detail-card-item detail-card-item-memo">
+                                                                  <span>メモ:</span>
+                                                                  <span className="detail-card-memo-text">{app.memo}</span>
+                                                              </div>
+                                                          )}
                                                       </div>
                                                   </div>
                                               ))}
