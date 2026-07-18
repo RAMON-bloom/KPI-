@@ -2274,6 +2274,7 @@ const CandidatePipelineView: React.FC<{
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [showHidden, setShowHidden] = useState(false);
+    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(true);
@@ -2459,9 +2460,12 @@ const CandidatePipelineView: React.FC<{
         return candidates.filter(c => {
             const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase());
             const matchesVisibility = showHidden ? c.isHidden === true : !c.isHidden;
-            return matchesSearch && matchesVisibility;
+            const matchesStage = selectedStageFilters.length === 0 || c.applications.some(
+                app => !app.isHidden && selectedStageFilters.includes(app.stage)
+            );
+            return matchesSearch && matchesVisibility && matchesStage;
         });
-    }, [candidates, searchTerm, showHidden]);
+    }, [candidates, searchTerm, showHidden, selectedStageFilters]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -2492,7 +2496,14 @@ const CandidatePipelineView: React.FC<{
         }
         setSortConfig({ key, direction });
     };
-    
+
+    const toggleStageFilter = (stage: PipelineStage) => {
+        setSelectedStageFilters(prev =>
+            prev.includes(stage) ? prev.filter(s => s !== stage) : [...prev, stage]
+        );
+    };
+
+
     const getSortIndicator = (key: keyof Candidate) => {
         if (!sortConfig || sortConfig.key !== key) return '';
         return sortConfig.direction === 'asc' ? ' ▲' : ' ▼';
@@ -2618,6 +2629,23 @@ const CandidatePipelineView: React.FC<{
             )}
 
              <div className="pipeline-list-controls">
+                <div className="pipeline-sort-controls">
+                  <span>選考フェーズで絞り込み:</span>
+                  {PIPELINE_STAGES.map(stage => (
+                     <button
+                        key={stage}
+                        onClick={() => toggleStageFilter(stage)}
+                        className={selectedStageFilters.includes(stage) ? 'active' : ''}
+                      >
+                        {stage}
+                      </button>
+                  ))}
+                  {selectedStageFilters.length > 0 && (
+                      <button onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
+                          クリア
+                      </button>
+                  )}
+                </div>
                 <div className="pipeline-sort-controls">
                   <span>並び替え:</span>
                   {sortOptions.map(opt => (
