@@ -3449,9 +3449,9 @@ const CandidatePipelineView: React.FC<{
         }
 
         const headers = [
-            '氏名', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', 
+            '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)',
             '集客媒体', '他エージェント使用状況', '登録日', '概要',
-            '応募企業名', '進捗状況', '次アクション'
+            '応募企業名', '進捗状況', '次アクション', '内定確度', '入社確度'
         ];
 
         const escapeCSV = (str: string | number | undefined | null): string => {
@@ -3468,6 +3468,7 @@ const CandidatePipelineView: React.FC<{
         dataToExport.forEach(candidate => {
             const commonData = [
                 escapeCSV(candidate.name),
+                escapeCSV(candidate.ownerLabel || candidate.ownerEmail || ''),
                 escapeCSV(candidate.currentCompany),
                 escapeCSV(candidate.education),
                 escapeCSV(candidate.currentSalary),
@@ -3477,7 +3478,7 @@ const CandidatePipelineView: React.FC<{
                 new Date(candidate.createdAt).toLocaleDateString('ja-JP'),
                 escapeCSV(candidate.summary),
             ];
-            
+
             const emptyCommonData = Array(commonData.length).fill('');
             const visibleApps = candidate.applications.filter(app => !app.isHidden);
 
@@ -3487,6 +3488,8 @@ const CandidatePipelineView: React.FC<{
                         escapeCSV(app.companyName),
                         escapeCSV(app.stage),
                         escapeCSV(app.nextAction),
+                        escapeCSV(app.offerConfidence || ''),
+                        escapeCSV(app.acceptanceConfidence || ''),
                     ];
                     if (index === 0) {
                         rows.push([...commonData, ...applicationData]);
@@ -3495,7 +3498,7 @@ const CandidatePipelineView: React.FC<{
                     }
                 });
             } else {
-                 rows.push([...commonData, '', '', '']);
+                 rows.push([...commonData, '', '', '', '', '']);
             }
         });
         
