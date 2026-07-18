@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 
 ChartJS.register(
@@ -5239,6 +5239,22 @@ const App: React.FC = () => {
     });
   }, [currentUserData, currentIdentity, isInitialized, isLoadingUserData]);
 
+  // Best-effort flush of any pending debounced save when the tab is backgrounded or the page
+  // is about to be torn down — the 2s debounce window would otherwise silently drop the last
+  // few seconds of edits if the user closes/navigates away before it fires.
+  useEffect(() => {
+    const flush = () => { flushPendingSave(); };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', flush);
+    };
+  }, []);
+
 
     const handleGoogleSignIn = async () => {
         setIsSigningIn(true);
@@ -5253,7 +5269,11 @@ const App: React.FC = () => {
         }
     };
 
-    const handleLogout = () => {
+    const handleLogout = async () => {
+        // Make sure any debounced-but-not-yet-written edit actually reaches Drive before the
+        // session (and its access token) is cleared — otherwise the save either never fires or
+        // fires after sign-out and silently fails, and the last few seconds of input are lost.
+        await flushPendingSave();
         signOut();
         setCurrentIdentity(null);
         setCurrentUser(null);

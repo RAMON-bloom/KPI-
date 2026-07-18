@@ -126,6 +126,27 @@ export async function createInitialDriveFile(email: string, data: unknown): Prom
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingSave: { email: string; driveFileId: string | null; data: unknown; onFileCreated: (id: string) => void } | null = null;
+
+async function performSave(
+  email: string,
+  driveFileId: string | null,
+  data: unknown,
+  onFileCreated: (id: string) => void
+): Promise<void> {
+  try {
+    const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
+    if (driveFileId) {
+      await updateFileContent(driveFileId, payload);
+    } else {
+      const newId = await createOwnDataFile(payload, email);
+      setCachedDriveFileId(email, newId);
+      onFileCreated(newId);
+    }
+  } catch (err) {
+    console.error('Failed to sync data to Drive', err);
+  }
+}
 
 /**
  * Writes to the local cache immediately (fast UI), then debounces the Drive sync
@@ -138,21 +159,34 @@ export function saveOwnDataDebounced(
   onFileCreated: (id: string) => void
 ): void {
   writeLocalCache(email, data);
+  pendingSave = { email, driveFileId, data, onFileCreated };
   if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(async () => {
-    try {
-      const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
-      if (driveFileId) {
-        await updateFileContent(driveFileId, payload);
-      } else {
-        const newId = await createOwnDataFile(payload, email);
-        setCachedDriveFileId(email, newId);
-        onFileCreated(newId);
-      }
-    } catch (err) {
-      console.error('Failed to sync data to Drive', err);
-    }
+  debounceTimer = setTimeout(() => {
+    const save = pendingSave;
+    pendingSave = null;
+    debounceTimer = null;
+    if (save) performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
   }, 2000);
+}
+
+/**
+ * Immediately performs any pending debounced save instead of waiting out the idle timer.
+ * Without this, a save queued right before the user signs out (or closes/backgrounds the tab)
+ * could be silently lost: the 2s timer either never fires (page/context gone) or fires after
+ * the session's already been cleared, so the Drive write fails with no visible error — the
+ * user's last few seconds of input never make it to Drive even though it's in local cache on
+ * that one device. Call this before signing out and on visibility/pagehide changes.
+ */
+export async function flushPendingSave(): Promise<void> {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  const save = pendingSave;
+  pendingSave = null;
+  if (save) {
+    await performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
+  }
 }
 
 export interface TeammateData<T> {
