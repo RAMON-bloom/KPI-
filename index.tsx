@@ -549,6 +549,55 @@ const DayOfWeekReplyRateChart: React.FC<{ data: any }> = ({ data }) => {
 };
 
 
+/** Aggregates several users' entries/weekly targets into the same shape WeeklySummary expects, for reuse in the team/all-users views. */
+function computeAggregateWeeklyData(
+  users: string[],
+  allUsersData: Record<string, UserData>,
+  activeMedia: MediaEntry[],
+  weekStartDate: Date
+): { data: WeeklyData; weeklyKpiTargets: Record<KpiKey, number> } {
+  const weekStart = weekStartDate.getTime();
+  const weekEnd = new Date(weekStartDate).setDate(weekStartDate.getDate() + 6);
+  const allKeys = buildAllKpiKeys(activeMedia);
+
+  const weeklyTotals = {} as KpiTotals;
+  const weeklyKpiTargets = {} as Record<KpiKey, number>;
+  allKeys.forEach(key => { weeklyTotals[key] = 0; weeklyKpiTargets[key] = 0; });
+
+  users.forEach(user => {
+    const userData = allUsersData[user];
+    if (!userData) return;
+    (userData.entries || []).forEach(entry => {
+      const entryTime = new Date(entry.date).getTime();
+      if (entryTime >= weekStart && entryTime <= weekEnd) {
+        allKeys.forEach(key => { weeklyTotals[key] += entry.values[key] || 0; });
+      }
+    });
+    const targets = userData.weeklyKpiTargets || {};
+    allKeys.forEach(key => { weeklyKpiTargets[key] += targets[key] || 0; });
+  });
+
+  const mediaStats = activeMedia.map(source => {
+    const sourceKey = source.id;
+    return {
+      source: source.name,
+      id: source.id,
+      scoutsSent: weeklyTotals[`${sourceKey}_scoutsSent` as KpiKey] || 0,
+      scoutReplies: weeklyTotals[`${sourceKey}_scoutReplies` as KpiKey] || 0,
+      effectiveReplies: weeklyTotals[`${sourceKey}_effectiveReplies` as KpiKey] || 0,
+      documentsCollected: weeklyTotals[`${sourceKey}_documentsCollected` as KpiKey] || 0,
+      effectiveDocumentsCollected: weeklyTotals[`${sourceKey}_effectiveDocumentsCollected` as KpiKey] || 0,
+      initialInterviews: weeklyTotals[`${sourceKey}_initialInterviews` as KpiKey] || 0,
+      effectiveInitialInterviews: weeklyTotals[`${sourceKey}_effectiveInitialInterviews` as KpiKey] || 0,
+    };
+  });
+
+  const totalCandidatesSubmitted = weeklyTotals.candidatesSubmitted || 0;
+  const totalInitialInterviews = mediaStats.reduce((sum, stat) => sum + stat.initialInterviews, 0);
+
+  return { data: { mediaStats, totalCandidatesSubmitted, totalInitialInterviews }, weeklyKpiTargets };
+}
+
 const WeeklySummary: React.FC<{
   weekStartDate: Date;
   data: WeeklyData;
@@ -3109,9 +3158,17 @@ const AllUsersDashboard: React.FC<{
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
   dayOfWeekReplyRateData: any | null;
-  visibility: { progress: boolean; dowRate: boolean };
-  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate') => void;
-}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, visibility, toggleSection }) => {
+  weekStartDate: Date;
+  onPrevWeek: () => void;
+  onNextWeek: () => void;
+  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean };
+  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary') => void;
+}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection }) => {
+  const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
+  const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
+    () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
+    [users, allUsersData, activeMedia, weekStartDate]
+  );
   return (
     <>
       <section aria-labelledby="all-users-dashboard-title">
@@ -3244,6 +3301,31 @@ const AllUsersDashboard: React.FC<{
               </tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="all-users-weekly-summary-title">
+        <h2
+          id="all-users-weekly-summary-title"
+          className="section-title collapsible-header"
+          onClick={() => toggleSection('allUsersWeeklySummary')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersWeeklySummary'); } }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={visibility.weeklySummary}
+          aria-controls="all-users-weekly-summary-content"
+        >
+          <span>週間サマリー（合計）</span>
+          <span className={`toggle-icon ${visibility.weeklySummary ? 'open' : ''}`}>▼</span>
+        </h2>
+        <div id="all-users-weekly-summary-content" className={`collapsible-content ${visibility.weeklySummary ? 'open' : ''}`}>
+          <WeeklySummary
+            weekStartDate={weekStartDate}
+            data={aggregateWeeklyData}
+            weeklyKpiTargets={aggregateWeeklyKpiTargets}
+            onPrevWeek={onPrevWeek}
+            onNextWeek={onNextWeek}
+          />
         </div>
       </section>
 
@@ -3584,7 +3666,7 @@ type SectionVisibilityKeys =
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
   | 'dailyProgress' | 'customPeriodReport'
-  | 'allUsersProgress' | 'allUsersDayOfWeekRate';
+  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary';
 
 
 const App: React.FC = () => {
@@ -3650,6 +3732,7 @@ const App: React.FC = () => {
     customPeriodReport: false,
     allUsersProgress: true,
     allUsersDayOfWeekRate: true,
+    allUsersWeeklySummary: true,
   });
 
   const toggleSection = (sectionKey: SectionVisibilityKeys) => {
@@ -4768,7 +4851,10 @@ const App: React.FC = () => {
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
+                  weekStartDate={viewWeekStartDate}
+                  onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
+                  onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary }}
                   toggleSection={toggleSection}
               />
             </>
@@ -4800,7 +4886,10 @@ const App: React.FC = () => {
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate }}
+                  weekStartDate={viewWeekStartDate}
+                  onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
+                  onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary }}
                   toggleSection={toggleSection}
               />
             )}
