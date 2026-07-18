@@ -35,7 +35,11 @@ async function grantDomainPermission(fileId: string, role: 'reader' | 'writer'):
     const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, type: 'domain', domain: ALLOWED_DOMAIN }),
+      // allowFileDiscovery defaults to false for domain/anyone-type permissions — without it,
+      // the file is reachable by anyone with the link (and shows as shared in the UI) but is
+      // invisible to files.list search for everyone except the owner. This was the actual root
+      // cause of the "全ユーザー" cross-user visibility bug.
+      body: JSON.stringify({ role, type: 'domain', domain: ALLOWED_DOMAIN, allowFileDiscovery: true }),
     });
     if (!res.ok) {
       console.error(`Failed to grant domain permission on Drive file ${fileId}: ${res.status} ${await res.text()}`);
@@ -49,18 +53,42 @@ async function grantDomainPermission(fileId: string, role: 'reader' | 'writer'):
   }
 }
 
+async function patchAllowFileDiscovery(fileId: string, permissionId: string): Promise<void> {
+  try {
+    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${permissionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowFileDiscovery: true }),
+    });
+    if (!res.ok) {
+      console.error(`Failed to enable file discovery on Drive file ${fileId}: ${res.status} ${await res.text()}`);
+    }
+  } catch (err) {
+    console.error(`Failed to enable file discovery on Drive file ${fileId}`, err);
+  }
+}
+
 /**
- * Checks whether a file already has a domain-wide permission, and grants one if it doesn't.
- * Self-heals files whose sharing failed silently at creation time (e.g. a transient API
- * error) — call this opportunistically whenever a file is loaded, not just when it's created.
+ * Checks whether a file already has a domain-wide, search-discoverable permission, and
+ * grants/repairs one if it doesn't. Self-heals files whose sharing failed silently at
+ * creation time, or — the common case for existing files — that were shared before
+ * `allowFileDiscovery` was added to the grant, which left them invisible to teammates'
+ * searches despite showing as correctly shared in the Drive UI. Call this opportunistically
+ * whenever a file is loaded, not just when it's created.
  */
 export async function ensureDomainPermission(fileId: string, role: 'reader' | 'writer'): Promise<void> {
   try {
-    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=permissions(type,role)`);
+    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=permissions(id,type,role,allowFileDiscovery)`);
     if (res.ok) {
       const data = await res.json();
-      const hasDomainPermission = (data.permissions || []).some((p: any) => p.type === 'domain');
-      if (hasDomainPermission) return;
+      const domainPermission = (data.permissions || []).find((p: any) => p.type === 'domain');
+      if (domainPermission) {
+        if (!domainPermission.allowFileDiscovery) {
+          console.warn(`Drive file ${fileId}'s domain permission was not search-discoverable — patching now.`);
+          await patchAllowFileDiscovery(fileId, domainPermission.id);
+        }
+        return;
+      }
       console.warn(`Drive file ${fileId} was missing its domain-wide permission — re-granting now.`);
     }
   } catch (err) {
