@@ -80,20 +80,29 @@ export async function findOwnDataFile(): Promise<DriveFileRef | null> {
   return data.files?.[0] ?? null;
 }
 
-/** Finds every teammate's kpi-manager-data.json shared domain-wide (requires drive.readonly). */
+/**
+ * Finds every teammate's kpi-manager-data.json shared domain-wide (requires drive.readonly).
+ * Deliberately matches on filename alone, NOT `appProperties` — appProperties set by another
+ * user's client are not reliably visible to this query (this was the root cause of the
+ * "全ユーザー" cross-user visibility bug: a domain-shared file's appProperties were invisible
+ * to everyone except the file's own creator, so this search silently found nothing for
+ * teammates even though the file itself was correctly shared).
+ */
 export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
-  const q = `name='${DATA_FILE_NAME}' and appProperties has { key='app' and value='${APP_TAG}' } and trashed=false`;
-  const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,properties)&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`
-  );
+  const q = `name='${DATA_FILE_NAME}' and trashed=false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,properties,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`;
+  const res = await authorizedFetch(url);
+  console.log('[listTeammateDataFiles] query:', q, 'status:', res.status);
   if (!res.ok) throw new Error('チームメンバーのデータ検索に失敗しました。');
   const data = await res.json();
-  return (data.files ?? []).map((f: any) => ({
+  const files = (data.files ?? []).map((f: any) => ({
     id: f.id,
     name: f.name,
     modifiedTime: f.modifiedTime,
-    ownerEmail: f.properties?.ownerEmail,
+    ownerEmail: f.properties?.ownerEmail || f.owners?.[0]?.emailAddress,
   }));
+  console.log('[listTeammateDataFiles] found', files.length, 'file(s):', files.map((f: DriveFileRef) => f.ownerEmail || f.id));
+  return files;
 }
 
 export async function readFileContent<T = any>(fileId: string): Promise<T> {
@@ -135,11 +144,14 @@ export async function updateFileContent(fileId: string, content: unknown): Promi
   if (!res.ok) throw new Error('Driveファイルの保存に失敗しました。');
 }
 
-/** Finds the single shared teams-config file (created by whoever first set up teams), if it exists. */
+/**
+ * Finds the single shared teams-config file (created by whoever first set up teams), if it exists.
+ * Matches on filename alone (not `appProperties` — see the comment on listTeammateDataFiles for why).
+ */
 export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
-  const q = `name='${TEAMS_FILE_NAME}' and appProperties has { key='kind' and value='teams-config' } and trashed=false`;
+  const q = `name='${TEAMS_FILE_NAME}' and trashed=false`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`
   );
   if (!res.ok) throw new Error('チーム設定ファイルの検索に失敗しました。');
   const data = await res.json();
@@ -155,11 +167,14 @@ export async function createTeamsConfigFile(content: unknown, creatorEmail: stri
   return fileId;
 }
 
-/** Finds the single shared media-config file (the list of scouting media sources), if it exists. */
+/**
+ * Finds the single shared media-config file (the list of scouting media sources), if it exists.
+ * Matches on filename alone (not `appProperties` — see the comment on listTeammateDataFiles for why).
+ */
 export async function findMediaConfigFile(): Promise<DriveFileRef | null> {
-  const q = `name='${MEDIA_FILE_NAME}' and appProperties has { key='kind' and value='media-config' } and trashed=false`;
+  const q = `name='${MEDIA_FILE_NAME}' and trashed=false`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=allDrives&includeItemsFromAllDrives=true&supportsAllDrives=true`
   );
   if (!res.ok) throw new Error('媒体設定ファイルの検索に失敗しました。');
   const data = await res.json();
