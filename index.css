@@ -1502,6 +1502,42 @@ section {
   color: var(--text-muted-color);
 }
 
+.gross-profit-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.gross-profit-total-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 1rem 1.5rem;
+}
+.gross-profit-total-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.gross-profit-total-item span {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+}
+.gross-profit-total-item strong {
+  font-size: 1.4rem;
+}
+.gross-profit-total-item.highlight strong {
+  color: var(--success-color);
+}
+.gross-profit-note {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+  font-style: italic;
+  margin: 0;
+}
+
 .detail-card-item {
   display: flex;
   justify-content: space-between;

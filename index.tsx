@@ -50,6 +50,10 @@ interface MediaEntry {
   name: string;
   isArchived: boolean;
   createdAt: string;
+  // Handling fee this media source charges (as a % of the placed candidate's expected annual
+  // salary) when a candidate sourced through it gets placed — subtracted from the client fee
+  // to compute expected gross profit.
+  feeRate?: number;
 }
 
 interface MediaConfig {
@@ -229,6 +233,10 @@ interface CompanyApplication {
   scheduledDate?: string; // ISO yyyy-mm-dd
   memo?: string;
   isHidden?: boolean;
+  // Referral fee rate charged to this client company (% of the candidate's expected annual
+  // salary) — position-specific, since different companies/positions can negotiate different
+  // rates for the same candidate.
+  feeRate?: number;
 }
 
 interface Candidate {
@@ -248,6 +256,10 @@ interface Candidate {
   interviewSummary?: string;
   createdAt: string; // ISO string
   isHidden?: boolean;
+  // Expected annual salary (万円) this candidate is likely to be placed at — distinct from
+  // `salary` (their stated desired salary) — used with each application's feeRate to project
+  // gross profit.
+  expectedAnnualSalary?: number;
   // Only set when viewing the all-users/team-aggregated pipeline (never persisted) —
   // identifies whose data this candidate belongs to, for display and edit-permission checks.
   ownerEmail?: string;
@@ -1505,10 +1517,23 @@ const MediaModal: React.FC<{
     onRenameMedia: (id: string, name: string) => void;
     onArchiveMedia: (id: string) => void;
     onUnarchiveMedia: (id: string) => void;
-}> = ({ allMedia, isEditable, ownerEmail, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia }) => {
+    onSetFeeRate: (id: string, feeRate: number | undefined) => void;
+}> = ({ allMedia, isEditable, ownerEmail, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate }) => {
     const [newMediaName, setNewMediaName] = useState('');
     const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
+    const [feeRateInputs, setFeeRateInputs] = useState<Record<string, string>>({});
+
+    const handleFeeRateChange = (id: string, value: string) => {
+        setFeeRateInputs(prev => ({ ...prev, [id]: value }));
+    };
+
+    const handleFeeRateBlur = (id: string) => {
+        const raw = feeRateInputs[id];
+        if (raw === undefined) return;
+        const trimmed = raw.trim();
+        onSetFeeRate(id, trimmed === '' ? undefined : Number(trimmed));
+    };
 
     const activeMedia = allMedia.filter(m => !m.isArchived);
     const archivedMedia = allMedia.filter(m => m.isArchived);
@@ -1565,39 +1590,56 @@ const MediaModal: React.FC<{
                     ) : (
                         <ul className="user-management-list">
                             {activeMedia.map(media => (
-                                <li key={media.id} className="user-management-item">
-                                    {editingMediaId === media.id ? (
+                                <li key={media.id} className="user-management-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                                        {editingMediaId === media.id ? (
+                                            <input
+                                                type="text"
+                                                value={editedName}
+                                                onChange={(e) => setEditedName(e.target.value)}
+                                                className="user-management-input"
+                                                autoFocus
+                                                onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(media.id)}
+                                            />
+                                        ) : (
+                                            <span className="user-management-name">{media.name}</span>
+                                        )}
+                                        {isEditable && (
+                                            <div className="user-management-actions">
+                                                {editingMediaId === media.id ? (
+                                                    <>
+                                                        <button onClick={() => handleSaveEdit(media.id)} className="save-user-button">保存</button>
+                                                        <button onClick={() => setEditingMediaId(null)} className="cancel-user-button">キャンセル</button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <button onClick={() => handleStartEdit(media)} className="edit-user-button">改称</button>
+                                                        <button
+                                                            onClick={() => window.confirm(`「${media.name}」をアーカイブします。過去の実績データは保持されますが、入力フォームには表示されなくなります。よろしいですか？`) && onArchiveMedia(media.id)}
+                                                            className="delete-user-button"
+                                                        >
+                                                            アーカイブ
+                                                        </button>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                        <label htmlFor={`media-fee-rate-${media.id}`} style={{ fontSize: '0.85rem', color: 'var(--text-muted-color)' }}>手数料率(%):</label>
                                         <input
-                                            type="text"
-                                            value={editedName}
-                                            onChange={(e) => setEditedName(e.target.value)}
-                                            className="user-management-input"
-                                            autoFocus
-                                            onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(media.id)}
+                                            id={`media-fee-rate-${media.id}`}
+                                            type="number"
+                                            min="0"
+                                            step="0.1"
+                                            style={{ width: '5rem' }}
+                                            placeholder="未設定"
+                                            value={feeRateInputs[media.id] ?? (media.feeRate ?? '')}
+                                            onChange={(e) => handleFeeRateChange(media.id, e.target.value)}
+                                            onBlur={() => handleFeeRateBlur(media.id)}
+                                            disabled={!isEditable}
                                         />
-                                    ) : (
-                                        <span className="user-management-name">{media.name}</span>
-                                    )}
-                                    {isEditable && (
-                                        <div className="user-management-actions">
-                                            {editingMediaId === media.id ? (
-                                                <>
-                                                    <button onClick={() => handleSaveEdit(media.id)} className="save-user-button">保存</button>
-                                                    <button onClick={() => setEditingMediaId(null)} className="cancel-user-button">キャンセル</button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <button onClick={() => handleStartEdit(media)} className="edit-user-button">改称</button>
-                                                    <button
-                                                        onClick={() => window.confirm(`「${media.name}」をアーカイブします。過去の実績データは保持されますが、入力フォームには表示されなくなります。よろしいですか？`) && onArchiveMedia(media.id)}
-                                                        className="delete-user-button"
-                                                    >
-                                                        アーカイブ
-                                                    </button>
-                                                </>
-                                            )}
-                                        </div>
-                                    )}
+                                    </div>
                                 </li>
                             ))}
                         </ul>
@@ -1744,6 +1786,7 @@ const CandidateModal: React.FC<{
         name: '',
         salary: 0,
         currentSalary: 0,
+        expectedAnnualSalary: 0,
         currentCompany: '',
         education: '',
         source: '',
@@ -1765,6 +1808,7 @@ const CandidateModal: React.FC<{
         return {
             ...initial,
             currentSalary: initial.currentSalary || 0,
+            expectedAnnualSalary: initial.expectedAnnualSalary || 0,
             currentCompany: initial.currentCompany || '',
             education: initial.education || '',
             usingOtherAgents: initial.usingOtherAgents || hasOtherAgents || false,
@@ -1787,12 +1831,16 @@ const CandidateModal: React.FC<{
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
-        setCandidate(prev => ({ ...prev, [name]: (name === 'salary' || name === 'currentSalary') ? Number(value) : value }));
+        const numericFields = ['salary', 'currentSalary', 'expectedAnnualSalary'];
+        setCandidate(prev => ({ ...prev, [name]: numericFields.includes(name) ? Number(value) : value }));
     };
 
     const handleApplicationChange = (index: number, field: keyof CompanyApplication, value: string) => {
         const newApplications = [...candidate.applications];
-        newApplications[index] = { ...newApplications[index], [field]: value };
+        const parsedValue: string | number | undefined = field === 'feeRate'
+            ? (value === '' ? undefined : Number(value))
+            : value;
+        newApplications[index] = { ...newApplications[index], [field]: parsedValue };
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
 
@@ -2204,6 +2252,10 @@ const CandidateModal: React.FC<{
                     <input type="number" id="salary" name="salary" value={candidate.salary || ''} onChange={handleChange} placeholder="例: 650" />
                 </div>
                 <div className="form-group">
+                    <label htmlFor="expectedAnnualSalary">想定年収 (万円)</label>
+                    <input type="number" id="expectedAnnualSalary" name="expectedAnnualSalary" value={candidate.expectedAnnualSalary || ''} onChange={handleChange} placeholder="例: 600" />
+                </div>
+                <div className="form-group">
                     <label htmlFor="source">集客媒体</label>
                     <select id="source" name="source" value={candidate.source} onChange={handleChange}>
                         <option value="">選択してください</option>
@@ -2310,6 +2362,19 @@ const CandidateModal: React.FC<{
                             aria-label={`選考予定日 ${index + 1}`}
                           />
                        </div>
+                       <div className="form-group">
+                          <label htmlFor={`feeRate-${app.id}`}>fee料率(%)</label>
+                          <input
+                            id={`feeRate-${app.id}`}
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            placeholder="例: 35"
+                            value={app.feeRate ?? ''}
+                            onChange={e => handleApplicationChange(index, 'feeRate', e.target.value)}
+                            aria-label={`fee料率 ${index + 1}`}
+                          />
+                       </div>
                        <div className="form-group form-group-span-2">
                           <label htmlFor={`memo-${app.id}`}>メモ</label>
                           <textarea
@@ -2371,6 +2436,10 @@ const ApplicationModal: React.FC<{
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
+        if (name === 'feeRate') {
+            setApplication(prev => ({ ...prev, feeRate: value === '' ? undefined : Number(value) }));
+            return;
+        }
         setApplication(prev => ({ ...prev, [name]: value }));
     };
 
@@ -2434,6 +2503,19 @@ const ApplicationModal: React.FC<{
                             id="scheduledDate"
                             name="scheduledDate"
                             value={application.scheduledDate || ''}
+                            onChange={handleChange}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="feeRate">fee料率(%)</label>
+                        <input
+                            type="number"
+                            id="feeRate"
+                            name="feeRate"
+                            min="0"
+                            step="0.1"
+                            placeholder="例: 35"
+                            value={application.feeRate ?? ''}
                             onChange={handleChange}
                         />
                     </div>
@@ -2590,6 +2672,123 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
                     <span className="stage-count">{stageCounts[stage]}</span>
                 </div>
             ))}
+        </div>
+    );
+};
+
+
+interface StageGrossProfit {
+    stage: PipelineStage;
+    count: number;
+    estimableCount: number;
+    revenue: number;
+    cost: number;
+    profit: number;
+}
+
+/**
+ * Expected gross profit for one application: revenue is the client referral fee (candidate's
+ * expected annual salary × the position's own fee rate — different positions for the same
+ * candidate can negotiate different rates), cost is the handling fee owed to the media the
+ * candidate was sourced through. Returns null when either the candidate's expected annual
+ * salary or the position's fee rate hasn't been entered yet, so callers can tell "zero profit"
+ * apart from "not enough data to estimate".
+ */
+function computeApplicationGrossProfit(
+    candidate: Candidate,
+    application: CompanyApplication,
+    mediaFeeRateById: Map<string, number>
+): { revenue: number; cost: number; profit: number } | null {
+    if (!candidate.expectedAnnualSalary || application.feeRate === undefined || application.feeRate === null) return null;
+    const revenue = candidate.expectedAnnualSalary * (application.feeRate / 100);
+    const mediaFeeRate = mediaFeeRateById.get(candidate.source) || 0;
+    const cost = candidate.expectedAnnualSalary * (mediaFeeRate / 100);
+    return { revenue, cost, profit: revenue - cost };
+}
+
+function computeGrossProfitByStage(candidates: Candidate[], allMedia: MediaEntry[]): StageGrossProfit[] {
+    const mediaFeeRateById = new Map(allMedia.map(m => [m.id, m.feeRate || 0]));
+    const totalsByStage = new Map<PipelineStage, StageGrossProfit>(
+        PIPELINE_STAGES.map(stage => [stage, { stage, count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 }])
+    );
+
+    candidates.filter(c => !c.isHidden).forEach(candidate => {
+        candidate.applications.filter(app => !app.isHidden).forEach(application => {
+            const bucket = totalsByStage.get(application.stage)!;
+            bucket.count++;
+            const result = computeApplicationGrossProfit(candidate, application, mediaFeeRateById);
+            if (result) {
+                bucket.estimableCount++;
+                bucket.revenue += result.revenue;
+                bucket.cost += result.cost;
+                bucket.profit += result.profit;
+            }
+        });
+    });
+
+    return PIPELINE_STAGES.map(stage => totalsByStage.get(stage)!);
+}
+
+const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
+
+/**
+ * Shows expected gross profit (client referral fee minus the sourcing media's handling fee)
+ * broken down by selection stage, plus a grand total across every stage except お見送り/
+ * 選考辞退 (lost — they'll never generate revenue). Applications missing either the
+ * candidate's expected annual salary or their own fee rate are counted but excluded from the
+ * sums, and that gap is surfaced rather than silently under-reporting the total.
+ */
+const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
+    const stageTotals = useMemo(() => computeGrossProfitByStage(candidates, allMedia), [candidates, allMedia]);
+
+    const grandTotal = useMemo(() => {
+        return stageTotals
+            .filter(s => s.stage !== 'お見送り' && s.stage !== '選考辞退')
+            .reduce((acc, s) => ({
+                count: acc.count + s.count,
+                estimableCount: acc.estimableCount + s.estimableCount,
+                revenue: acc.revenue + s.revenue,
+                cost: acc.cost + s.cost,
+                profit: acc.profit + s.profit,
+            }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+    }, [stageTotals]);
+
+    return (
+        <div className="gross-profit-summary">
+            <div className="gross-profit-total-card">
+                <div className="gross-profit-total-item">
+                    <span>想定紹介料（合計）</span>
+                    <strong>{formatManYen(grandTotal.revenue)}</strong>
+                </div>
+                <div className="gross-profit-total-item">
+                    <span>想定媒体手数料（合計）</span>
+                    <strong>{formatManYen(grandTotal.cost)}</strong>
+                </div>
+                <div className="gross-profit-total-item highlight">
+                    <span>想定粗利（合計）</span>
+                    <strong>{formatManYen(grandTotal.profit)}</strong>
+                </div>
+            </div>
+            {grandTotal.count > grandTotal.estimableCount && (
+                <p className="gross-profit-note">
+                    ※ お見送り・選考辞退を除く{grandTotal.count}件中、想定年収とfee料率が両方入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
+                </p>
+            )}
+            <div className="detail-application-grid">
+                {stageTotals.filter(s => s.count > 0).map(s => (
+                    <div key={s.stage} className="detail-application-card" style={{ borderLeftColor: STAGE_COLOR_MAP[s.stage] }}>
+                        <div className="detail-card-header">
+                            <span className="status-badge" style={{ '--badge-color': STAGE_COLOR_MAP[s.stage] } as React.CSSProperties}>{s.stage}</span>
+                            <span className="company-pipeline-count">{s.count}件</span>
+                        </div>
+                        <div className="detail-card-body">
+                            <div className="detail-card-item"><span>想定紹介料:</span><span>{formatManYen(s.revenue)}</span></div>
+                            <div className="detail-card-item"><span>想定媒体手数料:</span><span>{formatManYen(s.cost)}</span></div>
+                            <div className="detail-card-item"><span>想定粗利:</span><span>{formatManYen(s.profit)}</span></div>
+                        </div>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 };
@@ -2916,6 +3115,7 @@ const CandidatePipelineView: React.FC<{
     const [isReportVisible, setIsReportVisible] = useState(true);
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
     const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(true);
+    const [isGrossProfitVisible, setIsGrossProfitVisible] = useState(true);
     const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
     
@@ -3248,6 +3448,25 @@ const CandidatePipelineView: React.FC<{
             ) : (
             <>
             <PipelineDashboard candidates={candidates} />
+
+            <div className="source-effectiveness-section">
+                <h3
+                    id="gross-profit-title"
+                    className="section-title collapsible-header"
+                    onClick={() => setIsGrossProfitVisible(prev => !prev)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsGrossProfitVisible(prev => !prev); }}}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isGrossProfitVisible}
+                    aria-controls="gross-profit-content"
+                >
+                    <span>想定粗利</span>
+                    <span className={`toggle-icon ${isGrossProfitVisible ? 'open' : ''}`}>▼</span>
+                </h3>
+                <div id="gross-profit-content" className={`collapsible-content ${isGrossProfitVisible ? 'open' : ''}`}>
+                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} />
+                </div>
+            </div>
 
             <div className="source-effectiveness-section">
                 <h3
@@ -3729,8 +3948,8 @@ const AllUsersDashboard: React.FC<{
   weekStartDate: Date;
   onPrevWeek: () => void;
   onNextWeek: () => void;
-  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean };
-  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary') => void;
+  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean };
+  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit') => void;
 }> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection }) => {
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
@@ -3744,6 +3963,10 @@ const AllUsersDashboard: React.FC<{
       ...computeAggregateWeeklyData([user], allUsersData, activeMedia, weekStartDate),
     })),
     [users, allUsersData, activeMedia, weekStartDate]
+  );
+  const candidatesAcrossUsers = useMemo(
+    () => users.flatMap(user => allUsersData[user]?.candidates || []),
+    [users, allUsersData]
   );
   return (
     <>
@@ -3877,6 +4100,25 @@ const AllUsersDashboard: React.FC<{
               </tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="all-users-gross-profit-title">
+        <h2
+          id="all-users-gross-profit-title"
+          className="section-title collapsible-header"
+          onClick={() => toggleSection('allUsersGrossProfit')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersGrossProfit'); } }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={visibility.grossProfit}
+          aria-controls="all-users-gross-profit-content"
+        >
+          <span>想定粗利（パイプライン合計）</span>
+          <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
+        </h2>
+        <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
+          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} />
         </div>
       </section>
 
@@ -4267,7 +4509,7 @@ type SectionVisibilityKeys =
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
   | 'dailyProgress' | 'customPeriodReport'
-  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary';
+  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit';
 
 
 const App: React.FC = () => {
@@ -4335,6 +4577,7 @@ const App: React.FC = () => {
     allUsersDayOfWeekRate: true,
     allUsersWeeklySummary: true,
     allUsersMemberWeeklySummary: true,
+    allUsersGrossProfit: true,
   });
 
   const toggleSection = (sectionKey: SectionVisibilityKeys) => {
@@ -4588,6 +4831,10 @@ const App: React.FC = () => {
 
   const handleRenameMedia = (id: string, name: string) => {
     persistMedia(allMedia.map(m => (m.id === id ? { ...m, name } : m)));
+  };
+
+  const handleSetMediaFeeRate = (id: string, feeRate: number | undefined) => {
+    persistMedia(allMedia.map(m => (m.id === id ? { ...m, feeRate } : m)));
   };
 
   const handleArchiveMedia = (id: string) => {
@@ -5005,6 +5252,7 @@ const App: React.FC = () => {
           onRenameMedia={handleRenameMedia}
           onArchiveMedia={handleArchiveMedia}
           onUnarchiveMedia={handleUnarchiveMedia}
+          onSetFeeRate={handleSetMediaFeeRate}
         />
       )}
       {selectedDate && (
@@ -5457,7 +5705,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
                   toggleSection={toggleSection}
               />
             </>
@@ -5515,7 +5763,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
                   toggleSection={toggleSection}
               />
             )}
