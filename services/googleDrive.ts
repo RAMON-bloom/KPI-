@@ -80,27 +80,39 @@ export async function findOwnDataFile(): Promise<DriveFileRef | null> {
   return data.files?.[0] ?? null;
 }
 
-/**
- * Finds every teammate's kpi-manager-data.json shared domain-wide (requires drive.readonly).
- * Deliberately matches on filename alone, NOT `appProperties` (see history below), and uses
- * `corpora=domain` — the default `files.list` corpus only covers files the caller owns or
- * that were shared with them individually; files shared via a `type: domain` permission (our
- * sharing model) only show up when `corpora=domain` is explicitly requested. This — not the
- * appProperties issue — was the actual root cause of the "全ユーザー" cross-user visibility bug.
- */
-export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
-  const q = `name='${DATA_FILE_NAME}' and trashed=false`;
-  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,properties,owners(emailAddress))&spaces=drive&corpora=domain`;
-  const res = await authorizedFetch(url);
-  console.log('[listTeammateDataFiles] query:', q, 'status:', res.status);
-  if (!res.ok) throw new Error('チームメンバーのデータ検索に失敗しました。');
-  const data = await res.json();
-  const files = (data.files ?? []).map((f: any) => ({
+function mapDriveFileRefs(files: any[]): DriveFileRef[] {
+  return (files ?? []).map((f: any) => ({
     id: f.id,
     name: f.name,
     modifiedTime: f.modifiedTime,
     ownerEmail: f.properties?.ownerEmail || f.owners?.[0]?.emailAddress,
   }));
+}
+
+/**
+ * Finds every teammate's kpi-manager-data.json shared domain-wide (requires drive.readonly).
+ * Matches on filename alone, NOT `appProperties` — appProperties set by another user's client
+ * are not reliably visible to this query even when the file itself is correctly shared.
+ *
+ * Runs the search under BOTH the default corpus (covers the caller's own file — `corpora=domain`
+ * alone drops it, since "owned by me" isn't the same as "shared to my domain") and
+ * `corpora=domain` (covers everyone else's domain-shared files, which the default corpus never
+ * surfaces), then merges and dedupes by file id.
+ */
+export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
+  const q = `name='${DATA_FILE_NAME}' and trashed=false`;
+  const fields = 'files(id,name,modifiedTime,properties,owners(emailAddress))';
+  const [ownRes, domainRes] = await Promise.all([
+    authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive`),
+    authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive&corpora=domain`),
+  ]);
+  console.log('[listTeammateDataFiles] query:', q, 'own-corpus status:', ownRes.status, 'domain-corpus status:', domainRes.status);
+  if (!ownRes.ok && !domainRes.ok) throw new Error('チームメンバーのデータ検索に失敗しました。');
+  const ownFiles = ownRes.ok ? (await ownRes.json()).files ?? [] : [];
+  const domainFiles = domainRes.ok ? (await domainRes.json()).files ?? [] : [];
+  const byId = new Map<string, any>();
+  [...ownFiles, ...domainFiles].forEach((f) => byId.set(f.id, f));
+  const files = mapDriveFileRefs([...byId.values()]);
   console.log('[listTeammateDataFiles] found', files.length, 'file(s):', files.map((f: DriveFileRef) => f.ownerEmail || f.id));
   return files;
 }
@@ -145,20 +157,29 @@ export async function updateFileContent(fileId: string, content: unknown): Promi
 }
 
 /**
- * Finds the single shared teams-config file (created by whoever first set up teams), if it exists.
- * Matches on filename alone (not `appProperties`) and uses `corpora=domain` — see the comment
- * on listTeammateDataFiles for why both of those matter for a domain-shared file.
+ * Finds a single shared config file by name, whether the caller owns it (default corpus) or
+ * it was shared to them via a domain-wide permission by someone else (`corpora=domain`,
+ * required — see the comment on listTeammateDataFiles). Tries the cheap default-corpus query
+ * first since that covers the common case (the caller is the file's own creator).
  */
-export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
-  const q = `name='${TEAMS_FILE_NAME}' and trashed=false`;
-  const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=domain`
-  );
-  if (!res.ok) throw new Error('チーム設定ファイルの検索に失敗しました。');
-  const data = await res.json();
-  const file = data.files?.[0];
+async function findSharedConfigFile(name: string): Promise<DriveFileRef | null> {
+  const q = `name='${name}' and trashed=false`;
+  const fields = 'files(id,name,modifiedTime,owners(emailAddress))';
+  const ownRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive`);
+  if (ownRes.ok) {
+    const file = (await ownRes.json()).files?.[0];
+    if (file) return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
+  }
+  const domainRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive&corpora=domain`);
+  if (!domainRes.ok) throw new Error('設定ファイルの検索に失敗しました。');
+  const file = (await domainRes.json()).files?.[0];
   if (!file) return null;
   return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
+}
+
+/** Finds the single shared teams-config file (created by whoever first set up teams), if it exists. */
+export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
+  return findSharedConfigFile(TEAMS_FILE_NAME);
 }
 
 /** Creates the shared teams-config file; the creator becomes the only one who can edit it (drive.file scope). */
@@ -168,21 +189,9 @@ export async function createTeamsConfigFile(content: unknown, creatorEmail: stri
   return fileId;
 }
 
-/**
- * Finds the single shared media-config file (the list of scouting media sources), if it exists.
- * Matches on filename alone (not `appProperties`) and uses `corpora=domain` — see the comment
- * on listTeammateDataFiles for why both of those matter for a domain-shared file.
- */
+/** Finds the single shared media-config file (the list of scouting media sources), if it exists. */
 export async function findMediaConfigFile(): Promise<DriveFileRef | null> {
-  const q = `name='${MEDIA_FILE_NAME}' and trashed=false`;
-  const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,owners(emailAddress))&spaces=drive&corpora=domain`
-  );
-  if (!res.ok) throw new Error('媒体設定ファイルの検索に失敗しました。');
-  const data = await res.json();
-  const file = data.files?.[0];
-  if (!file) return null;
-  return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
+  return findSharedConfigFile(MEDIA_FILE_NAME);
 }
 
 /** Creates the shared media-config file; the creator becomes the only one who can edit it (drive.file scope). */
