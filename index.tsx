@@ -147,6 +147,29 @@ const calculateMonthlyTotals = (entries: KpiEntry[], allMedia: MediaEntry[]): Kp
     return totals;
 };
 
+/** Same shape as calculateMonthlyTotals, but for an arbitrary inclusive [startDate, endDate] range. */
+const calculateTotalsForRange = (entries: KpiEntry[], allMedia: MediaEntry[], startDate: Date, endDate: Date): KpiTotals => {
+    const allKeys = buildAllKpiKeys(allMedia);
+    const totals = allKeys.reduce((acc, key) => {
+      acc[key] = 0;
+      return acc;
+    }, {} as KpiTotals);
+
+    const start = startDate.getTime();
+    const end = endDate.getTime();
+
+    entries.forEach(entry => {
+      const entryTime = new Date(entry.date).getTime();
+      if (entryTime >= start && entryTime <= end) {
+        allKeys.forEach(key => {
+          totals[key] += entry.values[key] || 0;
+        });
+      }
+    });
+
+    return totals;
+};
+
 
 // Types for Weekly Summary
 interface WeeklyMediaStats {
@@ -785,6 +808,120 @@ function buildTeamProgressCsv(
     const { data, weeklyKpiTargets } = computeAggregateWeeklyData([user], allUsersData, activeMedia, weekStartDate);
     csv += `${displayName}\n`;
     csv += weeklyMediaStatsToCsvRows(data, weeklyKpiTargets);
+    csv += '\n';
+  });
+
+  return csv;
+}
+
+function mediaStatsFromTotals(totals: KpiTotals, activeMedia: MediaEntry[]): WeeklyMediaStats[] {
+  return activeMedia.map(source => {
+    const sourceKey = source.id;
+    return {
+      source: source.name,
+      id: source.id,
+      scoutsSent: totals[`${sourceKey}_scoutsSent` as KpiKey] || 0,
+      scoutReplies: totals[`${sourceKey}_scoutReplies` as KpiKey] || 0,
+      effectiveReplies: totals[`${sourceKey}_effectiveReplies` as KpiKey] || 0,
+      documentsCollected: totals[`${sourceKey}_documentsCollected` as KpiKey] || 0,
+      effectiveDocumentsCollected: totals[`${sourceKey}_effectiveDocumentsCollected` as KpiKey] || 0,
+      initialInterviews: totals[`${sourceKey}_initialInterviews` as KpiKey] || 0,
+      effectiveInitialInterviews: totals[`${sourceKey}_effectiveInitialInterviews` as KpiKey] || 0,
+    };
+  });
+}
+
+/** Same media-breakdown shape as weeklyMediaStatsToCsvRows, but without target columns — a
+ * custom date range has no corresponding weekly/monthly target to compare against. */
+function mediaStatsToCsvRowsNoTarget(mediaStats: WeeklyMediaStats[]): string {
+  let csv = '媒体,スカウト数,返信数,有効返信数,書類回収数,有効書類回収数,初回面談数,初回有効面談数,返信率(%),有効返信率(%)\n';
+  mediaStats.forEach(stat => {
+    const replyRate = stat.scoutsSent > 0 ? (stat.scoutReplies / stat.scoutsSent) * 100 : 0;
+    const effectiveReplyRate = stat.scoutReplies > 0 ? (stat.effectiveReplies / stat.scoutReplies) * 100 : 0;
+    csv += [
+      `"${stat.source}"`,
+      stat.scoutsSent, stat.scoutReplies, stat.effectiveReplies,
+      stat.documentsCollected, stat.effectiveDocumentsCollected,
+      stat.initialInterviews, stat.effectiveInitialInterviews,
+      replyRate.toFixed(1), effectiveReplyRate.toFixed(1),
+    ].join(',') + '\n';
+  });
+  return csv;
+}
+
+/**
+ * Same overall shape as buildTeamProgressCsv (per-member totals + aggregate/per-member media
+ * breakdown), but for an arbitrary custom date range instead of "this month" + "this week" —
+ * so there are no weekly/monthly targets to show alongside the actuals.
+ */
+function buildTeamProgressCsvForRange(
+  label: string,
+  users: string[],
+  allUsersData: Record<string, UserData>,
+  allMedia: MediaEntry[],
+  startDate: Date,
+  endDate: Date
+): string {
+  const activeMedia = allMedia.filter(m => !m.isArchived);
+  const generalKeys = Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>;
+  const fmtDate = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+
+  let csv = '﻿';
+  csv += `進捗レポート（カスタム期間）: ${label}\n`;
+  csv += `期間: ${fmtDate(startDate)} ~ ${fmtDate(endDate)}\n\n`;
+
+  csv += `メンバー別実績（期間内合計）\n`;
+  csv += [
+    'ユーザー', 'スカウト送信数', 'スカウト返信数', 'スカウト返信率(%)', '有効返信数', '有効返信率(%)',
+    '書類回収数', '有効書類回収数', '初回面談数', '初回有効面談数', '有効面談率(%)',
+    ...generalKeys.map(k => GENERAL_KPIS[k].label),
+  ].join(',') + '\n';
+
+  const perUserTotals: { displayName: string; totals: KpiTotals }[] = [];
+  users.forEach(user => {
+    const userData = allUsersData[user];
+    if (!userData) return;
+    const displayName = userData.displayName || user;
+    const totals = calculateTotalsForRange(userData.entries || [], allMedia, startDate, endDate);
+    perUserTotals.push({ displayName, totals });
+
+    const sent = getTotalFromLump(totals, '_scoutsSent', allMedia);
+    const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
+    const effectiveReplies = getTotalFromLump(totals, '_effectiveReplies', allMedia);
+    const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
+    const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
+    const documentsCollected = getTotalFromLump(totals, '_documentsCollected', allMedia);
+    const effectiveDocumentsCollected = getTotalFromLump(totals, '_effectiveDocumentsCollected', allMedia);
+    const initialInterviews = getTotalFromLump(totals, '_initialInterviews', allMedia);
+    const effectiveInitialInterviews = getTotalFromLump(totals, '_effectiveInitialInterviews', allMedia);
+    const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
+
+    csv += [
+      `"${displayName}"`,
+      sent, replies, replyRate.toFixed(1), effectiveReplies, effectiveReplyRate.toFixed(1),
+      documentsCollected, effectiveDocumentsCollected,
+      initialInterviews, effectiveInitialInterviews, effectiveInterviewRate.toFixed(1),
+      ...generalKeys.map(k => totals[k] || 0),
+    ].join(',') + '\n';
+  });
+  csv += '\n';
+
+  const aggregateTotals = {} as KpiTotals;
+  buildAllKpiKeys(allMedia).forEach(key => { aggregateTotals[key] = 0; });
+  perUserTotals.forEach(({ totals }) => {
+    (Object.keys(totals) as KpiKey[]).forEach(key => {
+      aggregateTotals[key] = (aggregateTotals[key] || 0) + (totals[key] || 0);
+    });
+  });
+
+  csv += `媒体別実績（合計）\n`;
+  csv += mediaStatsToCsvRowsNoTarget(mediaStatsFromTotals(aggregateTotals, activeMedia));
+  csv += `候補者推薦数,${aggregateTotals.candidatesSubmitted || 0}\n\n`;
+
+  csv += `メンバー別 媒体実績\n`;
+  perUserTotals.forEach(({ displayName, totals }) => {
+    csv += `${displayName}\n`;
+    csv += mediaStatsToCsvRowsNoTarget(mediaStatsFromTotals(totals, activeMedia));
     csv += '\n';
   });
 
@@ -4661,6 +4798,8 @@ const App: React.FC = () => {
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
   // specific users to compare, independent of the formal Team groupings.
   const [comparisonUserEmails, setComparisonUserEmails] = useState<string[]>([]);
+  const [customExportStartDate, setCustomExportStartDate] = useState('');
+  const [customExportEndDate, setCustomExportEndDate] = useState('');
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -4944,6 +5083,29 @@ const App: React.FC = () => {
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
+
+  const handleCustomPeriodExport = (label: string, exportUsers: string[]) => {
+    if (!customExportStartDate || !customExportEndDate) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    const start = new Date(customExportStartDate + 'T00:00:00');
+    const end = new Date(customExportEndDate + 'T23:59:59');
+    if (start > end) {
+      alert('開始日は終了日より前の日付にしてください。');
+      return;
+    }
+    const csvContent = buildTeamProgressCsvForRange(label, exportUsers, displayedAllUsersData, allMedia, start, end);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${customExportStartDate}_to_${customExportEndDate}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const persistMedia = async (updatedMedia: MediaEntry[]) => {
     setAllMedia(updatedMedia);
@@ -5900,6 +6062,21 @@ const App: React.FC = () => {
                 </button>
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
+              <div className="custom-period-export-bar">
+                <span>カスタム期間で出力:</span>
+                <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
+                <span>〜</span>
+                <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+                <button
+                  onClick={() => {
+                    const label = comparisonUserEmails.length > 0 ? `選択ユーザー${comparisonUsers.length}名` : '全ユーザー';
+                    handleCustomPeriodExport(label, comparisonUsers);
+                  }}
+                  className="export-button"
+                >
+                  出力
+                </button>
+              </div>
               <AllUsersDashboard
                   users={comparisonUsers}
                   allUsersData={displayedAllUsersData}
@@ -5952,6 +6129,23 @@ const App: React.FC = () => {
                 </button>
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
+            </div>
+            <div className="custom-period-export-bar">
+              <span>カスタム期間で出力:</span>
+              <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
+              <span>〜</span>
+              <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+              <button
+                onClick={() => {
+                  const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
+                  const teamUsers = selectedTeamMemberEmails.filter(email => displayedAllUsersData[email]);
+                  handleCustomPeriodExport(teamName, teamUsers);
+                }}
+                disabled={!selectedTeamId}
+                className="export-button"
+              >
+                出力
+              </button>
             </div>
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>

@@ -1032,6 +1032,17 @@ section {
   cursor: pointer;
 }
 
+.custom-period-export-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  color: var(--text-muted-color);
+}
+
 .candidate-list {
   display: grid;
   gap: 1.5rem;
