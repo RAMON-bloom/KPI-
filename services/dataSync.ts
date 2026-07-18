@@ -219,8 +219,8 @@ export interface MediaConfigResult<T> {
 }
 
 /** Loads the single shared media-config file (the scouting media list), if one exists yet. */
-export async function loadMediaConfig<T = any>(): Promise<MediaConfigResult<T>> {
-  const existing = await findMediaConfigFile();
+export async function loadMediaConfig<T = any>(adminEmail: string): Promise<MediaConfigResult<T>> {
+  const existing = await findMediaConfigFile(adminEmail);
   if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
   const content = await readFileContent<T>(existing.id);
   writeMediaConfigCache(content);

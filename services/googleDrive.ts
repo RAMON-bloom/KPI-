@@ -196,9 +196,16 @@ export async function updateFileContent(fileId: string, content: unknown): Promi
  * it was shared to them via a domain-wide permission by someone else (`corpora=domain`,
  * required — see the comment on listTeammateDataFiles). Tries the cheap default-corpus query
  * first since that covers the common case (the caller is the file's own creator).
+ *
+ * When `requiredOwnerEmail` is set, both queries are additionally scoped to files owned by
+ * that specific account. Without it, a caller whose own-corpus query happens to match a
+ * different file with the same name (e.g. a stray duplicate created by an earlier discovery
+ * bug) would silently keep reading that duplicate forever, since the own-corpus branch returns
+ * before ever checking corpora=domain for the "real" shared one.
  */
-async function findSharedConfigFile(name: string): Promise<DriveFileRef | null> {
-  const q = `name='${name}' and trashed=false`;
+async function findSharedConfigFile(name: string, requiredOwnerEmail?: string): Promise<DriveFileRef | null> {
+  const ownerClause = requiredOwnerEmail ? ` and '${requiredOwnerEmail}' in owners` : '';
+  const q = `name='${name}' and trashed=false${ownerClause}`;
   const fields = 'files(id,name,modifiedTime,owners(emailAddress))';
   const ownRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive`);
   if (ownRes.ok) {
@@ -224,9 +231,14 @@ export async function createTeamsConfigFile(content: unknown, creatorEmail: stri
   return fileId;
 }
 
-/** Finds the single shared media-config file (the list of scouting media sources), if it exists. */
-export async function findMediaConfigFile(): Promise<DriveFileRef | null> {
-  return findSharedConfigFile(MEDIA_FILE_NAME);
+/**
+ * Finds the single shared media-config file (the list of scouting media sources), if it exists.
+ * Scoped to `adminEmail` — the account that's allowed to edit it — so every caller converges on
+ * the same file even if a non-admin ended up with their own stray duplicate from before that
+ * restriction existed.
+ */
+export async function findMediaConfigFile(adminEmail: string): Promise<DriveFileRef | null> {
+  return findSharedConfigFile(MEDIA_FILE_NAME, adminEmail);
 }
 
 /** Creates the shared media-config file; the creator becomes the only one who can edit it (drive.file scope). */

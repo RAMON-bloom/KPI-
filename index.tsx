@@ -3730,11 +3730,15 @@ const CandidatePipelineView: React.FC<{
                                         <div className="summary-badges">
                                             {visibleApplications.length > 0 ? (
                                                 visibleApplications.map(app => (
-                                                    <span 
-                                                        key={app.id} 
-                                                        className="status-badge" 
+                                                    <span
+                                                        key={app.id}
+                                                        className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
                                                         style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                                        title={`${app.companyName}: ${app.stage}`}
+                                                        title={candidateIsOwn ? `${app.companyName}: ${app.stage}（クリックして更新）` : `${app.companyName}: ${app.stage}`}
+                                                        onClick={candidateIsOwn ? (e) => { e.stopPropagation(); handleOpenApplicationModal(c, app); } : undefined}
+                                                        role={candidateIsOwn ? 'button' : undefined}
+                                                        tabIndex={candidateIsOwn ? 0 : undefined}
+                                                        onKeyDown={candidateIsOwn ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); handleOpenApplicationModal(c, app); } } : undefined}
                                                     >
                                                         {app.companyName}: {app.stage}
                                                     </span>
@@ -4874,27 +4878,34 @@ const App: React.FC = () => {
   const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
 
   // Load the shared media list once per sign-in. Unlike Teams, this is required for the KPI
-  // forms to render at all, so it loads unconditionally after login (not gated by view/modal),
-  // and auto-creates the Drive file (seeded with the original 7 sources) the very first time
-  // anyone runs the app after this feature shipped.
+  // forms to render at all, so it loads unconditionally after login (not gated by view/modal).
+  // Discovery is scoped to MEDIA_ADMIN_EMAIL's file specifically (see findMediaConfigFile), and
+  // only that account is allowed to auto-create it if missing — otherwise a non-admin whose
+  // discovery query ever failed would silently create their own stray duplicate that no one
+  // else can see, which is exactly what happened before this scoping existed.
   useEffect(() => {
     if (!currentIdentity || !isInitialized) return;
     let cancelled = false;
     (async () => {
       try {
-        const result = await loadMediaConfig<MediaConfig>();
+        const result = await loadMediaConfig<MediaConfig>(MEDIA_ADMIN_EMAIL);
         if (cancelled) return;
         if (result.data) {
           setAllMedia(result.data.media || []);
           setMediaDriveFileId(result.driveFileId);
           setMediaOwnerEmail(result.ownerEmail);
-        } else {
+        } else if (currentIdentity.email === MEDIA_ADMIN_EMAIL) {
           const seeded: MediaConfig = { schemaVersion: 1, media: SEED_MEDIA };
           const newFileId = await saveMediaConfig(null, seeded, currentIdentity.email);
           if (cancelled) return;
           setAllMedia(SEED_MEDIA);
           setMediaDriveFileId(newFileId);
           setMediaOwnerEmail(currentIdentity.email);
+        } else {
+          // The admin hasn't created it yet — fall back to the seed list in memory only
+          // (not persisted) so KPI forms still render; it'll pick up the real one once the
+          // admin logs in and creates it.
+          setAllMedia(SEED_MEDIA);
         }
       } catch (error) {
         console.error('Failed to load media config from Drive', error);
@@ -4908,7 +4919,7 @@ const App: React.FC = () => {
   const refreshMediaConfig = useCallback(async () => {
     if (!currentIdentity) return;
     try {
-      const result = await loadMediaConfig<MediaConfig>();
+      const result = await loadMediaConfig<MediaConfig>(MEDIA_ADMIN_EMAIL);
       if (result.data) {
         setAllMedia(result.data.media || []);
         setMediaDriveFileId(result.driveFileId);
