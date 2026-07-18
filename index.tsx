@@ -4658,6 +4658,9 @@ const App: React.FC = () => {
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
+  // specific users to compare, independent of the formal Team groupings.
+  const [comparisonUserEmails, setComparisonUserEmails] = useState<string[]>([]);
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -5162,6 +5165,18 @@ const App: React.FC = () => {
         .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
     }, [displayedAllUsersData]);
 
+    // The 全ユーザー tab's ad-hoc comparison selection — an empty selection means "no filter".
+    const comparisonUsers = useMemo(() => {
+      if (comparisonUserEmails.length === 0) return users;
+      return users.filter(u => comparisonUserEmails.includes(u));
+    }, [users, comparisonUserEmails]);
+
+    const toggleComparisonUser = (email: string) => {
+      setComparisonUserEmails(prev =>
+        prev.includes(email) ? prev.filter(e => e !== email) : [...prev, email]
+      );
+    };
+
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
     return calculateMonthlyTotals(entries, allMedia);
@@ -5238,7 +5253,7 @@ const App: React.FC = () => {
     const repliesByDay = Array(7).fill(0);
 
     const allEntries = view === 'all_users_kpi'
-      ? Object.values(displayedAllUsersData).flatMap(d => d.entries)
+      ? comparisonUsers.flatMap(email => displayedAllUsersData[email]?.entries || [])
       : view === 'team_kpi'
       ? Object.entries(displayedAllUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
       : entries;
@@ -5266,7 +5281,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -5842,11 +5857,51 @@ const App: React.FC = () => {
             <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
           ) : (
             <>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.5rem' }}>
+              <div className="comparison-user-selector">
+                <div className="comparison-user-selector-header">
+                  <span>比較するユーザーを選択（未選択の場合は全員を表示）</span>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button onClick={() => setComparisonUserEmails(pipelineUserOptions.map(u => u.email))} className="secondary-action-button">全て選択</button>
+                    <button onClick={() => setComparisonUserEmails([])} className="secondary-action-button">選択をクリア</button>
+                  </div>
+                </div>
+                <div className="comparison-user-checkbox-list">
+                  {pipelineUserOptions.map(u => (
+                    <label key={u.email} className="comparison-user-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={comparisonUserEmails.includes(u.email)}
+                        onChange={() => toggleComparisonUser(u.email)}
+                      />
+                      {u.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <button
+                  onClick={() => {
+                    const label = comparisonUserEmails.length > 0 ? `選択ユーザー${comparisonUsers.length}名` : '全ユーザー';
+                    const csvContent = buildTeamProgressCsv(label, comparisonUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const link = document.createElement('a');
+                    const url = URL.createObjectURL(blob);
+                    link.setAttribute('href', url);
+                    const today = new Date().toISOString().slice(0, 10);
+                    link.setAttribute('download', `all_users_progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                  className="export-button"
+                >
+                  CSV出力
+                </button>
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
               <AllUsersDashboard
-                  users={users}
+                  users={comparisonUsers}
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
