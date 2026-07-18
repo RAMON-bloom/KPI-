@@ -168,6 +168,13 @@ interface WeeklyData {
 const PIPELINE_STAGES = ['打診', '書類選考', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾', 'お見送り', '選考辞退'] as const;
 type PipelineStage = typeof PIPELINE_STAGES[number];
 
+const CONFIDENCE_GRADES = ['A', 'B+', 'B', 'B-', 'C'] as const;
+type ConfidenceGrade = typeof CONFIDENCE_GRADES[number];
+// Lower is better; used to rank applications when picking the single most-likely-to-close one
+// per candidate. Missing ratings are treated as worse than any explicit grade (see
+// pickBestApplicationPerCandidate) rather than defaulting to a specific grade.
+const CONFIDENCE_RANK: Record<ConfidenceGrade, number> = { 'A': 0, 'B+': 1, 'B': 2, 'B-': 3, 'C': 4 };
+
 const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
     '打診': 'grey',
     '書類選考': 'cadetblue',
@@ -237,6 +244,12 @@ interface CompanyApplication {
   // salary) — position-specific, since different companies/positions can negotiate different
   // rates for the same candidate.
   feeRate?: number;
+  // Likelihood ratings for this specific application: offerConfidence = chance of receiving
+  // an offer at all, acceptanceConfidence = chance the candidate accepts it if offered. Used
+  // to pick the single most-likely-to-close application per candidate for the gross-profit
+  // dashboard, so a candidate interviewing at several companies isn't counted multiple times.
+  offerConfidence?: ConfidenceGrade;
+  acceptanceConfidence?: ConfidenceGrade;
 }
 
 interface Candidate {
@@ -2375,6 +2388,30 @@ const CandidateModal: React.FC<{
                             aria-label={`fee料率 ${index + 1}`}
                           />
                        </div>
+                       <div className="form-group">
+                          <label htmlFor={`offerConfidence-${app.id}`}>内定確度</label>
+                          <select
+                            id={`offerConfidence-${app.id}`}
+                            value={app.offerConfidence || ''}
+                            onChange={e => handleApplicationChange(index, 'offerConfidence', e.target.value)}
+                            aria-label={`内定確度 ${index + 1}`}
+                          >
+                            <option value="">未設定</option>
+                            {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                          </select>
+                       </div>
+                       <div className="form-group">
+                          <label htmlFor={`acceptanceConfidence-${app.id}`}>入社確度</label>
+                          <select
+                            id={`acceptanceConfidence-${app.id}`}
+                            value={app.acceptanceConfidence || ''}
+                            onChange={e => handleApplicationChange(index, 'acceptanceConfidence', e.target.value)}
+                            aria-label={`入社確度 ${index + 1}`}
+                          >
+                            <option value="">未設定</option>
+                            {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                          </select>
+                       </div>
                        <div className="form-group form-group-span-2">
                           <label htmlFor={`memo-${app.id}`}>メモ</label>
                           <textarea
@@ -2518,6 +2555,30 @@ const ApplicationModal: React.FC<{
                             value={application.feeRate ?? ''}
                             onChange={handleChange}
                         />
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="offerConfidence">内定確度</label>
+                        <select
+                            id="offerConfidence"
+                            name="offerConfidence"
+                            value={application.offerConfidence || ''}
+                            onChange={handleChange}
+                        >
+                            <option value="">未設定</option>
+                            {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="acceptanceConfidence">入社確度</label>
+                        <select
+                            id="acceptanceConfidence"
+                            name="acceptanceConfidence"
+                            value={application.acceptanceConfidence || ''}
+                            onChange={handleChange}
+                        >
+                            <option value="">未設定</option>
+                            {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                        </select>
                     </div>
                     <div className="form-group">
                         <label htmlFor="memo">メモ</label>
@@ -2689,10 +2750,10 @@ interface StageGrossProfit {
 /**
  * Expected gross profit for one application: revenue is the client referral fee (candidate's
  * expected annual salary × the position's own fee rate — different positions for the same
- * candidate can negotiate different rates), cost is the handling fee owed to the media the
- * candidate was sourced through. Returns null when either the candidate's expected annual
- * salary or the position's fee rate hasn't been entered yet, so callers can tell "zero profit"
- * apart from "not enough data to estimate".
+ * candidate can negotiate different rates). The media's fee rate is a cut OF THAT REVENUE
+ * (not of the candidate's salary directly) — i.e. 粗利 = 紹介料 − 紹介料×媒体手数料率.
+ * Returns null when either the candidate's expected annual salary or the position's fee rate
+ * hasn't been entered yet, so callers can tell "zero profit" apart from "not enough data".
  */
 function computeApplicationGrossProfit(
     candidate: Candidate,
@@ -2702,8 +2763,32 @@ function computeApplicationGrossProfit(
     if (!candidate.expectedAnnualSalary || application.feeRate === undefined || application.feeRate === null) return null;
     const revenue = candidate.expectedAnnualSalary * (application.feeRate / 100);
     const mediaFeeRate = mediaFeeRateById.get(candidate.source) || 0;
-    const cost = candidate.expectedAnnualSalary * (mediaFeeRate / 100);
+    const cost = revenue * (mediaFeeRate / 100);
     return { revenue, cost, profit: revenue - cost };
+}
+
+/** Lower is better; a missing rating ranks worse than any explicit grade (CONFIDENCE_RANK.length, i.e. past 'C'). */
+function confidenceScore(application: CompanyApplication): number {
+    const offerRank = application.offerConfidence ? CONFIDENCE_RANK[application.offerConfidence] : CONFIDENCE_GRADES.length;
+    const acceptanceRank = application.acceptanceConfidence ? CONFIDENCE_RANK[application.acceptanceConfidence] : CONFIDENCE_GRADES.length;
+    return offerRank + acceptanceRank;
+}
+
+/**
+ * A candidate interviewing at several companies at once can only actually be placed at one of
+ * them — summing gross profit across all their applications would double-count the same
+ * placement. Picks the single most-likely-to-close application (lowest combined offer +
+ * acceptance confidence rank) per candidate instead.
+ */
+function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipelineEntry[] {
+    const result: CompanyPipelineEntry[] = [];
+    candidates.filter(c => !c.isHidden).forEach(candidate => {
+        const visibleApps = candidate.applications.filter(app => !app.isHidden);
+        if (visibleApps.length === 0) return;
+        const best = visibleApps.reduce((a, b) => (confidenceScore(b) < confidenceScore(a) ? b : a));
+        result.push({ candidate, application: best });
+    });
+    return result;
 }
 
 function computeGrossProfitByStage(candidates: Candidate[], allMedia: MediaEntry[]): StageGrossProfit[] {
@@ -2712,18 +2797,16 @@ function computeGrossProfitByStage(candidates: Candidate[], allMedia: MediaEntry
         PIPELINE_STAGES.map(stage => [stage, { stage, count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 }])
     );
 
-    candidates.filter(c => !c.isHidden).forEach(candidate => {
-        candidate.applications.filter(app => !app.isHidden).forEach(application => {
-            const bucket = totalsByStage.get(application.stage)!;
-            bucket.count++;
-            const result = computeApplicationGrossProfit(candidate, application, mediaFeeRateById);
-            if (result) {
-                bucket.estimableCount++;
-                bucket.revenue += result.revenue;
-                bucket.cost += result.cost;
-                bucket.profit += result.profit;
-            }
-        });
+    pickBestApplicationPerCandidate(candidates).forEach(({ candidate, application }) => {
+        const bucket = totalsByStage.get(application.stage)!;
+        bucket.count++;
+        const result = computeApplicationGrossProfit(candidate, application, mediaFeeRateById);
+        if (result) {
+            bucket.estimableCount++;
+            bucket.revenue += result.revenue;
+            bucket.cost += result.cost;
+            bucket.profit += result.profit;
+        }
     });
 
     return PIPELINE_STAGES.map(stage => totalsByStage.get(stage)!);
@@ -3727,6 +3810,10 @@ const CandidatePipelineView: React.FC<{
                                                           <div className="detail-card-item">
                                                               <span>選考予定日:</span>
                                                               <span>{app.scheduledDate ? new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                                                          </div>
+                                                          <div className="detail-card-item">
+                                                              <span>内定確度 / 入社確度:</span>
+                                                              <span>{app.offerConfidence || '未設定'} / {app.acceptanceConfidence || '未設定'}</span>
                                                           </div>
                                                           {app.memo && (
                                                               <div className="detail-card-item detail-card-item-memo">
