@@ -31,6 +31,10 @@ ChartJS.register(
   Filler // Register Filler
 );
 
+// Media (scouting source) management is restricted to this single account, regardless of who
+// happens to own the underlying Drive file — everyone else gets read-only access.
+const MEDIA_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
+
 const GENERAL_KPIS = {
   candidatesSubmitted: { label: '候補者推薦数', target: 30 },
   documentScreeningPassed: { label: '書類選考通過数', target: 25 },
@@ -1524,14 +1528,13 @@ const TeamsModal: React.FC<{
 const MediaModal: React.FC<{
     allMedia: MediaEntry[];
     isEditable: boolean;
-    ownerEmail: string | null;
     onClose: () => void;
     onCreateMedia: (name: string) => void;
     onRenameMedia: (id: string, name: string) => void;
     onArchiveMedia: (id: string) => void;
     onUnarchiveMedia: (id: string) => void;
     onSetFeeRate: (id: string, feeRate: number | undefined) => void;
-}> = ({ allMedia, isEditable, ownerEmail, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate }) => {
+}> = ({ allMedia, isEditable, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate }) => {
     const [newMediaName, setNewMediaName] = useState('');
     const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -1578,7 +1581,7 @@ const MediaModal: React.FC<{
                 <div className="modal-body">
                     {!isEditable && (
                         <p className="no-data-message">
-                            媒体設定の編集は作成者（{ownerEmail || '不明'}）のみ可能です。閲覧のみできます。
+                            媒体設定の編集は管理者（{MEDIA_ADMIN_EMAIL}）のみ可能です。閲覧のみできます。
                         </p>
                     )}
                     {isEditable && (
@@ -3019,7 +3022,11 @@ function groupApplicationsByCompany(candidates: Candidate[]): CompanyPipelineGro
  * prefix vs. suffix, full-width characters, extra spaces, etc.) don't split one company into
  * several groups — anyone typing the name slightly differently still lands in the same group.
  */
-const CompanyPipelineView: React.FC<{ candidates: Candidate[] }> = ({ candidates }) => {
+const CompanyPipelineView: React.FC<{
+    candidates: Candidate[];
+    currentUserEmail: string;
+    onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
+}> = ({ candidates, currentUserEmail, onEditApplication }) => {
     const [searchTerm, setSearchTerm] = useState('');
 
     const groups = useMemo(() => groupApplicationsByCompany(candidates), [candidates]);
@@ -3054,25 +3061,33 @@ const CompanyPipelineView: React.FC<{ candidates: Candidate[] }> = ({ candidates
                             <p className="company-pipeline-variants">表記ゆれとして統合: {group.variants.join(' / ')}</p>
                         )}
                         <div className="company-pipeline-entries">
-                            {group.entries.map(({ candidate, application }) => (
-                                <div key={application.id} className="company-pipeline-entry">
-                                    <span className="company-pipeline-entry-name">
-                                        {candidate.name}
-                                        {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
-                                    </span>
-                                    <span
-                                        className="status-badge"
-                                        style={{ '--badge-color': STAGE_COLOR_MAP[application.stage] } as React.CSSProperties}
-                                    >
-                                        {application.stage}
-                                    </span>
-                                    {application.scheduledDate && (
-                                        <span className="company-pipeline-entry-date">
-                                            {new Date(application.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+                            {group.entries.map(({ candidate, application }) => {
+                                const candidateIsOwn = !candidate.ownerEmail || candidate.ownerEmail === currentUserEmail;
+                                return (
+                                    <div key={application.id} className="company-pipeline-entry">
+                                        <span className="company-pipeline-entry-name">
+                                            {candidate.name}
+                                            {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
                                         </span>
-                                    )}
-                                </div>
-                            ))}
+                                        <span
+                                            className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
+                                            style={{ '--badge-color': STAGE_COLOR_MAP[application.stage] } as React.CSSProperties}
+                                            onClick={candidateIsOwn ? () => onEditApplication(candidate, application) : undefined}
+                                            role={candidateIsOwn ? 'button' : undefined}
+                                            tabIndex={candidateIsOwn ? 0 : undefined}
+                                            title={candidateIsOwn ? 'クリックして選考状況を更新' : undefined}
+                                            onKeyDown={candidateIsOwn ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEditApplication(candidate, application); } } : undefined}
+                                        >
+                                            {application.stage}
+                                        </span>
+                                        {application.scheduledDate && (
+                                            <span className="company-pipeline-entry-date">
+                                                {new Date(application.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+                                            </span>
+                                        )}
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
                 ))}
@@ -3591,7 +3606,11 @@ const CandidatePipelineView: React.FC<{
                     <span className={`toggle-icon ${isCompanyPipelineVisible ? 'open' : ''}`}>▼</span>
                 </h3>
                 <div id="company-pipeline-content" className={`collapsible-content ${isCompanyPipelineVisible ? 'open' : ''}`}>
-                    <CompanyPipelineView candidates={candidates} />
+                    <CompanyPipelineView
+                        candidates={candidates}
+                        currentUserEmail={currentUserEmail}
+                        onEditApplication={handleOpenApplicationModal}
+                    />
                 </div>
             </div>
 
@@ -3796,9 +3815,14 @@ const CandidatePipelineView: React.FC<{
                                                       <div className="detail-card-body">
                                                           <div className="detail-card-item">
                                                               <span>進捗状況:</span>
-                                                              <span 
-                                                                  className="status-badge" 
+                                                              <span
+                                                                  className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
                                                                   style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
+                                                                  onClick={candidateIsOwn ? () => handleOpenApplicationModal(c, app) : undefined}
+                                                                  role={candidateIsOwn ? 'button' : undefined}
+                                                                  tabIndex={candidateIsOwn ? 0 : undefined}
+                                                                  title={candidateIsOwn ? 'クリックして選考状況を更新' : undefined}
+                                                                  onKeyDown={candidateIsOwn ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenApplicationModal(c, app); } } : undefined}
                                                               >
                                                                   {app.stage}
                                                               </span>
@@ -4877,7 +4901,7 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [currentIdentity, isInitialized]);
 
-  const isMediaEditable = !mediaOwnerEmail || mediaOwnerEmail === currentIdentity?.email;
+  const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
 
@@ -5333,7 +5357,6 @@ const App: React.FC = () => {
         <MediaModal
           allMedia={allMedia}
           isEditable={isMediaEditable}
-          ownerEmail={mediaOwnerEmail}
           onClose={() => setIsMediaModalOpen(false)}
           onCreateMedia={handleCreateMedia}
           onRenameMedia={handleRenameMedia}

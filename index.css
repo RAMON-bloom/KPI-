@@ -878,6 +878,14 @@ section {
   line-height: 1.4;
   text-align: left;
 }
+.status-badge-clickable {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.status-badge-clickable:hover,
+.status-badge-clickable:focus-visible {
+  filter: brightness(1.15);
+}
 .actions-cell {
   display: flex;
   gap: 0.5rem;
