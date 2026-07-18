@@ -127,6 +127,14 @@ export async function createInitialDriveFile(email: string, data: unknown): Prom
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingSave: { email: string; driveFileId: string | null; data: unknown; onFileCreated: (id: string) => void } | null = null;
+// A promise chain used as a mutex: every write is appended with .then() so it can only start
+// once the previous one has fully finished. Without this, two saves fired close together (e.g.
+// two debounce cycles back to back) could both be in flight at once, and if the network
+// reorders their responses, the OLDER request's response can land after the newer one and
+// silently overwrite it with stale content — even though the newer save "succeeded" from the
+// caller's point of view. This is why data entered well outside the 2s debounce window could
+// still vanish: it wasn't a debounce-timing race, it was an in-flight write race.
+let writeQueue: Promise<void> = Promise.resolve();
 
 async function performSave(
   email: string,
@@ -148,6 +156,16 @@ async function performSave(
   }
 }
 
+/** Appends the currently-pending save (if any) to the write queue and returns it. */
+function enqueuePendingSave(): Promise<void> {
+  writeQueue = writeQueue.then(async () => {
+    const save = pendingSave;
+    pendingSave = null;
+    if (save) await performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
+  });
+  return writeQueue;
+}
+
 /**
  * Writes to the local cache immediately (fast UI), then debounces the Drive sync
  * (~2s idle) so rapid KPI-entry keystrokes don't hammer the Drive API.
@@ -162,31 +180,24 @@ export function saveOwnDataDebounced(
   pendingSave = { email, driveFileId, data, onFileCreated };
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
-    const save = pendingSave;
-    pendingSave = null;
     debounceTimer = null;
-    if (save) performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
+    enqueuePendingSave();
   }, 2000);
 }
 
 /**
- * Immediately performs any pending debounced save instead of waiting out the idle timer.
- * Without this, a save queued right before the user signs out (or closes/backgrounds the tab)
- * could be silently lost: the 2s timer either never fires (page/context gone) or fires after
- * the session's already been cleared, so the Drive write fails with no visible error — the
- * user's last few seconds of input never make it to Drive even though it's in local cache on
- * that one device. Call this before signing out and on visibility/pagehide changes.
+ * Immediately performs any pending debounced save instead of waiting out the idle timer, and
+ * waits for it (and anything already ahead of it in the write queue) to actually finish. Call
+ * this before signing out and on visibility/pagehide changes — without it, a save queued right
+ * before the user signs out could be lost: the timer either never fires (page/context gone) or
+ * fires after the session's already cleared and the write fails silently.
  */
 export async function flushPendingSave(): Promise<void> {
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
-  const save = pendingSave;
-  pendingSave = null;
-  if (save) {
-    await performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
-  }
+  await enqueuePendingSave();
 }
 
 export interface TeammateData<T> {
