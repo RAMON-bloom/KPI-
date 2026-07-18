@@ -4206,7 +4206,8 @@ const AllUsersDashboard: React.FC<{
   onNextWeek: () => void;
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit') => void;
-}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection }) => {
+  showGrossProfit?: boolean;
+}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, showGrossProfit = true }) => {
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
     () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
@@ -4359,6 +4360,7 @@ const AllUsersDashboard: React.FC<{
         </div>
       </section>
 
+      {showGrossProfit && (
       <section aria-labelledby="all-users-gross-profit-title">
         <h2
           id="all-users-gross-profit-title"
@@ -4377,6 +4379,7 @@ const AllUsersDashboard: React.FC<{
           <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} />
         </div>
       </section>
+      )}
 
       <section aria-labelledby="all-users-weekly-summary-title">
         <h2
@@ -6087,6 +6090,7 @@ const App: React.FC = () => {
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
                   toggleSection={toggleSection}
+                  showGrossProfit={false}
               />
             </>
           )
