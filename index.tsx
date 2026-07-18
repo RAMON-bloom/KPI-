@@ -2259,13 +2259,16 @@ const CandidatePipelineView: React.FC<{
     onSave: (candidate: Candidate) => void;
     onToggleVisibility: (candidateId: string) => void;
     currentUserEmail: string;
-    scope: 'personal' | 'all_users' | 'team';
-    onScopeChange: (scope: 'personal' | 'all_users' | 'team') => void;
+    scope: 'personal' | 'all_users' | 'team' | 'user';
+    onScopeChange: (scope: 'personal' | 'all_users' | 'team' | 'user') => void;
     teams: Team[];
     selectedTeamId: string | null;
     onSelectedTeamIdChange: (teamId: string | null) => void;
+    userOptions: { email: string; label: string }[];
+    selectedUserEmail: string | null;
+    onSelectedUserEmailChange: (email: string | null) => void;
     isLoadingAggregate: boolean;
-}> = ({ candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId, onSelectedTeamIdChange, isLoadingAggregate }) => {
+}> = ({ candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId, onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
@@ -2554,6 +2557,7 @@ const CandidatePipelineView: React.FC<{
                 <button onClick={() => onScopeChange('personal')} disabled={scope === 'personal'}>自分</button>
                 <button onClick={() => onScopeChange('all_users')} disabled={scope === 'all_users'}>全ユーザー</button>
                 <button onClick={() => onScopeChange('team')} disabled={scope === 'team'}>チーム</button>
+                <button onClick={() => onScopeChange('user')} disabled={scope === 'user'}>ユーザー別</button>
                 {scope === 'team' && (
                     <select
                         value={selectedTeamId || ''}
@@ -2564,12 +2568,24 @@ const CandidatePipelineView: React.FC<{
                         {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                     </select>
                 )}
+                {scope === 'user' && (
+                    <select
+                        value={selectedUserEmail || ''}
+                        onChange={(e) => onSelectedUserEmailChange(e.target.value || null)}
+                        style={{ marginLeft: '0.75rem' }}
+                    >
+                        <option value="">ユーザーを選択</option>
+                        {userOptions.map(u => <option key={u.email} value={u.email}>{u.label}</option>)}
+                    </select>
+                )}
             </div>
 
             {scope !== 'personal' && isLoadingAggregate ? (
                 <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
             ) : scope === 'team' && !selectedTeamId ? (
                 <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
+            ) : scope === 'user' && !selectedUserEmail ? (
+                <p className="no-data-message">ユーザーを選択してください。</p>
             ) : (
             <>
             <PipelineDashboard candidates={candidates} />
@@ -3313,8 +3329,9 @@ const App: React.FC = () => {
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
-  const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team'>('personal');
+  const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
+  const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
   const [isEditingDisplayName, setIsEditingDisplayName] = useState(false);
   const [editedDisplayName, setEditedDisplayName] = useState('');
 
@@ -3762,6 +3779,8 @@ const App: React.FC = () => {
       if (pipelineScope === 'personal') return candidates;
       const emailsInScope = pipelineScope === 'team'
         ? (teams.find(t => t.id === pipelineSelectedTeamId)?.memberEmails || [])
+        : pipelineScope === 'user'
+        ? (pipelineSelectedUserEmail ? [pipelineSelectedUserEmail] : [])
         : Object.keys(displayedAllUsersData);
       return emailsInScope.flatMap(email => {
         const data = displayedAllUsersData[email];
@@ -3769,7 +3788,14 @@ const App: React.FC = () => {
         const ownerLabel = data.displayName || email;
         return (data.candidates || []).map(c => ({ ...c, ownerEmail: email, ownerLabel }));
       });
-    }, [pipelineScope, pipelineSelectedTeamId, teams, displayedAllUsersData, candidates]);
+    }, [pipelineScope, pipelineSelectedTeamId, pipelineSelectedUserEmail, teams, displayedAllUsersData, candidates]);
+
+    // Options for the pipeline's per-user selector, sorted by display name.
+    const pipelineUserOptions = useMemo(() => {
+      return Object.entries(displayedAllUsersData)
+        .map(([email, data]: [string, UserData]) => ({ email, label: data.displayName || email }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+    }, [displayedAllUsersData]);
 
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
@@ -4507,6 +4533,9 @@ const App: React.FC = () => {
                 teams={teams}
                 selectedTeamId={pipelineSelectedTeamId}
                 onSelectedTeamIdChange={setPipelineSelectedTeamId}
+                userOptions={pipelineUserOptions}
+                selectedUserEmail={pipelineSelectedUserEmail}
+                onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
             />
         )}
