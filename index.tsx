@@ -191,6 +191,33 @@ const STAGE_SHORT_LABELS: Record<PipelineStage, string> = {
     '選考辞退': '辞退',
 };
 
+const COMPANY_NAME_DESIGNATORS = [
+    '株式会社', '有限会社', '合同会社', '合名会社', '合資会社',
+    '一般社団法人', '一般財団法人', '公益社団法人', '公益財団法人',
+    '特定非営利活動法人', 'NPO法人',
+];
+
+/**
+ * Collapses common company-name spelling variance (株式会社 prefix vs. suffix vs. omitted,
+ * full-width/half-width characters, extra whitespace, "(株)" abbreviations, English Inc./Co.,
+ * Ltd. suffixes, case) into a single grouping key, so the company-pipeline view doesn't
+ * silently split one company into several just because two people typed its name slightly
+ * differently — without requiring anyone to standardize their input.
+ */
+function normalizeCompanyName(name: string): string {
+    if (!name) return '';
+    let s = name.trim();
+    // Full-width alphanumerics/symbols -> half-width
+    s = s.replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+    s = s.replace(/　/g, ' ');
+    COMPANY_NAME_DESIGNATORS.forEach(d => { s = s.split(d).join(''); });
+    s = s.replace(/[（(]\s*(株|有)\s*[）)]/g, '');
+    s = s.toLowerCase();
+    s = s.replace(/\b(inc|ltd|co|corp|corporation|company|llc|kk)\b\.?/g, '');
+    s = s.replace(/[\s.,、。・\-ー_/／]/g, '');
+    return s;
+}
+
 interface CompanyApplication {
   id: string;
   companyName: string;
@@ -2652,6 +2679,110 @@ const PipelineCalendarView: React.FC<{
 };
 
 
+interface CompanyPipelineEntry {
+    candidate: Candidate;
+    application: CompanyApplication;
+}
+
+interface CompanyPipelineGroup {
+    key: string;
+    displayName: string;
+    variants: string[]; // every distinct raw spelling seen, for transparency when names were merged
+    entries: CompanyPipelineEntry[];
+}
+
+/** Groups every visible application by company, using normalizeCompanyName to merge spelling variants. */
+function groupApplicationsByCompany(candidates: Candidate[]): CompanyPipelineGroup[] {
+    const groups = new Map<string, { nameCounts: Map<string, number>; entries: CompanyPipelineEntry[] }>();
+
+    candidates.filter(c => !c.isHidden).forEach(candidate => {
+        candidate.applications.filter(app => !app.isHidden && app.companyName.trim()).forEach(application => {
+            const rawName = application.companyName.trim();
+            const key = normalizeCompanyName(rawName) || rawName;
+            if (!groups.has(key)) groups.set(key, { nameCounts: new Map(), entries: [] });
+            const group = groups.get(key)!;
+            group.nameCounts.set(rawName, (group.nameCounts.get(rawName) || 0) + 1);
+            group.entries.push({ candidate, application });
+        });
+    });
+
+    return Array.from(groups.entries()).map(([key, group]) => {
+        const variants = Array.from(group.nameCounts.keys());
+        const displayName = variants.reduce((best, v) =>
+            (group.nameCounts.get(v)! > group.nameCounts.get(best)!) ? v : best, variants[0]);
+        return { key, displayName, variants, entries: group.entries };
+    }).sort((a, b) => b.entries.length - a.entries.length);
+}
+
+/**
+ * Shows every visible application grouped by company instead of by candidate. Company names
+ * are merged via normalizeCompanyName so minor spelling/formatting differences (株式会社
+ * prefix vs. suffix, full-width characters, extra spaces, etc.) don't split one company into
+ * several groups — anyone typing the name slightly differently still lands in the same group.
+ */
+const CompanyPipelineView: React.FC<{ candidates: Candidate[] }> = ({ candidates }) => {
+    const [searchTerm, setSearchTerm] = useState('');
+
+    const groups = useMemo(() => groupApplicationsByCompany(candidates), [candidates]);
+
+    const filteredGroups = useMemo(() => {
+        if (!searchTerm.trim()) return groups;
+        const normalizedSearch = normalizeCompanyName(searchTerm);
+        return groups.filter(g =>
+            g.key.includes(normalizedSearch) || g.variants.some(v => v.includes(searchTerm))
+        );
+    }, [groups, searchTerm]);
+
+    return (
+        <div className="company-pipeline-view">
+            <input
+                type="text"
+                placeholder="企業名で検索..."
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className="search-input"
+                style={{ marginBottom: '1rem' }}
+            />
+            {filteredGroups.length === 0 && <p className="no-data-message">該当する企業がありません。</p>}
+            <div className="detail-application-grid">
+                {filteredGroups.map(group => (
+                    <div key={group.key} className="detail-application-card company-pipeline-card">
+                        <div className="detail-card-header">
+                            <strong>{group.displayName}</strong>
+                            <span className="company-pipeline-count">{group.entries.length}件</span>
+                        </div>
+                        {group.variants.length > 1 && (
+                            <p className="company-pipeline-variants">表記ゆれとして統合: {group.variants.join(' / ')}</p>
+                        )}
+                        <div className="company-pipeline-entries">
+                            {group.entries.map(({ candidate, application }) => (
+                                <div key={application.id} className="company-pipeline-entry">
+                                    <span className="company-pipeline-entry-name">
+                                        {candidate.name}
+                                        {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
+                                    </span>
+                                    <span
+                                        className="status-badge"
+                                        style={{ '--badge-color': STAGE_COLOR_MAP[application.stage] } as React.CSSProperties}
+                                    >
+                                        {application.stage}
+                                    </span>
+                                    {application.scheduledDate && (
+                                        <span className="company-pipeline-entry-date">
+                                            {new Date(application.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+                                        </span>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+
 const SourceEffectivenessReport: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
     const reportData = useMemo(() => {
         const visibleCandidates = candidates.filter(c => !c.isHidden);
@@ -2767,6 +2898,7 @@ const CandidatePipelineView: React.FC<{
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(true);
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
+    const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(true);
     const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
     
@@ -3122,6 +3254,25 @@ const CandidatePipelineView: React.FC<{
                         onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
                         onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
                     />
+                </div>
+            </div>
+
+            <div className="source-effectiveness-section">
+                <h3
+                    id="company-pipeline-title"
+                    className="section-title collapsible-header"
+                    onClick={() => setIsCompanyPipelineVisible(prev => !prev)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCompanyPipelineVisible(prev => !prev); }}}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isCompanyPipelineVisible}
+                    aria-controls="company-pipeline-content"
+                >
+                    <span>企業別パイプライン状況</span>
+                    <span className={`toggle-icon ${isCompanyPipelineVisible ? 'open' : ''}`}>▼</span>
+                </h3>
+                <div id="company-pipeline-content" className={`collapsible-content ${isCompanyPipelineVisible ? 'open' : ''}`}>
+                    <CompanyPipelineView candidates={candidates} />
                 </div>
             </div>
 

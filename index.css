@@ -1471,6 +1471,37 @@ section {
   gap: 0.75rem;
 }
 
+.company-pipeline-count {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+  font-weight: 500;
+}
+.company-pipeline-variants {
+  font-size: 0.8rem;
+  color: var(--text-muted-color);
+  font-style: italic;
+  margin: 0 0 0.75rem;
+}
+.company-pipeline-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.company-pipeline-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.company-pipeline-entry-name {
+  font-weight: 500;
+}
+.company-pipeline-entry-date {
+  font-size: 0.8rem;
+  color: var(--text-muted-color);
+}
+
 .detail-card-item {
   display: flex;
   justify-content: space-between;
