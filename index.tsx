@@ -4026,7 +4026,24 @@ const CandidatePipelineView: React.FC<{
 };
 
 
-const FUNNEL_STAGE_KEYS = Object.keys(GENERAL_KPIS) as (keyof typeof GENERAL_KPIS)[];
+interface FunnelStageDef {
+  key: string;
+  label: string;
+  getValue: (monthlyTotals: KpiTotals, allMedia: MediaEntry[]) => number;
+}
+
+// The pipeline funnel starts from 候補者推薦数 onward (GENERAL_KPIS); 返信数/面談数 are earlier,
+// media-scoped sourcing-side steps (aggregated across all media via getTotalFromLump) that
+// happen before a candidate is ever submitted to a client.
+const FUNNEL_STAGES: FunnelStageDef[] = [
+  { key: 'scoutReplies', label: '返信数', getValue: (totals, allMedia) => getTotalFromLump(totals, '_scoutReplies', allMedia) },
+  { key: 'initialInterviews', label: '面談数', getValue: (totals, allMedia) => getTotalFromLump(totals, '_initialInterviews', allMedia) },
+  ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => ({
+    key: key as string,
+    label: GENERAL_KPIS[key].label,
+    getValue: (totals: KpiTotals) => totals[key] || 0,
+  })),
+];
 
 /** Rate at index i is "stage[i] / stage[i-1]"; index 0 has no previous stage, so it's null. */
 const computeConversionRates = (values: number[]): (number | null)[] =>
@@ -4055,12 +4072,12 @@ const FunnelAnalysisSection: React.FC<{
 
   const { totalStageValues, perUserStageValues } = useMemo(() => {
     const perUser: Record<string, number[]> = {};
-    const totals = FUNNEL_STAGE_KEYS.map(() => 0);
+    const totals = FUNNEL_STAGES.map(() => 0);
     users.forEach(email => {
       const data = allUsersData[email];
       if (!data) return;
       const monthlyTotals = calculateMonthlyTotals(data.entries || [], allMedia);
-      const values = FUNNEL_STAGE_KEYS.map(key => monthlyTotals[key] || 0);
+      const values = FUNNEL_STAGES.map(stage => stage.getValue(monthlyTotals, allMedia));
       perUser[email] = values;
       values.forEach((v, i) => { totals[i] += v; });
     });
@@ -4076,19 +4093,19 @@ const FunnelAnalysisSection: React.FC<{
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const lines: string[] = ['【全体ファネル実績（今月・全ユーザー合計）】'];
-      FUNNEL_STAGE_KEYS.forEach((key, i) => {
+      FUNNEL_STAGES.forEach((stage, i) => {
         const rate = totalConversionRates[i];
-        lines.push(`${GENERAL_KPIS[key].label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
+        lines.push(`${stage.label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
       });
       lines.push('', '【ユーザー別実績（今月）】');
       users.forEach(email => {
         const data = allUsersData[email];
         if (!data) return;
         const label = data.displayName || email;
-        const values = perUserStageValues[email] || FUNNEL_STAGE_KEYS.map(() => 0);
+        const values = perUserStageValues[email] || FUNNEL_STAGES.map(() => 0);
         const rates = computeConversionRates(values);
-        const parts = FUNNEL_STAGE_KEYS.map((key, i) =>
-          `${GENERAL_KPIS[key].label} ${values[i]}件${rates[i] !== null ? `(${rates[i]!.toFixed(1)}%)` : ''}`
+        const parts = FUNNEL_STAGES.map((stage, i) =>
+          `${stage.label} ${values[i]}件${rates[i] !== null ? `(${rates[i]!.toFixed(1)}%)` : ''}`
         );
         lines.push(`${label}: ${parts.join(', ')}`);
       });
@@ -4131,9 +4148,9 @@ const FunnelAnalysisSection: React.FC<{
               <tr><th>指標</th><th>件数</th><th>前段階からの歩留まり</th></tr>
             </thead>
             <tbody>
-              {FUNNEL_STAGE_KEYS.map((key, i) => (
-                <tr key={key}>
-                  <td>{GENERAL_KPIS[key].label}</td>
+              {FUNNEL_STAGES.map((stage, i) => (
+                <tr key={stage.key}>
+                  <td>{stage.label}</td>
                   <td>{totalStageValues[i]}</td>
                   <td style={i === bottleneckIndex ? { color: 'crimson', fontWeight: 'bold' } : undefined}>
                     {totalConversionRates[i] !== null
@@ -4152,7 +4169,7 @@ const FunnelAnalysisSection: React.FC<{
             <thead>
               <tr>
                 <th>ユーザー</th>
-                {FUNNEL_STAGE_KEYS.slice(1).map(key => <th key={key}>{GENERAL_KPIS[key].label}</th>)}
+                {FUNNEL_STAGES.slice(1).map(stage => <th key={stage.key}>{stage.label}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -4160,7 +4177,7 @@ const FunnelAnalysisSection: React.FC<{
                 const data = allUsersData[email];
                 if (!data) return null;
                 const label = data.displayName || email;
-                const values = perUserStageValues[email] || FUNNEL_STAGE_KEYS.map(() => 0);
+                const values = perUserStageValues[email] || FUNNEL_STAGES.map(() => 0);
                 const rates = computeConversionRates(values);
                 const userBottleneckIndex = findBottleneckIndex(rates);
                 return (
