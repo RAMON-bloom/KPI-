@@ -3448,10 +3448,13 @@ const CandidatePipelineView: React.FC<{
             return;
         }
 
+        const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
+
         const headers = [
-            '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)',
+            '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
             '集客媒体', '他エージェント使用状況', '登録日', '概要',
-            '応募企業名', '進捗状況', '次アクション', '内定確度', '入社確度'
+            '応募企業名', '進捗状況', '次アクション', '内定確度', '入社確度',
+            '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
 
         const escapeCSV = (str: string | number | undefined | null): string => {
@@ -3473,6 +3476,7 @@ const CandidatePipelineView: React.FC<{
                 escapeCSV(candidate.education),
                 escapeCSV(candidate.currentSalary),
                 escapeCSV(candidate.salary),
+                escapeCSV(candidate.expectedAnnualSalary),
                 escapeCSV(candidate.source),
                 candidate.usingOtherAgents ? 'あり' : 'なし',
                 new Date(candidate.createdAt).toLocaleDateString('ja-JP'),
@@ -3484,12 +3488,16 @@ const CandidatePipelineView: React.FC<{
 
             if (visibleApps.length > 0) {
                 visibleApps.forEach((app, index) => {
+                    const profit = computeApplicationGrossProfit(candidate, app, mediaFeeRateById);
                     const applicationData = [
                         escapeCSV(app.companyName),
                         escapeCSV(app.stage),
                         escapeCSV(app.nextAction),
                         escapeCSV(app.offerConfidence || ''),
                         escapeCSV(app.acceptanceConfidence || ''),
+                        escapeCSV(profit ? Math.round(profit.revenue) : ''),
+                        escapeCSV(profit ? Math.round(profit.cost) : ''),
+                        escapeCSV(profit ? Math.round(profit.profit) : ''),
                     ];
                     if (index === 0) {
                         rows.push([...commonData, ...applicationData]);
@@ -3498,44 +3506,66 @@ const CandidatePipelineView: React.FC<{
                     }
                 });
             } else {
-                 rows.push([...commonData, '', '', '', '', '']);
+                 rows.push([...commonData, '', '', '', '', '', '', '', '']);
             }
         });
-        
-        // --- Pipeline Summary Calculation ---
+
+        // --- Pipeline Summary Calculation: overall total + per-owner breakdown ---
         const STAGE_WEIGHTS: Record<PipelineStage, number> = {
             '打診': 1, '書類選考': 2, 'カジュアル面談': 3, '1次面接': 4, '2次面接': 5,
             '最終面接': 6, '内定': 7, '内定承諾': 8, 'お見送り': 0, '選考辞退': 0,
         };
-        const stageCounts = PIPELINE_STAGES.reduce((acc, stage) => {
-            acc[stage] = 0;
-            return acc;
-        }, {} as Record<PipelineStage, number>);
-
-        dataToExport.forEach(candidate => {
-            const visibleApps = candidate.applications.filter(app => !app.isHidden);
-            if (visibleApps.length === 0) return;
-
-            let mostAdvancedStage: PipelineStage | null = null;
-            let maxWeight = -1;
-            visibleApps.forEach(app => {
-                const weight = STAGE_WEIGHTS[app.stage];
-                if (weight > maxWeight) {
-                    maxWeight = weight;
-                    mostAdvancedStage = app.stage;
-                }
+        const computeStageCounts = (list: Candidate[]): Record<PipelineStage, number> => {
+            const counts = PIPELINE_STAGES.reduce((acc, stage) => {
+                acc[stage] = 0;
+                return acc;
+            }, {} as Record<PipelineStage, number>);
+            list.forEach(candidate => {
+                const visibleApps = candidate.applications.filter(app => !app.isHidden);
+                if (visibleApps.length === 0) return;
+                let mostAdvancedStage: PipelineStage | null = null;
+                let maxWeight = -1;
+                visibleApps.forEach(app => {
+                    const weight = STAGE_WEIGHTS[app.stage];
+                    if (weight > maxWeight) {
+                        maxWeight = weight;
+                        mostAdvancedStage = app.stage;
+                    }
+                });
+                if (mostAdvancedStage) counts[mostAdvancedStage]++;
             });
-            if (mostAdvancedStage) {
-                stageCounts[mostAdvancedStage]++;
+            return counts;
+        };
+
+        const totalStageCounts = computeStageCounts(dataToExport);
+
+        // Group by owner (falls back to a single "自分" bucket when there's no owner label,
+        // i.e. a personal-only export) for the per-person breakdown.
+        const ownerOrder: string[] = [];
+        const candidatesByOwner = new Map<string, Candidate[]>();
+        dataToExport.forEach(candidate => {
+            const ownerKey = candidate.ownerLabel || candidate.ownerEmail || '自分';
+            if (!candidatesByOwner.has(ownerKey)) {
+                candidatesByOwner.set(ownerKey, []);
+                ownerOrder.push(ownerKey);
             }
+            candidatesByOwner.get(ownerKey)!.push(candidate);
         });
 
         const summaryRows: string[] = [];
         summaryRows.push('');
-        summaryRows.push('パイプラインサマリー');
+        summaryRows.push('パイプラインサマリー（選択中の全員合計）');
         summaryRows.push('ステージ,候補者数');
         PIPELINE_STAGES.forEach(stage => {
-            summaryRows.push(`${escapeCSV(stage)},${stageCounts[stage]}`);
+            summaryRows.push(`${escapeCSV(stage)},${totalStageCounts[stage]}`);
+        });
+
+        summaryRows.push('');
+        summaryRows.push('パイプラインサマリー（担当者別）');
+        summaryRows.push(['担当者', ...PIPELINE_STAGES].map(escapeCSV).join(','));
+        ownerOrder.forEach(ownerKey => {
+            const counts = computeStageCounts(candidatesByOwner.get(ownerKey)!);
+            summaryRows.push([escapeCSV(ownerKey), ...PIPELINE_STAGES.map(stage => counts[stage])].join(','));
         });
 
         const candidateCsvPart = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
