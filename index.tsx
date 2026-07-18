@@ -598,6 +598,111 @@ function computeAggregateWeeklyData(
   return { data: { mediaStats, totalCandidatesSubmitted, totalInitialInterviews }, weeklyKpiTargets };
 }
 
+function weeklyMediaStatsToCsvRows(data: WeeklyData, weeklyKpiTargets: Record<KpiKey, number>): string {
+  let csv = '媒体,スカウト数,目標,返信数,目標,有効返信数,目標,書類回収数,目標,有効書類回収数,目標,初回面談数,目標,初回有効面談数,目標\n';
+  data.mediaStats.forEach(stat => {
+    const sourceKey = stat.id;
+    const target = (suffix: string) => weeklyKpiTargets[`${sourceKey}_${suffix}` as KpiKey] || 0;
+    csv += [
+      `"${stat.source}"`,
+      stat.scoutsSent, target('scoutsSent'),
+      stat.scoutReplies, target('scoutReplies'),
+      stat.effectiveReplies, target('effectiveReplies'),
+      stat.documentsCollected, target('documentsCollected'),
+      stat.effectiveDocumentsCollected, target('effectiveDocumentsCollected'),
+      stat.initialInterviews, target('initialInterviews'),
+      stat.effectiveInitialInterviews, target('effectiveInitialInterviews'),
+    ].join(',') + '\n';
+  });
+  return csv;
+}
+
+/**
+ * Builds a CSV covering everything shown in the team/all-users dashboard: each member's
+ * monthly progress (same columns as the on-screen table), the team's aggregate weekly
+ * summary, and each member's individual weekly summary.
+ */
+function buildTeamProgressCsv(
+  label: string,
+  users: string[],
+  allUsersData: Record<string, UserData>,
+  allMedia: MediaEntry[],
+  weekStartDate: Date
+): string {
+  const activeMedia = allMedia.filter(m => !m.isArchived);
+  const now = new Date();
+  const generalKeys = Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>;
+
+  let csv = '﻿';
+  csv += `チーム別進捗レポート: ${label}\n`;
+  csv += `出力日: ${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()}\n\n`;
+
+  csv += `月次進捗（${now.getFullYear()}年${now.getMonth() + 1}月）\n`;
+  csv += [
+    'ユーザー', 'スカウト送信数', 'スカウト返信数', 'スカウト返信率(%)', '有効返信数', '有効返信率(%)',
+    '書類回収数', '書類回収目標', '有効書類回収数', '有効書類回収目標',
+    '初回面談数', '初回面談目標', '初回有効面談数', '有効面談率(%)',
+    ...generalKeys.map(k => GENERAL_KPIS[k].label),
+  ].join(',') + '\n';
+
+  users.forEach(user => {
+    const userData = allUsersData[user];
+    if (!userData) return;
+    const displayName = userData.displayName || user;
+    const monthlyTotals = calculateMonthlyTotals(userData.entries || [], allMedia);
+    const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
+
+    const sent = getTotalFromLump(monthlyTotals, '_scoutsSent', allMedia);
+    const replies = getTotalFromLump(monthlyTotals, '_scoutReplies', allMedia);
+    const effectiveReplies = getTotalFromLump(monthlyTotals, '_effectiveReplies', allMedia);
+    const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
+    const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
+
+    const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected', allMedia);
+    const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', allMedia);
+    const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected', allMedia);
+    const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', allMedia);
+
+    const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', allMedia);
+    const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', allMedia);
+    const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews', allMedia);
+    const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
+
+    csv += [
+      `"${displayName}"`,
+      sent, replies, replyRate.toFixed(1), effectiveReplies, effectiveReplyRate.toFixed(1),
+      documentsCollected, documentsCollectedTarget,
+      effectiveDocumentsCollected, effectiveDocumentsCollectedTarget,
+      initialInterviews, initialInterviewsTarget,
+      effectiveInitialInterviews, effectiveInterviewRate.toFixed(1),
+      ...generalKeys.map(k => monthlyTotals[k] || 0),
+    ].join(',') + '\n';
+  });
+  csv += '\n';
+
+  const { data: aggData, weeklyKpiTargets: aggTargets } = computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate);
+  const weekEnd = new Date(weekStartDate);
+  weekEnd.setDate(weekStartDate.getDate() + 6);
+  const fmt = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
+  csv += `週間サマリー（合計） ${fmt(weekStartDate)}~${fmt(weekEnd)}\n`;
+  csv += weeklyMediaStatsToCsvRows(aggData, aggTargets);
+  csv += `候補者推薦数,${aggData.totalCandidatesSubmitted}\n`;
+  csv += `初回面談数,${aggData.totalInitialInterviews}\n\n`;
+
+  csv += `メンバー別週間サマリー\n`;
+  users.forEach(user => {
+    const userData = allUsersData[user];
+    if (!userData) return;
+    const displayName = userData.displayName || user;
+    const { data, weeklyKpiTargets } = computeAggregateWeeklyData([user], allUsersData, activeMedia, weekStartDate);
+    csv += `${displayName}\n`;
+    csv += weeklyMediaStatsToCsvRows(data, weeklyKpiTargets);
+    csv += '\n';
+  });
+
+  return csv;
+}
+
 const WeeklySummaryTable: React.FC<{
   data: WeeklyData;
   weeklyKpiTargets: Record<KpiKey, number>;
@@ -4917,7 +5022,30 @@ const App: React.FC = () => {
                   {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </div>
-              <button onClick={() => fetchAllUsersData()}>更新</button>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  onClick={() => {
+                    const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
+                    const teamUsers = selectedTeamMemberEmails.filter(email => displayedAllUsersData[email]);
+                    const csvContent = buildTeamProgressCsv(teamName, teamUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const link = document.createElement('a');
+                    const url = URL.createObjectURL(blob);
+                    link.setAttribute('href', url);
+                    const today = new Date().toISOString().slice(0, 10);
+                    link.setAttribute('download', `team_progress_${teamName.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                  }}
+                  disabled={!selectedTeamId}
+                  className="export-button"
+                >
+                  CSV出力
+                </button>
+                <button onClick={() => fetchAllUsersData()}>更新</button>
+              </div>
             </div>
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
