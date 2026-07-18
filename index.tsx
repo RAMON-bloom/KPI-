@@ -598,30 +598,11 @@ function computeAggregateWeeklyData(
   return { data: { mediaStats, totalCandidatesSubmitted, totalInitialInterviews }, weeklyKpiTargets };
 }
 
-const WeeklySummary: React.FC<{
-  weekStartDate: Date;
+const WeeklySummaryTable: React.FC<{
   data: WeeklyData;
   weeklyKpiTargets: Record<KpiKey, number>;
-  onPrevWeek: () => void;
-  onNextWeek: () => void;
-}> = ({ weekStartDate, data, weeklyKpiTargets, onPrevWeek, onNextWeek }) => {
-  const endDate = new Date(weekStartDate);
-  endDate.setDate(weekStartDate.getDate() + 6);
-
-  const formatDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
-  const weekRange = `${formatDate(weekStartDate)} - ${formatDate(endDate)}`;
-
-  const isThisWeek = getStartOfWeek(new Date()).getTime() === weekStartDate.getTime();
-  
+}> = ({ data, weeklyKpiTargets }) => {
   return (
-    <div className="weekly-summary-container">
-      <div className="weekly-summary-header">
-        <h3>{weekRange}</h3>
-        <div>
-          <button onClick={onPrevWeek} aria-label="前の週へ">&lt; 前の週</button>
-          <button onClick={onNextWeek} disabled={isThisWeek} aria-label="次の週へ">次の週 &gt;</button>
-        </div>
-      </div>
       <div className="weekly-summary-content">
         <table className="weekly-summary-table">
           <thead>
@@ -718,6 +699,34 @@ const WeeklySummary: React.FC<{
           </div>
         </div>
       </div>
+  );
+};
+
+const WeeklySummary: React.FC<{
+  weekStartDate: Date;
+  data: WeeklyData;
+  weeklyKpiTargets: Record<KpiKey, number>;
+  onPrevWeek: () => void;
+  onNextWeek: () => void;
+}> = ({ weekStartDate, data, weeklyKpiTargets, onPrevWeek, onNextWeek }) => {
+  const endDate = new Date(weekStartDate);
+  endDate.setDate(weekStartDate.getDate() + 6);
+
+  const formatDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
+  const weekRange = `${formatDate(weekStartDate)} - ${formatDate(endDate)}`;
+
+  const isThisWeek = getStartOfWeek(new Date()).getTime() === weekStartDate.getTime();
+
+  return (
+    <div className="weekly-summary-container">
+      <div className="weekly-summary-header">
+        <h3>{weekRange}</h3>
+        <div>
+          <button onClick={onPrevWeek} aria-label="前の週へ">&lt; 前の週</button>
+          <button onClick={onNextWeek} disabled={isThisWeek} aria-label="次の週へ">次の週 &gt;</button>
+        </div>
+      </div>
+      <WeeklySummaryTable data={data} weeklyKpiTargets={weeklyKpiTargets} />
     </div>
   );
 };
@@ -3161,12 +3170,20 @@ const AllUsersDashboard: React.FC<{
   weekStartDate: Date;
   onPrevWeek: () => void;
   onNextWeek: () => void;
-  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean };
-  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary') => void;
+  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean };
+  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary') => void;
 }> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection }) => {
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
     () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
+    [users, allUsersData, activeMedia, weekStartDate]
+  );
+  const perMemberWeeklyData = useMemo(
+    () => users.map(user => ({
+      user,
+      displayName: allUsersData[user]?.displayName || user,
+      ...computeAggregateWeeklyData([user], allUsersData, activeMedia, weekStartDate),
+    })),
     [users, allUsersData, activeMedia, weekStartDate]
   );
   return (
@@ -3326,6 +3343,31 @@ const AllUsersDashboard: React.FC<{
             onPrevWeek={onPrevWeek}
             onNextWeek={onNextWeek}
           />
+        </div>
+      </section>
+
+      <section aria-labelledby="all-users-member-weekly-summary-title">
+        <h2
+          id="all-users-member-weekly-summary-title"
+          className="section-title collapsible-header"
+          onClick={() => toggleSection('allUsersMemberWeeklySummary')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersMemberWeeklySummary'); } }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={visibility.memberWeeklySummary}
+          aria-controls="all-users-member-weekly-summary-content"
+        >
+          <span>メンバー別 週間サマリー</span>
+          <span className={`toggle-icon ${visibility.memberWeeklySummary ? 'open' : ''}`}>▼</span>
+        </h2>
+        <div id="all-users-member-weekly-summary-content" className={`collapsible-content ${visibility.memberWeeklySummary ? 'open' : ''}`}>
+          {perMemberWeeklyData.length === 0 && <p className="no-data-message">表示するユーザーがいません。</p>}
+          {perMemberWeeklyData.map(({ user, displayName, data, weeklyKpiTargets }) => (
+            <div key={user} className="member-weekly-summary-item weekly-summary-container">
+              <h3 className="sub-section-title">{displayName}</h3>
+              <WeeklySummaryTable data={data} weeklyKpiTargets={weeklyKpiTargets} />
+            </div>
+          ))}
         </div>
       </section>
 
@@ -3666,7 +3708,7 @@ type SectionVisibilityKeys =
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
   | 'dailyProgress' | 'customPeriodReport'
-  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary';
+  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary';
 
 
 const App: React.FC = () => {
@@ -3733,6 +3775,7 @@ const App: React.FC = () => {
     allUsersProgress: true,
     allUsersDayOfWeekRate: true,
     allUsersWeeklySummary: true,
+    allUsersMemberWeeklySummary: true,
   });
 
   const toggleSection = (sectionKey: SectionVisibilityKeys) => {
@@ -4854,7 +4897,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary }}
                   toggleSection={toggleSection}
               />
             </>
@@ -4889,7 +4932,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary }}
                   toggleSection={toggleSection}
               />
             )}
