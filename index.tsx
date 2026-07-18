@@ -769,13 +769,18 @@ function buildTeamProgressCsv(
     const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
     const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
 
+    // Actuals (numerator) include archived media, since their historical performance still
+    // counts — but targets (denominator) must only sum activeMedia: the 月次目標設定 form only
+    // ever lets anyone edit targets for active media, so summing allMedia would silently add in
+    // stale/default target values for archived media nobody can see or edit, making this total
+    // never match what was actually set in the settings form.
     const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected', allMedia);
-    const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', allMedia);
+    const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', activeMedia);
     const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected', allMedia);
-    const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', allMedia);
+    const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', activeMedia);
 
     const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', allMedia);
-    const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', allMedia);
+    const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', activeMedia);
     const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews', allMedia);
     const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
 
@@ -4293,19 +4298,25 @@ const AllUsersDashboard: React.FC<{
                   const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
                   const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
 
+                  // Actuals (numerator) include archived media — their historical performance
+                  // still counts — but targets (denominator) must only sum activeMedia: the
+                  // 月次目標設定 form only ever lets anyone edit targets for active media, so
+                  // summing allMedia would silently add in stale/default target values for
+                  // archived media nobody can see or edit, making this total never match what
+                  // was actually set in the settings form.
                   const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected', allMedia);
-                  const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', allMedia);
+                  const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', activeMedia);
                   const documentsCollectedProgress = documentsCollectedTarget > 0 ? Math.min((documentsCollected / documentsCollectedTarget) * 100, 100) : 0;
 
                   const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected', allMedia);
-                  const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', allMedia);
+                  const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', activeMedia);
                   const effectiveDocumentsCollectedProgress = effectiveDocumentsCollectedTarget > 0 ? Math.min((effectiveDocumentsCollected / effectiveDocumentsCollectedTarget) * 100, 100) : 0;
 
                   const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', allMedia);
                   const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews', allMedia);
                   const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
 
-                  const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', allMedia);
+                  const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', activeMedia);
                   const initialInterviewsProgress = initialInterviewsTarget > 0 ? Math.min((initialInterviews / initialInterviewsTarget) * 100, 100) : 0;
 
                   return (
