@@ -41,6 +41,24 @@ function clearPendingSync(email: string): void {
   }
 }
 
+type SyncStatusListener = (email: string, hasPending: boolean) => void;
+const syncStatusListeners = new Set<SyncStatusListener>();
+
+/**
+ * Notified immediately after every save attempt (success or failure) for the given email —
+ * lets the UI show a warning right when a KPI/pipeline entry actually fails to sync, instead
+ * of only finding out on the next periodic check up to a minute later. Returns an unsubscribe
+ * function.
+ */
+export function onSyncStatusChange(listener: SyncStatusListener): () => void {
+  syncStatusListeners.add(listener);
+  return () => { syncStatusListeners.delete(listener); };
+}
+
+function notifySyncStatus(email: string, hasPending: boolean): void {
+  syncStatusListeners.forEach(listener => listener(email, hasPending));
+}
+
 /** The shared media-config cache is not user-specific — everyone reads the same list. */
 export function readMediaConfigCache<T = any>(): T | null {
   try {
@@ -187,12 +205,14 @@ async function performSave(
       onFileCreated(newId);
     }
     clearPendingSync(email);
+    notifySyncStatus(email, false);
   } catch (err) {
     // The data is still safe in this browser's local cache — just flag that Drive hasn't seen
     // it yet (e.g. the Google session expired/was revoked right as this fired) so it can be
     // retried once a valid session is available again (see retryPendingSyncIfNeeded).
     console.error('Failed to sync data to Drive', err);
     markPendingSync(email);
+    notifySyncStatus(email, true);
   }
 }
 

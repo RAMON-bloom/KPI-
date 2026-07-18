@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, hasPendingSync, retryPendingSyncIfNeeded, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 
 ChartJS.register(
@@ -5266,21 +5266,27 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // A save can fail mid-session too (not just at login) — e.g. the Google session expires or
-  // is revoked right as the debounced write fires. Poll for that and keep retrying (using
-  // whatever's newest in local cache) while the tab stays open, instead of leaving the data
-  // stuck in "never reached Drive" until the user happens to change something again.
+  // A save can fail mid-session too — e.g. the Google session expires or is revoked right as
+  // the debounced write fires, which happens right after the user enters a KPI or pipeline
+  // entry. Surface that immediately via onSyncStatusChange (fires the moment that save's
+  // success/failure is known) rather than waiting for the next periodic check, which could be
+  // up to a minute late and feel disconnected from the input that actually failed. The interval
+  // below is just a recovery safety net (e.g. the session becomes valid again on its own,
+  // without the user touching anything) — it's not the primary detection path.
   useEffect(() => {
     if (!currentIdentity) { setHasSyncError(false); return; }
     const email = currentIdentity.email;
-    const check = () => {
-      const pending = hasPendingSync(email);
-      setHasSyncError(pending);
-      if (pending) retryPendingSyncIfNeeded(email, driveFileId, setDriveFileId);
+    setHasSyncError(hasPendingSync(email));
+    const unsubscribe = onSyncStatusChange((changedEmail, hasPending) => {
+      if (changedEmail === email) setHasSyncError(hasPending);
+    });
+    const intervalId = setInterval(() => {
+      if (hasPendingSync(email)) retryPendingSyncIfNeeded(email, driveFileId, setDriveFileId);
+    }, 60000);
+    return () => {
+      unsubscribe();
+      clearInterval(intervalId);
     };
-    check();
-    const intervalId = setInterval(check, 60000);
-    return () => clearInterval(intervalId);
   }, [currentIdentity, driveFileId]);
 
 
