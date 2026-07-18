@@ -53,19 +53,26 @@ async function grantDomainPermission(fileId: string, role: 'reader' | 'writer'):
   }
 }
 
-async function patchAllowFileDiscovery(fileId: string, permissionId: string): Promise<void> {
+/**
+ * The Drive API's permissions.update only supports changing a handful of fields (role,
+ * expirationTime) — `allowFileDiscovery` on an existing permission can't be patched in place
+ * (confirmed: a plain PATCH with just that field fails). The only way to fix an already-shared
+ * file is to delete the old domain permission and create a fresh one with the flag set.
+ */
+async function recreateDomainPermissionWithDiscovery(fileId: string, oldPermissionId: string, role: 'reader' | 'writer'): Promise<void> {
   try {
-    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${permissionId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allowFileDiscovery: true }),
+    const delRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${oldPermissionId}`, {
+      method: 'DELETE',
     });
-    if (!res.ok) {
-      console.error(`Failed to enable file discovery on Drive file ${fileId}: ${res.status} ${await res.text()}`);
+    if (!delRes.ok) {
+      console.error(`Failed to remove old domain permission on Drive file ${fileId}: ${delRes.status} ${await delRes.text()}`);
+      return;
     }
   } catch (err) {
-    console.error(`Failed to enable file discovery on Drive file ${fileId}`, err);
+    console.error(`Failed to remove old domain permission on Drive file ${fileId}`, err);
+    return;
   }
+  await grantDomainPermission(fileId, role);
 }
 
 /**
@@ -84,8 +91,8 @@ export async function ensureDomainPermission(fileId: string, role: 'reader' | 'w
       const domainPermission = (data.permissions || []).find((p: any) => p.type === 'domain');
       if (domainPermission) {
         if (!domainPermission.allowFileDiscovery) {
-          console.warn(`Drive file ${fileId}'s domain permission was not search-discoverable — patching now.`);
-          await patchAllowFileDiscovery(fileId, domainPermission.id);
+          console.warn(`Drive file ${fileId}'s domain permission was not search-discoverable — recreating it now.`);
+          await recreateDomainPermissionWithDiscovery(fileId, domainPermission.id, domainPermission.role ?? role);
         }
         return;
       }
