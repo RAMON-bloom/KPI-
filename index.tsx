@@ -15,7 +15,7 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { signIn, signOut, getCurrentSession, tryRestoreSession, GoogleIdentity } from './services/googleAuth';
+import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 
 ChartJS.register(
@@ -3308,19 +3308,19 @@ const App: React.FC = () => {
     }));
   };
   
-  // Restore the Google session (if any), including silently re-authenticating with the
-  // last-known account so users stay signed in across browser restarts.
+  // Restore the Google session, if the access token from earlier in this browser tab's
+  // session is still valid. We deliberately do NOT attempt a network re-auth here: any
+  // token request not triggered by a real click gets blocked by the browser's popup
+  // blocker, so it would only add a delay before showing the login screen anyway. Once
+  // expired/cleared, signIn() (called from the login button) tries a silent-if-possible
+  // flow first using the last-known email, so returning users still get a near-instant
+  // re-login with just one click.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const identity = await tryRestoreSession();
-      if (cancelled) return;
-      if (identity) {
-        setCurrentIdentity(identity);
-      }
-      setIsInitialized(true);
-    })();
-    return () => { cancelled = true; };
+    const session = getCurrentSession();
+    if (session) {
+      setCurrentIdentity(session.identity);
+    }
+    setIsInitialized(true);
   }, []);
 
   // The signed-in Google account's email is always the current user; register it
@@ -3867,7 +3867,11 @@ const App: React.FC = () => {
                     onClick={handleGoogleSignIn}
                     disabled={isSigningIn}
                 >
-                    {isSigningIn ? 'ログイン中...' : 'Googleでログイン'}
+                    {isSigningIn
+                        ? 'ログイン中...'
+                        : getLastKnownEmail()
+                        ? `${getLastKnownEmail()} で続ける`
+                        : 'Googleでログイン'}
                 </button>
                 <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: '#666' }}>
                     bloom-firm.com のGoogleアカウントでログインしてください。

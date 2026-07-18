@@ -61,7 +61,7 @@ function clearSession() {
   sessionStorage.removeItem(SESSION_KEY);
 }
 
-function getLastKnownEmail(): string | null {
+export function getLastKnownEmail(): string | null {
   try {
     return localStorage.getItem(LAST_EMAIL_KEY);
   } catch {
@@ -163,10 +163,25 @@ export function getCurrentSession(): { accessToken: string; identity: GoogleIden
   return { accessToken: session.accessToken, identity: session.identity };
 }
 
-/** Opens the Google account chooser / consent prompt. */
+/**
+ * Signs the user in. Called from a click handler, so — unlike an automatic page-load
+ * attempt — the browser allows the popup this opens. Tries silently first (skips the
+ * account-chooser/consent screen if this browser already has an active Google session and
+ * previously granted consent, using the last-known email as a hint), and only falls back to
+ * the full interactive consent prompt if that doesn't work (e.g. first-ever sign-in, or the
+ * browser session/consent has since expired).
+ */
 export async function signIn(): Promise<GoogleIdentity> {
   await waitForGis();
-  return requestToken('consent');
+  const lastEmail = getLastKnownEmail() ?? undefined;
+  if (lastEmail) {
+    try {
+      return await requestToken('', lastEmail);
+    } catch {
+      // Fall through to the interactive flow — e.g. the browser session/consent expired.
+    }
+  }
+  return requestToken('consent', lastEmail);
 }
 
 /** Silently re-requests an access token using the existing browser session (no prompt shown). */
@@ -174,29 +189,6 @@ export async function refreshTokenSilently(): Promise<GoogleIdentity> {
   await waitForGis();
   const lastEmail = getLastKnownEmail() ?? undefined;
   return requestToken('', lastEmail);
-}
-
-/**
- * Called once on app load to keep users signed in across browser restarts. The access token
- * itself is short-lived and only lives in sessionStorage, but as long as the browser still has
- * an active Google session (and the user hasn't revoked access), a silent token request using
- * the last-known email as a hint re-authenticates without showing any prompt. Returns null if
- * there's nothing to restore or the silent attempt fails, in which case the caller should show
- * the normal "Googleでログイン" screen.
- */
-export async function tryRestoreSession(): Promise<GoogleIdentity | null> {
-  const existing = getCurrentSession();
-  if (existing) return existing.identity;
-
-  const lastEmail = getLastKnownEmail();
-  if (!lastEmail) return null;
-
-  try {
-    await waitForGis();
-    return await requestToken('', lastEmail);
-  } catch {
-    return null;
-  }
 }
 
 export function signOut() {

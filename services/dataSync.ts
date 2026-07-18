@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -93,6 +93,9 @@ export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>
       try {
         const content = await readFileContent<T>(cachedId);
         writeLocalCache(email, content);
+        // Best-effort self-heal: re-grant domain sharing if a prior save silently failed to
+        // set it (this is why a teammate's data could be invisible in the all-users view).
+        ensureDomainPermission(cachedId, 'reader').catch(() => {});
         return { data: content, driveFileId: cachedId, source: 'drive' };
       } catch (err) {
         console.warn('Cached Drive file id is stale, falling back to a full search', err);
@@ -103,6 +106,7 @@ export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>
       const content = await readFileContent<T>(existing.id);
       writeLocalCache(email, content);
       setCachedDriveFileId(email, existing.id);
+      ensureDomainPermission(existing.id, 'reader').catch(() => {});
       return { data: content, driveFileId: existing.id, source: 'drive' };
     }
   } catch (err) {
@@ -184,6 +188,9 @@ export async function loadTeamsConfig<T = any>(): Promise<TeamsConfigResult<T>> 
   const existing = await findTeamsConfigFile();
   if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
   const content = await readFileContent<T>(existing.id);
+  // Only succeeds when the loading user is the file's owner (drive.file scope); harmlessly
+  // fails otherwise. Self-heals sharing if the owner's own client failed to set it up before.
+  ensureDomainPermission(existing.id, 'writer').catch(() => {});
   return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
 }
 
@@ -217,6 +224,7 @@ export async function loadMediaConfig<T = any>(): Promise<MediaConfigResult<T>> 
   if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
   const content = await readFileContent<T>(existing.id);
   writeMediaConfigCache(content);
+  ensureDomainPermission(existing.id, 'writer').catch(() => {});
   return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
 }
 

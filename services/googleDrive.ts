@@ -30,17 +30,43 @@ async function authorizedFetch(url: string, init: RequestInit = {}, retried = fa
   return res;
 }
 
-async function grantDomainPermission(fileId: string, role: 'reader' | 'writer'): Promise<void> {
+async function grantDomainPermission(fileId: string, role: 'reader' | 'writer'): Promise<boolean> {
   try {
-    await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role, type: 'domain', domain: ALLOWED_DOMAIN }),
     });
+    if (!res.ok) {
+      console.error(`Failed to grant domain permission on Drive file ${fileId}: ${res.status} ${await res.text()}`);
+      return false;
+    }
+    return true;
   } catch (err) {
     // Non-fatal: the file still exists and is usable by its owner even if sharing fails.
     console.error('Failed to grant domain permission on Drive file', err);
+    return false;
   }
+}
+
+/**
+ * Checks whether a file already has a domain-wide permission, and grants one if it doesn't.
+ * Self-heals files whose sharing failed silently at creation time (e.g. a transient API
+ * error) — call this opportunistically whenever a file is loaded, not just when it's created.
+ */
+export async function ensureDomainPermission(fileId: string, role: 'reader' | 'writer'): Promise<void> {
+  try {
+    const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=permissions(type,role)`);
+    if (res.ok) {
+      const data = await res.json();
+      const hasDomainPermission = (data.permissions || []).some((p: any) => p.type === 'domain');
+      if (hasDomainPermission) return;
+      console.warn(`Drive file ${fileId} was missing its domain-wide permission — re-granting now.`);
+    }
+  } catch (err) {
+    console.error(`Failed to check permissions on Drive file ${fileId}`, err);
+  }
+  await grantDomainPermission(fileId, role);
 }
 
 /** Finds the signed-in user's own kpi-manager-data.json in their My Drive, if it exists. */
