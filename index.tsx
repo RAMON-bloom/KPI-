@@ -1267,115 +1267,64 @@ const DateEntryModal: React.FC<{
 
           <div className="media-kpi-section">
             <h3 className="sub-section-title">媒体別実績</h3>
-            <div className="media-kpi-grid">
-              {activeMedia.map(source => {
-                const sourceKey = source.id;
-                const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
-                const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
-                const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
-                const documentsCollectedKey = `${sourceKey}_documentsCollected` as KpiKey;
-                const effectiveDocumentsCollectedKey = `${sourceKey}_effectiveDocumentsCollected` as KpiKey;
-                const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
-                const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
-                return (
-                  <fieldset key={source.id} className="media-fieldset">
-                    <legend>{source.name}</legend>
-                    <div className="inputs-wrapper">
-                      <div className="form-group">
-                        <label htmlFor={`modal-${scoutsKey}`}>スカウト数</label>
-                        <input
-                          type="number"
-                          id={`modal-${scoutsKey}`}
-                          name={scoutsKey}
-                          value={entryValues[scoutsKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} スカウト数を入力`}
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor={`modal-${repliesKey}`}>スカウト返信数</label>
-                        <input
-                          type="number"
-                          id={`modal-${repliesKey}`}
-                          name={repliesKey}
-                          value={entryValues[repliesKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} スカウト返信数を入力`}
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor={`modal-${effectiveRepliesKey}`}>有効返信数</label>
-                        <input
-                          type="number"
-                          id={`modal-${effectiveRepliesKey}`}
-                          name={effectiveRepliesKey}
-                          value={entryValues[effectiveRepliesKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} 有効返信数を入力`}
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor={`modal-${documentsCollectedKey}`}>書類回収数</label>
-                        <input
-                          type="number"
-                          id={`modal-${documentsCollectedKey}`}
-                          name={documentsCollectedKey}
-                          value={entryValues[documentsCollectedKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} 書類回収数を入力`}
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor={`modal-${effectiveDocumentsCollectedKey}`}>有効書類回収数</label>
-                        <input
-                          type="number"
-                          id={`modal-${effectiveDocumentsCollectedKey}`}
-                          name={effectiveDocumentsCollectedKey}
-                          value={entryValues[effectiveDocumentsCollectedKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} 有効書類回収数を入力`}
-                        />
-                      </div>
-                       <div className="form-group">
-                        <label htmlFor={`modal-${interviewsKey}`}>初回面談数</label>
-                        <input
-                          type="number"
-                          id={`modal-${interviewsKey}`}
-                          name={interviewsKey}
-                          value={entryValues[interviewsKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} 初回面談数を入力`}
-                        />
-                      </div>
-                      <div className="form-group">
-                        <label htmlFor={`modal-${effectiveInterviewsKey}`}>初回有効面談数</label>
-                        <input
-                          type="number"
-                          id={`modal-${effectiveInterviewsKey}`}
-                          name={effectiveInterviewsKey}
-                          value={entryValues[effectiveInterviewsKey] ?? ''}
-                          onChange={handleInputChange}
-                          min="0"
-                          placeholder="0"
-                          aria-label={`${source.name} 初回有効面談数を入力`}
-                        />
-                      </div>
-                    </div>
-                  </fieldset>
-                )
-              })}
+            {/* One compact row per media instead of a tall stacked fieldset per media —
+                the same 7 fields laid out vertically per source was the main source of the
+                excessive scrolling in this modal. */}
+            <div className="daily-entry-table-container">
+              <table className="daily-entry-table">
+                <thead>
+                  <tr>
+                    <th>媒体</th>
+                    <th>スカウト数</th>
+                    <th>返信数</th>
+                    <th>有効返信数</th>
+                    <th>書類回収数</th>
+                    <th>有効書類回収数</th>
+                    <th>初回面談数</th>
+                    <th>初回有効面談数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeMedia.map(source => {
+                    const sourceKey = source.id;
+                    const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
+                    const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
+                    const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
+                    const documentsCollectedKey = `${sourceKey}_documentsCollected` as KpiKey;
+                    const effectiveDocumentsCollectedKey = `${sourceKey}_effectiveDocumentsCollected` as KpiKey;
+                    const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
+                    const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
+                    const rowFields: { key: KpiKey; label: string }[] = [
+                      { key: scoutsKey, label: 'スカウト数' },
+                      { key: repliesKey, label: 'スカウト返信数' },
+                      { key: effectiveRepliesKey, label: '有効返信数' },
+                      { key: documentsCollectedKey, label: '書類回収数' },
+                      { key: effectiveDocumentsCollectedKey, label: '有効書類回収数' },
+                      { key: interviewsKey, label: '初回面談数' },
+                      { key: effectiveInterviewsKey, label: '初回有効面談数' },
+                    ];
+                    return (
+                      <tr key={source.id}>
+                        <th scope="row">{source.name}</th>
+                        {rowFields.map(field => (
+                          <td key={field.key}>
+                            <input
+                              type="number"
+                              id={`modal-${field.key}`}
+                              name={field.key}
+                              value={entryValues[field.key] ?? ''}
+                              onChange={handleInputChange}
+                              min="0"
+                              placeholder="0"
+                              aria-label={`${source.name} ${field.label}を入力`}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         </form>

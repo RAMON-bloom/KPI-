@@ -666,6 +666,41 @@ section {
 }
 .inputs-wrapper { display: flex; flex-direction: column; gap: 1rem; }
 
+/* One row per media instead of a tall stacked fieldset — the same fields laid out
+   vertically per source was the main cause of excessive scrolling in the daily-entry modal. */
+.daily-entry-table-container {
+    overflow-x: auto;
+}
+.daily-entry-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.daily-entry-table th,
+.daily-entry-table td {
+    padding: 0.5rem 0.4rem;
+    border-bottom: 1px solid var(--border-color);
+    text-align: center;
+    font-size: 0.95rem;
+    white-space: nowrap;
+}
+.daily-entry-table thead th {
+    color: var(--text-muted-color);
+    font-weight: 500;
+}
+.daily-entry-table tbody th {
+    text-align: left;
+    font-weight: bold;
+    white-space: nowrap;
+}
+.daily-entry-table input[type="number"] {
+    width: 4.5rem;
+    padding: 0.4rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.25rem;
+    font-size: 0.95rem;
+    text-align: center;
+}
+
 /* --- Tables --- */
 .all-users-table-container, .history-container, .weekly-summary-container {
     overflow-x: auto;
