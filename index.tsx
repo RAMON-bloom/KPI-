@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, hasPendingSync, retryPendingSyncIfNeeded, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 
 ChartJS.register(
@@ -4835,6 +4835,7 @@ const App: React.FC = () => {
 
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
+  const [hasSyncError, setHasSyncError] = useState(false);
   
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
@@ -4941,6 +4942,9 @@ const App: React.FC = () => {
           }
           return fresh;
         });
+        // A prior save may have failed (e.g. an expired session right as it fired) and never
+        // reached Drive — now that we have a confirmed-working session, retry it.
+        retryPendingSyncIfNeeded(email, result.driveFileId, setDriveFileId);
       } else if (!cached) {
         // Brand-new signed-in user: offer to claim any pre-Google-login local data.
         const legacy = readLegacyAppData();
@@ -5254,6 +5258,23 @@ const App: React.FC = () => {
       window.removeEventListener('pagehide', flush);
     };
   }, []);
+
+  // A save can fail mid-session too (not just at login) — e.g. the Google session expires or
+  // is revoked right as the debounced write fires. Poll for that and keep retrying (using
+  // whatever's newest in local cache) while the tab stays open, instead of leaving the data
+  // stuck in "never reached Drive" until the user happens to change something again.
+  useEffect(() => {
+    if (!currentIdentity) { setHasSyncError(false); return; }
+    const email = currentIdentity.email;
+    const check = () => {
+      const pending = hasPendingSync(email);
+      setHasSyncError(pending);
+      if (pending) retryPendingSyncIfNeeded(email, driveFileId, setDriveFileId);
+    };
+    check();
+    const intervalId = setInterval(check, 60000);
+    return () => clearInterval(intervalId);
+  }, [currentIdentity, driveFileId]);
 
 
     const handleGoogleSignIn = async () => {
@@ -5630,6 +5651,11 @@ const App: React.FC = () => {
         />
       )}
       
+      {hasSyncError && (
+        <div className="sync-error-banner">
+          ⚠️ 一部の変更をGoogleドライブへ保存できていません（ログインし直すと解決する場合があります）。データはこの端末には残っています。
+        </div>
+      )}
       <header className="app-main-header">
         <h1 className="app-title">KPI管理くん</h1>
         <div className="header-controls">

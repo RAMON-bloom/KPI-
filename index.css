@@ -79,6 +79,16 @@ button:disabled {
   width: 100%;
 }
 
+.sync-error-banner {
+  background-color: #fff3cd;
+  color: #664d03;
+  border: 1px solid #ffe69c;
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;

@@ -2,9 +2,44 @@ import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent,
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
+const PENDING_SYNC_PREFIX = 'kpiPendingSync:';
 const LEGACY_APPDATA_KEY = 'kpiAppData';
 const MEDIA_CONFIG_CACHE_KEY = 'kpiMediaConfigCache';
 const SCHEMA_VERSION = 1;
+
+function pendingSyncKey(email: string): string {
+  return `${PENDING_SYNC_PREFIX}${email}`;
+}
+
+/**
+ * Whether the most recent Drive write for this user failed (e.g. the Google session expired
+ * or was revoked right as the debounced save fired) and hasn't been successfully retried yet.
+ * The data itself isn't lost — it's still in this browser's local cache — but it never reached
+ * Drive, so other devices/sessions won't see it until this resolves.
+ */
+export function hasPendingSync(email: string): boolean {
+  try {
+    return localStorage.getItem(pendingSyncKey(email)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markPendingSync(email: string): void {
+  try {
+    localStorage.setItem(pendingSyncKey(email), '1');
+  } catch {
+    // ignore
+  }
+}
+
+function clearPendingSync(email: string): void {
+  try {
+    localStorage.removeItem(pendingSyncKey(email));
+  } catch {
+    // ignore
+  }
+}
 
 /** The shared media-config cache is not user-specific — everyone reads the same list. */
 export function readMediaConfigCache<T = any>(): T | null {
@@ -151,8 +186,13 @@ async function performSave(
       setCachedDriveFileId(email, newId);
       onFileCreated(newId);
     }
+    clearPendingSync(email);
   } catch (err) {
+    // The data is still safe in this browser's local cache — just flag that Drive hasn't seen
+    // it yet (e.g. the Google session expired/was revoked right as this fired) so it can be
+    // retried once a valid session is available again (see retryPendingSyncIfNeeded).
     console.error('Failed to sync data to Drive', err);
+    markPendingSync(email);
   }
 }
 
@@ -197,6 +237,26 @@ export async function flushPendingSave(): Promise<void> {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
+  await enqueuePendingSave();
+}
+
+/**
+ * If an earlier save for this user failed (see markPendingSync above — most commonly an
+ * expired/revoked Google session right as the debounced write fired), re-attempts it using
+ * whatever is currently in local cache, the most complete copy of the user's data we have.
+ * Call this whenever the app confirms it has a valid session (initial load, and periodically
+ * while the tab stays open) so a save that failed once doesn't stay lost until the user
+ * happens to change something again.
+ */
+export async function retryPendingSyncIfNeeded(
+  email: string,
+  driveFileId: string | null,
+  onFileCreated: (id: string) => void
+): Promise<void> {
+  if (!hasPendingSync(email)) return;
+  const cached = readLocalCache(email);
+  if (!cached) return;
+  pendingSave = { email, driveFileId, data: cached, onFileCreated };
   await enqueuePendingSave();
 }
 
