@@ -228,6 +228,27 @@ button:disabled {
   white-space: nowrap;
 }
 
+.trend-compare-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.trend-compare-mode label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.trend-metric-select-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;

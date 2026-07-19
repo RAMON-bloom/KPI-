@@ -456,55 +456,77 @@ const DEFAULT_TREND_METRIC_KEYS = ['replyRate', 'scoutReplies', 'documentScreeni
  * user chooses which of TREND_METRICS to plot. Works the same whether `entries` is one person's
  * data or several users' entries concatenated together (summed per month either way).
  */
-const MonthlyTrendChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] }> = ({ entries, allMedia }) => {
+const buildZeroKpiTotals = (allMedia: MediaEntry[]): KpiTotals => {
+    const allKeys = buildAllKpiKeys(allMedia);
+    return allKeys.reduce((acc, key) => { acc[key] = 0; return acc; }, {} as KpiTotals);
+};
+
+/**
+ * Generalizes the old fixed 7-series month-over-month chart into a metric picker: there are too
+ * many possible KPIs (general + per-media-suffix + derived rates) to show them all at once
+ * without a cluttered, unreadable chart, so the caller's per-user entries get bucketed by month
+ * and the user chooses which of TREND_METRICS to plot. Two display modes: "合計" sums every
+ * selected metric across all of `perUserEntries` into one line each; "選択ユーザーで比較" instead
+ * fixes on a single metric and draws one line per user, so trends are directly comparable
+ * between people/teams. The 合計-only mode is used when there's nothing to compare (personal tab).
+ */
+const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: KpiEntry[] }[]; allMedia: MediaEntry[] }> = ({ perUserEntries, allMedia }) => {
+    const [compareMode, setCompareMode] = useState<'total' | 'byUser'>('total');
     const [selectedKeys, setSelectedKeys] = useState<string[]>(DEFAULT_TREND_METRIC_KEYS);
+    const [selectedUserMetricKey, setSelectedUserMetricKey] = useState<string>(DEFAULT_TREND_METRIC_KEYS[0]);
     const toggleMetric = (key: string) => {
         setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
     };
 
-    const { chartData, maxRate, hasCountSeries, hasRateSeries } = useMemo(() => {
-        const monthlyData: Record<string, KpiTotals> = {};
-        const allKeys = buildAllKpiKeys(allMedia);
+    const zeroTotals = useMemo(() => buildZeroKpiTotals(allMedia), [allMedia]);
 
+    const monthlyTotalsByUser = useMemo(() => perUserEntries.map(({ label, entries }) => {
+        const monthlyData: Record<string, KpiTotals> = {};
         entries.forEach(entry => {
             const month = entry.date.substring(0, 7); // YYYY-MM
-            if (!monthlyData[month]) {
-                monthlyData[month] = allKeys.reduce((acc, key) => {
-                  acc[key] = 0;
-                  return acc;
-                }, {} as KpiTotals);
-            }
+            if (!monthlyData[month]) monthlyData[month] = { ...zeroTotals };
             (Object.keys(entry.values) as KpiKey[]).forEach(key => {
                 monthlyData[month][key] += entry.values[key] || 0;
             });
         });
+        return { label, monthlyData };
+    }), [perUserEntries, zeroTotals]);
 
-        const labels = Object.keys(monthlyData).sort();
+    const allMonthLabels = useMemo(() => {
+        const set = new Set<string>();
+        monthlyTotalsByUser.forEach(u => Object.keys(u.monthlyData).forEach(m => set.add(m)));
+        return Array.from(set).sort();
+    }, [monthlyTotalsByUser]);
+
+    const hasAnyData = useMemo(() => perUserEntries.some(u => u.entries.length > 0), [perUserEntries]);
+    const canCompareByUser = perUserEntries.length > 1;
+
+    const active = useMemo(() => {
+        if (compareMode === 'byUser' && canCompareByUser) {
+            const def = TREND_METRICS.find(m => m.key === selectedUserMetricKey);
+            if (!def) return { labels: allMonthLabels, datasets: [], maxRate: 0, hasCount: false, hasRate: false };
+            let maxRate = 0;
+            const datasets = monthlyTotalsByUser.map((u, i) => {
+                const data = allMonthLabels.map(month => def.getValue(u.monthlyData[month] || zeroTotals, allMedia));
+                if (def.unit === 'percent') maxRate = Math.max(maxRate, ...data);
+                const color = MONTHLY_TREND_COLORS[i % MONTHLY_TREND_COLORS.length];
+                return { label: u.label, data, borderColor: color, backgroundColor: color, yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count', tension: 0.2, fill: false };
+            });
+            return { labels: allMonthLabels, datasets, maxRate, hasCount: def.unit === 'count', hasRate: def.unit === 'percent' };
+        }
+
         const activeDefs = TREND_METRICS.filter(m => selectedKeys.includes(m.key));
-        let currentMaxRate = 0;
-
+        let maxRate = 0;
         const datasets = activeDefs.map(def => {
-            const data = labels.map(month => def.getValue(monthlyData[month], allMedia));
-            if (def.unit === 'percent') currentMaxRate = Math.max(currentMaxRate, ...data);
+            const data = allMonthLabels.map(month => monthlyTotalsByUser.reduce(
+                (sum, u) => sum + def.getValue(u.monthlyData[month] || zeroTotals, allMedia), 0
+            ));
+            if (def.unit === 'percent') maxRate = Math.max(maxRate, ...data);
             const color = MONTHLY_TREND_COLORS[TREND_METRICS.indexOf(def) % MONTHLY_TREND_COLORS.length];
-            return {
-                label: def.label,
-                data,
-                borderColor: color,
-                backgroundColor: color,
-                yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count',
-                tension: 0.2,
-                fill: false,
-            };
+            return { label: def.label, data, borderColor: color, backgroundColor: color, yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count', tension: 0.2, fill: false };
         });
-
-        return {
-            chartData: { labels, datasets },
-            maxRate: currentMaxRate,
-            hasCountSeries: activeDefs.some(d => d.unit === 'count'),
-            hasRateSeries: activeDefs.some(d => d.unit === 'percent'),
-        };
-    }, [entries, allMedia, selectedKeys]);
+        return { labels: allMonthLabels, datasets, maxRate, hasCount: activeDefs.some(d => d.unit === 'count'), hasRate: activeDefs.some(d => d.unit === 'percent') };
+    }, [compareMode, canCompareByUser, selectedUserMetricKey, selectedKeys, allMonthLabels, monthlyTotalsByUser, allMedia, zeroTotals]);
 
     const options = useMemo(() => ({
         responsive: true,
@@ -518,7 +540,7 @@ const MonthlyTrendChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] 
             legend: { position: 'top' as const },
         },
         scales: {
-            ...(hasCountSeries ? {
+            ...(active.hasCount ? {
                 'y-axis-count': {
                     type: 'linear' as const,
                     display: true,
@@ -528,7 +550,7 @@ const MonthlyTrendChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] 
                     beginAtZero: true,
                 },
             } : {}),
-            ...(hasRateSeries ? {
+            ...(active.hasRate ? {
                 'y-axis-rate': {
                     type: 'linear' as const,
                     display: true,
@@ -536,32 +558,55 @@ const MonthlyTrendChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] 
                     title: { display: true, text: '%', font: { size: 14 } },
                     grid: { drawOnChartArea: false },
                     beginAtZero: true,
-                    max: maxRate > 0 ? Math.ceil(maxRate * 1.2) : 10,
+                    max: active.maxRate > 0 ? Math.ceil(active.maxRate * 1.2) : 10,
                 },
             } : {}),
             x: {
                grid: { display: false }
             }
         },
-    }), [hasCountSeries, hasRateSeries, maxRate]);
+    }), [active.hasCount, active.hasRate, active.maxRate]);
 
     return (
         <div>
-            <div className="trend-metric-picker">
-                {TREND_METRICS.map(def => (
-                    <label key={def.key} className="trend-metric-checkbox">
-                        <input type="checkbox" checked={selectedKeys.includes(def.key)} onChange={() => toggleMetric(def.key)} />
-                        {def.label}
+            {canCompareByUser && (
+                <div className="trend-compare-mode">
+                    <label>
+                        <input type="radio" name="trend-compare-mode" checked={compareMode === 'total'} onChange={() => setCompareMode('total')} />
+                        合計で表示
                     </label>
-                ))}
-            </div>
-            {entries.length === 0 ? (
+                    <label>
+                        <input type="radio" name="trend-compare-mode" checked={compareMode === 'byUser'} onChange={() => setCompareMode('byUser')} />
+                        選択ユーザーで比較
+                    </label>
+                </div>
+            )}
+            {compareMode === 'byUser' && canCompareByUser ? (
+                <div className="trend-metric-picker">
+                    <label className="trend-metric-select-label">
+                        比較する項目:
+                        <select value={selectedUserMetricKey} onChange={(e) => setSelectedUserMetricKey(e.target.value)}>
+                            {TREND_METRICS.map(def => <option key={def.key} value={def.key}>{def.label}</option>)}
+                        </select>
+                    </label>
+                </div>
+            ) : (
+                <div className="trend-metric-picker">
+                    {TREND_METRICS.map(def => (
+                        <label key={def.key} className="trend-metric-checkbox">
+                            <input type="checkbox" checked={selectedKeys.includes(def.key)} onChange={() => toggleMetric(def.key)} />
+                            {def.label}
+                        </label>
+                    ))}
+                </div>
+            )}
+            {!hasAnyData ? (
                 <p className="no-data-message">実績データがありません。</p>
-            ) : selectedKeys.length === 0 ? (
+            ) : active.datasets.length === 0 ? (
                 <p className="no-data-message">表示する項目を選択してください。</p>
             ) : (
                 <div className="chart-container">
-                    <Line options={options as any} data={chartData as any} />
+                    <Line options={options as any} data={active as any} />
                 </div>
             )}
         </div>
@@ -4574,8 +4619,8 @@ const AllUsersDashboard: React.FC<{
     () => users.flatMap(user => allUsersData[user]?.candidates || []),
     [users, allUsersData]
   );
-  const combinedEntries = useMemo(
-    () => users.flatMap(user => allUsersData[user]?.entries || []),
+  const perUserTrendEntries = useMemo(
+    () => users.map(user => ({ label: allUsersData[user]?.displayName || user, entries: allUsersData[user]?.entries || [] })),
     [users, allUsersData]
   );
   const grossProfitStageTotals = useMemo(
@@ -4834,11 +4879,11 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.monthlyTrend}
           aria-controls="all-users-monthly-trend-content"
         >
-          <span>月別パフォーマンストレンド（選択ユーザー合計）</span>
+          <span>月別パフォーマンストレンド</span>
           <span className={`toggle-icon ${visibility.monthlyTrend ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-monthly-trend-content" className={`collapsible-content ${visibility.monthlyTrend ? 'open' : ''}`}>
-          <MonthlyTrendChart entries={combinedEntries} allMedia={allMedia} />
+          <MonthlyTrendChart perUserEntries={perUserTrendEntries} allMedia={allMedia} />
         </div>
       </section>
 
@@ -6369,7 +6414,7 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="month-over-month-performance-content" className={`collapsible-content ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>
-                 <MonthlyTrendChart entries={entries} allMedia={allMedia} />
+                 <MonthlyTrendChart perUserEntries={[{ label: currentUserData?.displayName || currentIdentity?.name || '自分', entries }]} allMedia={allMedia} />
               </div>
             </section>
             
