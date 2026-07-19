@@ -5413,13 +5413,27 @@ const App: React.FC = () => {
   const [comparisonUserEmails, setComparisonUserEmails] = useState<string[]>([]);
   const [customExportStartDate, setCustomExportStartDate] = useState('');
   const [customExportEndDate, setCustomExportEndDate] = useState('');
-  // Reuses the same start/end fields the custom-period CSV export already had: when both are
-  // filled in, the 全ユーザー/チーム別 progress dashboard below switches from "this month" to
-  // this range too, instead of needing a second, separate period picker.
+  // Reuses the same start/end fields the custom-period CSV export already had: once explicitly
+  // enabled (below), the 全ユーザー/チーム別 progress dashboard switches from "this month" to
+  // this range too, instead of needing a second, separate period picker. Requires an explicit
+  // enable step rather than auto-activating whenever both dates happen to be filled in, so
+  // typing dates doesn't change the dashboard out from under the user before they're ready.
+  const [isPeriodFilterEnabled, setIsPeriodFilterEnabled] = useState(false);
   const dashboardPeriodOverride = useMemo(() => {
-    if (!customExportStartDate || !customExportEndDate) return null;
+    if (!isPeriodFilterEnabled || !customExportStartDate || !customExportEndDate) return null;
     return { start: new Date(customExportStartDate + 'T00:00:00'), end: new Date(customExportEndDate + 'T23:59:59') };
-  }, [customExportStartDate, customExportEndDate]);
+  }, [isPeriodFilterEnabled, customExportStartDate, customExportEndDate]);
+  const handleTogglePeriodFilter = () => {
+    if (dashboardPeriodOverride) {
+      setIsPeriodFilterEnabled(false);
+      return;
+    }
+    if (!customExportStartDate || !customExportEndDate) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    setIsPeriodFilterEnabled(true);
+  };
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -5754,6 +5768,27 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
     link.setAttribute('download', `progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${customExportStartDate}_to_${customExportEndDate}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Single CSV button for the 全ユーザー tab: exports whatever the dashboard is currently
+  // showing — the custom period (if the period filter toggle is enabled) or the regular
+  // this-month/this-week data otherwise — instead of having a separate button per mode.
+  const handleExportAllUsersProgress = (label: string, exportUsers: string[]) => {
+    if (dashboardPeriodOverride) {
+      handleCustomPeriodExport(label, exportUsers);
+      return;
+    }
+    const csvContent = buildTeamProgressCsv(label, exportUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    const today = new Date().toISOString().slice(0, 10);
+    link.setAttribute('download', `all_users_progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -6883,17 +6918,7 @@ const App: React.FC = () => {
                 <button
                   onClick={() => {
                     const label = comparisonUserEmails.length > 0 ? `選択ユーザー${comparisonUsers.length}名` : '全ユーザー';
-                    const csvContent = buildTeamProgressCsv(label, comparisonUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
-                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                    const link = document.createElement('a');
-                    const url = URL.createObjectURL(blob);
-                    link.setAttribute('href', url);
-                    const today = new Date().toISOString().slice(0, 10);
-                    link.setAttribute('download', `all_users_progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
-                    link.style.visibility = 'hidden';
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
+                    handleExportAllUsersProgress(label, comparisonUsers);
                   }}
                   className="export-button"
                 >
@@ -6906,19 +6931,8 @@ const App: React.FC = () => {
                 <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
                 <span>〜</span>
                 <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-                {dashboardPeriodOverride && (
-                  <button onClick={() => { setCustomExportStartDate(''); setCustomExportEndDate(''); }} className="secondary-action-button">
-                    今月表示に戻す
-                  </button>
-                )}
-                <button
-                  onClick={() => {
-                    const label = comparisonUserEmails.length > 0 ? `選択ユーザー${comparisonUsers.length}名` : '全ユーザー';
-                    handleCustomPeriodExport(label, comparisonUsers);
-                  }}
-                  className="export-button"
-                >
-                  CSVで出力
+                <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
+                  {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
                 </button>
               </div>
               <AllUsersDashboard
