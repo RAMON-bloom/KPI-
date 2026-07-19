@@ -403,8 +403,66 @@ const CurrentMonthPerformanceChart: React.FC<{ data: any }> = ({ data }) => {
     );
 };
 
-const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] }> = ({ entries, allMedia }) => {
-    const { chartData, maxReplyRate } = useMemo(() => {
+interface TrendMetricDef {
+  key: string;
+  label: string;
+  unit: 'count' | 'percent';
+  getValue: (totals: KpiTotals, allMedia: MediaEntry[]) => number;
+}
+
+const MONTHLY_TREND_COLORS = [
+  '#e83e8c', '#0d6efd', '#20c997', '#fd7e14', '#6610f2', '#198754', '#dc3545',
+  '#0dcaf0', '#6c757d', '#ffc107', '#3c8abe', '#a9def9', '#28a745', '#adb5bd', '#d63384',
+];
+
+const buildTrendMetrics = (): TrendMetricDef[] => [
+  { key: 'scoutsSent', label: 'スカウト数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_scoutsSent', m) },
+  { key: 'scoutReplies', label: 'スカウト返信数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_scoutReplies', m) },
+  { key: 'replyRate', label: 'スカウト返信率(%)', unit: 'percent', getValue: (t, m) => {
+      const sent = getTotalFromLump(t, '_scoutsSent', m);
+      const replies = getTotalFromLump(t, '_scoutReplies', m);
+      return sent > 0 ? (replies / sent) * 100 : 0;
+  } },
+  { key: 'effectiveReplies', label: '有効返信数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_effectiveReplies', m) },
+  { key: 'effectiveReplyRate', label: '有効返信率(%)', unit: 'percent', getValue: (t, m) => {
+      const replies = getTotalFromLump(t, '_scoutReplies', m);
+      const effective = getTotalFromLump(t, '_effectiveReplies', m);
+      return replies > 0 ? (effective / replies) * 100 : 0;
+  } },
+  { key: 'documentsCollected', label: '書類回収数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_documentsCollected', m) },
+  { key: 'effectiveDocumentsCollected', label: '有効書類回収数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_effectiveDocumentsCollected', m) },
+  { key: 'initialInterviews', label: '初回面談数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_initialInterviews', m) },
+  { key: 'effectiveInitialInterviews', label: '初回有効面談数', unit: 'count', getValue: (t, m) => getTotalFromLump(t, '_effectiveInitialInterviews', m) },
+  { key: 'effectiveInterviewRate', label: '初回有効面談率(%)', unit: 'percent', getValue: (t, m) => {
+      const interviews = getTotalFromLump(t, '_initialInterviews', m);
+      const effective = getTotalFromLump(t, '_effectiveInitialInterviews', m);
+      return interviews > 0 ? (effective / interviews) * 100 : 0;
+  } },
+  ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => ({
+    key: key as string,
+    label: GENERAL_KPIS[key].label,
+    unit: 'count' as const,
+    getValue: (t: KpiTotals) => t[key] || 0,
+  })),
+];
+
+const TREND_METRICS: TrendMetricDef[] = buildTrendMetrics();
+const DEFAULT_TREND_METRIC_KEYS = ['replyRate', 'scoutReplies', 'documentScreeningPassed', 'offersExtended', 'placements'];
+
+/**
+ * Generalizes the old fixed 7-series month-over-month chart into a metric picker: there are too
+ * many possible KPIs (general + per-media-suffix + derived rates) to show them all at once
+ * without a cluttered, unreadable chart, so the caller's entries get bucketed by month and the
+ * user chooses which of TREND_METRICS to plot. Works the same whether `entries` is one person's
+ * data or several users' entries concatenated together (summed per month either way).
+ */
+const MonthlyTrendChart: React.FC<{ entries: KpiEntry[]; allMedia: MediaEntry[] }> = ({ entries, allMedia }) => {
+    const [selectedKeys, setSelectedKeys] = useState<string[]>(DEFAULT_TREND_METRIC_KEYS);
+    const toggleMetric = (key: string) => {
+        setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+    };
+
+    const { chartData, maxRate, hasCountSeries, hasRateSeries } = useMemo(() => {
         const monthlyData: Record<string, KpiTotals> = {};
         const allKeys = buildAllKpiKeys(allMedia);
 
@@ -416,130 +474,37 @@ const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[]; allMedia: 
                   return acc;
                 }, {} as KpiTotals);
             }
-
             (Object.keys(entry.values) as KpiKey[]).forEach(key => {
                 monthlyData[month][key] += entry.values[key] || 0;
             });
         });
 
-        const sortedMonths = Object.keys(monthlyData).sort();
+        const labels = Object.keys(monthlyData).sort();
+        const activeDefs = TREND_METRICS.filter(m => selectedKeys.includes(m.key));
+        let currentMaxRate = 0;
 
-        const labels = sortedMonths;
-        const scoutRepliesData = sortedMonths.map(month => getTotalFromLump(monthlyData[month], '_scoutReplies', allMedia));
-        const docScreeningPassedData = sortedMonths.map(month => monthlyData[month].documentScreeningPassed || 0);
-        const firstInterviewPassedData = sortedMonths.map(month => monthlyData[month].firstInterviewPassed || 0);
-        const secondInterviewPassedData = sortedMonths.map(month => monthlyData[month].secondInterviewPassed || 0);
-        const offersExtendedData = sortedMonths.map(month => monthlyData[month].offersExtended || 0);
-        const placementsData = sortedMonths.map(month => monthlyData[month].placements || 0);
-        const replyRateData = sortedMonths.map(month => {
-            const scoutsSent = getTotalFromLump(monthlyData[month], '_scoutsSent', allMedia);
-            const scoutReplies = getTotalFromLump(monthlyData[month], '_scoutReplies', allMedia);
-            return scoutsSent > 0 ? (scoutReplies / scoutsSent) * 100 : 0;
+        const datasets = activeDefs.map(def => {
+            const data = labels.map(month => def.getValue(monthlyData[month], allMedia));
+            if (def.unit === 'percent') currentMaxRate = Math.max(currentMaxRate, ...data);
+            const color = MONTHLY_TREND_COLORS[TREND_METRICS.indexOf(def) % MONTHLY_TREND_COLORS.length];
+            return {
+                label: def.label,
+                data,
+                borderColor: color,
+                backgroundColor: color,
+                yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count',
+                tension: 0.2,
+                fill: false,
+            };
         });
 
-        const calculateAverage = (data: number[]) => data.length > 0 ? data.reduce((a, b) => a + b, 0) / data.length : 0;
-        const avgReplyRate = calculateAverage(replyRateData);
-        const avgScoutReplies = calculateAverage(scoutRepliesData);
-        const avgPlacements = calculateAverage(placementsData);
-        
-        const currentMaxReplyRate = Math.max(...replyRateData, 0);
-
-        const data = {
-            labels,
-            datasets: [
-                {
-                    label: '返信率',
-                    data: replyRateData,
-                    borderColor: 'rgb(255, 99, 132)',
-                    yAxisID: 'y-axis-rate',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: 'スカウト返信数',
-                    data: scoutRepliesData,
-                    borderColor: '#a9def9',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '書類選考通過数',
-                    data: docScreeningPassedData,
-                    borderColor: '#72b6e8',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '1次面接通過数',
-                    data: firstInterviewPassedData,
-                    borderColor: '#3c8abe',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '2次面接通過数',
-                    data: secondInterviewPassedData,
-                    borderColor: '#1e5f94',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '内定数',
-                    data: offersExtendedData,
-                    borderColor: '#0b3a61',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '内定承諾数',
-                    data: placementsData,
-                    borderColor: '#28a745',
-                    yAxisID: 'y-axis-count',
-                    tension: 0.2,
-                    fill: false,
-                },
-                {
-                    label: '返信率 (平均)',
-                    data: new Array(labels.length).fill(avgReplyRate),
-                    borderColor: 'rgba(255, 99, 132, 0.5)',
-                    yAxisID: 'y-axis-rate',
-                    borderDash: [5, 5],
-                    pointRadius: 0,
-                    fill: false,
-                    tension: 0,
-                    borderWidth: 2,
-                },
-                {
-                    label: 'スカウト返信数 (平均)',
-                    data: new Array(labels.length).fill(avgScoutReplies),
-                    borderColor: 'rgba(169, 222, 249, 0.8)',
-                    yAxisID: 'y-axis-count',
-                    borderDash: [5, 5],
-                    pointRadius: 0,
-                    fill: false,
-                    tension: 0,
-                    borderWidth: 2,
-                },
-                {
-                    label: '内定承諾数 (平均)',
-                    data: new Array(labels.length).fill(avgPlacements),
-                    borderColor: 'rgba(40, 167, 69, 0.7)',
-                    yAxisID: 'y-axis-count',
-                    borderDash: [5, 5],
-                    pointRadius: 0,
-                    fill: false,
-                    tension: 0,
-                    borderWidth: 2,
-                },
-            ],
+        return {
+            chartData: { labels, datasets },
+            maxRate: currentMaxRate,
+            hasCountSeries: activeDefs.some(d => d.unit === 'count'),
+            hasRateSeries: activeDefs.some(d => d.unit === 'percent'),
         };
-        return { chartData: data, maxReplyRate: currentMaxReplyRate };
-    }, [entries, allMedia]);
+    }, [entries, allMedia, selectedKeys]);
 
     const options = useMemo(() => ({
         responsive: true,
@@ -549,58 +514,56 @@ const MonthOverMonthPerformanceChart: React.FC<{ entries: KpiEntry[]; allMedia: 
             intersect: false,
         },
         plugins: {
-            title: {
-                display: false,
-            },
-            legend: {
-                position: 'top' as const,
-            },
+            title: { display: false },
+            legend: { position: 'top' as const },
         },
         scales: {
-            'y-axis-count': {
-                type: 'linear' as const,
-                display: true,
-                position: 'left' as const,
-                title: {
+            ...(hasCountSeries ? {
+                'y-axis-count': {
+                    type: 'linear' as const,
                     display: true,
-                    text: '件数',
-                    font: { size: 14 }
+                    position: 'left' as const,
+                    title: { display: true, text: '件数', font: { size: 14 } },
+                    grid: { drawOnChartArea: true },
+                    beginAtZero: true,
                 },
-                grid: {
-                    drawOnChartArea: true,
-                },
-                beginAtZero: true,
-            },
-            'y-axis-rate': {
-                type: 'linear' as const,
-                display: true,
-                position: 'right' as const,
-                title: {
+            } : {}),
+            ...(hasRateSeries ? {
+                'y-axis-rate': {
+                    type: 'linear' as const,
                     display: true,
-                    text: '返信率 (%)',
-                    font: { size: 14 }
+                    position: 'right' as const,
+                    title: { display: true, text: '%', font: { size: 14 } },
+                    grid: { drawOnChartArea: false },
+                    beginAtZero: true,
+                    max: maxRate > 0 ? Math.ceil(maxRate * 1.2) : 10,
                 },
-                grid: {
-                    drawOnChartArea: false,
-                },
-                beginAtZero: true,
-                max: maxReplyRate > 0 ? Math.ceil(maxReplyRate * 1.2) : 10,
-            },
+            } : {}),
             x: {
-               grid: {
-                  display: false
-               }
+               grid: { display: false }
             }
         },
-    }), [maxReplyRate]);
-
-    if (entries.length === 0) {
-        return <p className="no-data-message">実績データがありません。</p>;
-    }
+    }), [hasCountSeries, hasRateSeries, maxRate]);
 
     return (
-        <div className="chart-container">
-            <Line options={options} data={chartData as any} />
+        <div>
+            <div className="trend-metric-picker">
+                {TREND_METRICS.map(def => (
+                    <label key={def.key} className="trend-metric-checkbox">
+                        <input type="checkbox" checked={selectedKeys.includes(def.key)} onChange={() => toggleMetric(def.key)} />
+                        {def.label}
+                    </label>
+                ))}
+            </div>
+            {entries.length === 0 ? (
+                <p className="no-data-message">実績データがありません。</p>
+            ) : selectedKeys.length === 0 ? (
+                <p className="no-data-message">表示する項目を選択してください。</p>
+            ) : (
+                <div className="chart-container">
+                    <Line options={options as any} data={chartData as any} />
+                </div>
+            )}
         </div>
     );
 };
@@ -4588,8 +4551,8 @@ const AllUsersDashboard: React.FC<{
   weekStartDate: Date;
   onPrevWeek: () => void;
   onNextWeek: () => void;
-  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean };
-  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit') => void;
+  visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean; monthlyTrend: boolean };
+  toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
   showGrossProfit?: boolean;
   periodOverride?: { start: Date; end: Date } | null;
 }> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, showGrossProfit = true, periodOverride = null }) => {
@@ -4609,6 +4572,10 @@ const AllUsersDashboard: React.FC<{
   );
   const candidatesAcrossUsers = useMemo(
     () => users.flatMap(user => allUsersData[user]?.candidates || []),
+    [users, allUsersData]
+  );
+  const combinedEntries = useMemo(
+    () => users.flatMap(user => allUsersData[user]?.entries || []),
     [users, allUsersData]
   );
   const grossProfitStageTotals = useMemo(
@@ -4853,6 +4820,25 @@ const AllUsersDashboard: React.FC<{
               <WeeklySummaryTable data={data} weeklyKpiTargets={weeklyKpiTargets} />
             </div>
           ))}
+        </div>
+      </section>
+
+      <section aria-labelledby="all-users-monthly-trend-title">
+        <h2
+          id="all-users-monthly-trend-title"
+          className="section-title collapsible-header"
+          onClick={() => toggleSection('allUsersMonthlyTrend')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersMonthlyTrend'); } }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={visibility.monthlyTrend}
+          aria-controls="all-users-monthly-trend-content"
+        >
+          <span>月別パフォーマンストレンド（選択ユーザー合計）</span>
+          <span className={`toggle-icon ${visibility.monthlyTrend ? 'open' : ''}`}>▼</span>
+        </h2>
+        <div id="all-users-monthly-trend-content" className={`collapsible-content ${visibility.monthlyTrend ? 'open' : ''}`}>
+          <MonthlyTrendChart entries={combinedEntries} allMedia={allMedia} />
         </div>
       </section>
 
@@ -5201,7 +5187,8 @@ type SectionVisibilityKeys =
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
   | 'dailyProgress' | 'customPeriodReport'
-  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit';
+  | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit'
+  | 'allUsersMonthlyTrend';
 
 
 const App: React.FC = () => {
@@ -5286,6 +5273,7 @@ const App: React.FC = () => {
     allUsersWeeklySummary: true,
     allUsersMemberWeeklySummary: true,
     allUsersGrossProfit: true,
+    allUsersMonthlyTrend: true,
   });
 
   const toggleSection = (sectionKey: SectionVisibilityKeys) => {
@@ -6381,7 +6369,7 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="month-over-month-performance-content" className={`collapsible-content ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>
-                 <MonthOverMonthPerformanceChart entries={entries} allMedia={allMedia} />
+                 <MonthlyTrendChart entries={entries} allMedia={allMedia} />
               </div>
             </section>
             
@@ -6692,7 +6680,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   showGrossProfit={false}
                   periodOverride={dashboardPeriodOverride}
@@ -6774,7 +6762,7 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
-                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
+                  visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   periodOverride={dashboardPeriodOverride}
               />

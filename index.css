@@ -210,6 +210,24 @@ button:disabled {
   padding: 0.3rem 0.7rem;
 }
 
+.trend-metric-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+}
+
+.trend-metric-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;
