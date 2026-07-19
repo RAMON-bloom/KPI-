@@ -4029,30 +4029,6 @@ const CandidatePipelineView: React.FC<{
                 )}
             </div>
 
-            {scope === 'team' && teamMemberOptions.length > 0 && (
-                <div className="comparison-user-selector">
-                    <div className="comparison-user-selector-header">
-                        <span>メンバーで絞り込み（未選択の場合は全員を表示）</span>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                            <button onClick={() => setSelectedMemberFilters(teamMemberOptions.map(m => m.email))} className="secondary-action-button">全て選択</button>
-                            <button onClick={() => setSelectedMemberFilters([])} className="secondary-action-button">選択をクリア</button>
-                        </div>
-                    </div>
-                    <div className="comparison-user-checkbox-list">
-                        {teamMemberOptions.map(m => (
-                            <label key={m.email} className="comparison-user-checkbox">
-                                <input
-                                    type="checkbox"
-                                    checked={selectedMemberFilters.includes(m.email)}
-                                    onChange={() => toggleMemberFilter(m.email)}
-                                />
-                                {m.label}
-                            </label>
-                        ))}
-                    </div>
-                </div>
-            )}
-
             {scope !== 'personal' && isLoadingAggregate ? (
                 <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
             ) : scope === 'team' && !selectedTeamId ? (
@@ -4197,6 +4173,30 @@ const CandidatePipelineView: React.FC<{
                     <label htmlFor="show-hidden-candidates">非表示の候補者を表示</label>
                 </div>
             </div>
+
+            {scope === 'team' && teamMemberOptions.length > 0 && (
+                <div className="comparison-user-selector">
+                    <div className="comparison-user-selector-header">
+                        <span>メンバーで絞り込み（未選択の場合は全員を表示）</span>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <button onClick={() => setSelectedMemberFilters(teamMemberOptions.map(m => m.email))} className="secondary-action-button">全て選択</button>
+                            <button onClick={() => setSelectedMemberFilters([])} className="secondary-action-button">選択をクリア</button>
+                        </div>
+                    </div>
+                    <div className="comparison-user-checkbox-list">
+                        {teamMemberOptions.map(m => (
+                            <label key={m.email} className="comparison-user-checkbox">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedMemberFilters.includes(m.email)}
+                                    onChange={() => toggleMemberFilter(m.email)}
+                                />
+                                {m.label}
+                            </label>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <div className="candidate-list">
                 {sortedCandidates.length > 0 ? sortedCandidates.map(c => {
