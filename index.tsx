@@ -5488,10 +5488,15 @@ const App: React.FC = () => {
 
   // Load the shared teams config when opening the team-filtered view, the pipeline's team
   // scope, or the Teams management modal.
+  // Computed as a memoized boolean (rather than inlined in the effect) specifically so the
+  // effect's dependency below is this boolean's VALUE, not the raw view/modal/scope state —
+  // otherwise, e.g., opening then closing チーム管理 while already on the team_kpi tab re-fires
+  // the effect on both transitions even though `needsTeams` was already true throughout, and
+  // that spurious refetch could land after a just-created team's local update but before its
+  // Drive write finished, overwriting the newly created team back out of view.
+  const needsTeams = view === 'team_kpi' || isTeamsModalOpen || (view === 'pipeline' && pipelineScope === 'team');
   useEffect(() => {
-    if (!currentIdentity || !isInitialized) return;
-    const needsTeams = view === 'team_kpi' || isTeamsModalOpen || (view === 'pipeline' && pipelineScope === 'team');
-    if (!needsTeams) return;
+    if (!currentIdentity || !isInitialized || !needsTeams) return;
     let cancelled = false;
     (async () => {
       try {
@@ -5505,7 +5510,7 @@ const App: React.FC = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [currentIdentity, isInitialized, view, isTeamsModalOpen, pipelineScope]);
+  }, [currentIdentity, isInitialized, needsTeams]);
 
   const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
 
@@ -5656,18 +5661,33 @@ const App: React.FC = () => {
     return { ...allUsersData, [currentIdentity.email]: currentUserData };
   }, [allUsersData, currentIdentity, currentUserData]);
 
-  const persistTeams = async (updatedTeams: Team[]) => {
+  // A ref (not just React state) tracking the teams-config file id, kept in sync with
+  // teamsDriveFileId below. persistTeams reads/writes this ref directly rather than the state
+  // value, and chains writes through teamsWriteQueueRef — otherwise, two team mutations fired
+  // in quick succession (e.g. creating two teams back-to-back, before the first save's
+  // setTeamsDriveFileId has even landed) would both see driveFileId as null and each call
+  // createTeamsConfigFile, silently splitting teams across two separate Drive files with only
+  // one of them ever visible again afterwards.
+  const teamsDriveFileIdRef = useRef<string | null>(teamsDriveFileId);
+  useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
+  const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const persistTeams = (updatedTeams: Team[]) => {
     setTeams(updatedTeams);
     if (!currentIdentity) return;
-    try {
-      const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams };
-      const newFileId = await saveTeamsConfig(teamsDriveFileId, payload, currentIdentity.email);
-      setTeamsDriveFileId(newFileId);
-      if (!teamsOwnerEmail) setTeamsOwnerEmail(currentIdentity.email);
-    } catch (error) {
-      console.error('Failed to save teams config', error);
-      alert('チーム設定の保存に失敗しました。編集できるのは作成者のみです。');
-    }
+    const email = currentIdentity.email;
+    teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
+      try {
+        const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams };
+        const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
+        teamsDriveFileIdRef.current = newFileId;
+        setTeamsDriveFileId(newFileId);
+        setTeamsOwnerEmail(prev => prev || email);
+      } catch (error) {
+        console.error('Failed to save teams config', error);
+        alert('チーム設定の保存に失敗しました。編集できるのは作成者のみです。');
+      }
+    });
   };
 
   const handleCreateTeam = (name: string) => {
