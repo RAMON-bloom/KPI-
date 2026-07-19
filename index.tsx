@@ -3651,6 +3651,20 @@ const CandidatePipelineView: React.FC<{
     const [searchTerm, setSearchTerm] = useState('');
     const [showHidden, setShowHidden] = useState(false);
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
+    // Narrows the team scope down to specific members (empty = show every member of the
+    // selected team). Reset whenever the selected team changes, since a different team's
+    // member list makes any previously-checked emails meaningless.
+    const [selectedMemberFilters, setSelectedMemberFilters] = useState<string[]>([]);
+    useEffect(() => { setSelectedMemberFilters([]); }, [selectedTeamId]);
+    const toggleMemberFilter = (email: string) => {
+        setSelectedMemberFilters(prev => prev.includes(email) ? prev.filter(e => e !== email) : [...prev, email]);
+    };
+    const labelByEmailForPipeline = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
+    const teamMemberOptions = useMemo(() => {
+        if (scope !== 'team' || !selectedTeamId) return [];
+        const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
+        return memberEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
+    }, [scope, selectedTeamId, teams, labelByEmailForPipeline]);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(true);
@@ -3889,9 +3903,11 @@ const CandidatePipelineView: React.FC<{
             const matchesStage = selectedStageFilters.length === 0 || c.applications.some(
                 app => !app.isHidden && selectedStageFilters.includes(app.stage)
             );
-            return matchesSearch && matchesVisibility && matchesStage;
+            const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
+                || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
+            return matchesSearch && matchesVisibility && matchesStage && matchesMember;
         });
-    }, [candidates, searchTerm, showHidden, selectedStageFilters]);
+    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -4012,6 +4028,30 @@ const CandidatePipelineView: React.FC<{
                     </select>
                 )}
             </div>
+
+            {scope === 'team' && teamMemberOptions.length > 0 && (
+                <div className="comparison-user-selector">
+                    <div className="comparison-user-selector-header">
+                        <span>メンバーで絞り込み（未選択の場合は全員を表示）</span>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <button onClick={() => setSelectedMemberFilters(teamMemberOptions.map(m => m.email))} className="secondary-action-button">全て選択</button>
+                            <button onClick={() => setSelectedMemberFilters([])} className="secondary-action-button">選択をクリア</button>
+                        </div>
+                    </div>
+                    <div className="comparison-user-checkbox-list">
+                        {teamMemberOptions.map(m => (
+                            <label key={m.email} className="comparison-user-checkbox">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedMemberFilters.includes(m.email)}
+                                    onChange={() => toggleMemberFilter(m.email)}
+                                />
+                                {m.label}
+                            </label>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {scope !== 'personal' && isLoadingAggregate ? (
                 <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
