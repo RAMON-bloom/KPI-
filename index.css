@@ -172,6 +172,33 @@ button:disabled {
   font-weight: 600;
 }
 
+.ai-insight-panel {
+  margin-top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 640px;
+}
+
+.ai-insight-panel label {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+}
+
+.ai-insight-panel textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  resize: vertical;
+}
+
+.ai-insight-panel .submit-button {
+  align-self: flex-start;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;

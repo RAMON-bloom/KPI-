@@ -4337,10 +4337,15 @@ const FunnelAnalysisSection: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
-}> = ({ users, allUsersData, allMedia }) => {
+  periodOverride?: { start: Date; end: Date } | null;
+  periodLabel?: string;
+  perUserProgressStats?: any[];
+  grossProfitStageTotals?: StageGrossProfit[];
+}> = ({ users, allUsersData, allMedia, periodOverride = null, periodLabel = '今月', perUserProgressStats, grossProfitStageTotals }) => {
   const [isVisible, setIsVisible] = useState(true);
   const [aiSuggestion, setAiSuggestion] = useState('');
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
+  const [userQuestion, setUserQuestion] = useState('');
 
   const { totalStageValues, perUserStageValues } = useMemo(() => {
     const perUser: Record<string, number[]> = {};
@@ -4348,28 +4353,30 @@ const FunnelAnalysisSection: React.FC<{
     users.forEach(email => {
       const data = allUsersData[email];
       if (!data) return;
-      const monthlyTotals = calculateMonthlyTotals(data.entries || [], allMedia);
-      const values = FUNNEL_STAGES.map(stage => stage.getValue(monthlyTotals, allMedia));
+      const periodTotals = periodOverride
+        ? calculateTotalsForRange(data.entries || [], allMedia, periodOverride.start, periodOverride.end)
+        : calculateMonthlyTotals(data.entries || [], allMedia);
+      const values = FUNNEL_STAGES.map(stage => stage.getValue(periodTotals, allMedia));
       perUser[email] = values;
       values.forEach((v, i) => { totals[i] += v; });
     });
     return { totalStageValues: totals, perUserStageValues: perUser };
-  }, [users, allUsersData, allMedia]);
+  }, [users, allUsersData, allMedia, periodOverride]);
 
   const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
   const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
 
-  const handleGenerateSuggestion = async () => {
+  const handleAskAi = async () => {
     setIsGeneratingSuggestion(true);
     setAiSuggestion('');
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-      const lines: string[] = ['【全体ファネル実績（今月・全ユーザー合計）】'];
+      const lines: string[] = [`【全体ファネル実績（${periodLabel}・全ユーザー合計）】`];
       FUNNEL_STAGES.forEach((stage, i) => {
         const rate = totalConversionRates[i];
         lines.push(`${stage.label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
       });
-      lines.push('', '【ユーザー別実績（今月）】');
+      lines.push('', `【ユーザー別ファネル実績（${periodLabel}）】`);
       users.forEach(email => {
         const data = allUsersData[email];
         if (!data) return;
@@ -4382,7 +4389,31 @@ const FunnelAnalysisSection: React.FC<{
         lines.push(`${label}: ${parts.join(', ')}`);
       });
 
-      const prompt = `以下は採用エージェントの求人紹介パイプラインにおける、今月の全体ファネル実績とユーザー別実績です。各ステップの歩留まり（前段階からの通過率）を踏まえて、ボトルネックとなっている工程を指摘し、改善のための具体的な施策を日本語で3〜5点、簡潔に提案してください。\n\n${lines.join('\n')}`;
+      if (perUserProgressStats && perUserProgressStats.length > 0) {
+        lines.push('', `【ユーザー別 書類回収・面談・その他KPI実績（${periodLabel}）】`);
+        perUserProgressStats.forEach(stat => {
+          if (!stat.userData) return;
+          const generalParts = (stat.generalKpis || []).map((g: any) => `${g.label} ${g.value}件`).join(', ');
+          lines.push(
+            `${stat.displayName}: スカウト返信率 ${stat.replyRate.toFixed(1)}%(${stat.replies}/${stat.sent}), ` +
+            `書類回収 ${stat.documentsCollected}件, 初回面談 ${stat.initialInterviews}件, ${generalParts}`
+          );
+        });
+      }
+
+      if (grossProfitStageTotals && grossProfitStageTotals.length > 0) {
+        lines.push('', '【パイプライン想定粗利（フェーズ別・現在時点の全件）】');
+        grossProfitStageTotals.forEach(s => {
+          lines.push(`${s.stage}: ${s.count}件（うち粗利算出可能 ${s.estimableCount}件）, 想定粗利合計 ${formatManYen(s.profit)}`);
+        });
+      }
+
+      const question = userQuestion.trim() ||
+        '各ステップの歩留まり（前段階からの通過率）を踏まえて、ボトルネックとなっている工程を指摘し、改善のための具体的な施策を日本語で3〜5点、簡潔に提案してください。';
+      const prompt =
+        `あなたは人材紹介会社の営業KPIを分析するアシスタントです。以下は採用エージェントの求人紹介パイプラインにおける${periodLabel}の実績データです。` +
+        `このデータに基づいて、次の質問に日本語で分かりやすく回答してください。データにない情報については推測せず、その旨を述べてください。\n\n` +
+        `${lines.join('\n')}\n\n【質問】\n${question}`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -4390,8 +4421,8 @@ const FunnelAnalysisSection: React.FC<{
       });
       setAiSuggestion(response.text.trim());
     } catch (error) {
-      console.error('Error generating improvement suggestion:', error);
-      alert('AIによる改善提案の生成中にエラーが発生しました。');
+      console.error('Error generating AI insight:', error);
+      alert('AIによる分析中にエラーが発生しました。');
     } finally {
       setIsGeneratingSuggestion(false);
     }
@@ -4413,7 +4444,7 @@ const FunnelAnalysisSection: React.FC<{
         <span className={`toggle-icon ${isVisible ? 'open' : ''}`}>▼</span>
       </h2>
       <div id="funnel-analysis-content" className={`collapsible-content ${isVisible ? 'open' : ''}`}>
-        <h3 className="sub-section-title">全体ファネル（全ユーザー合計・今月）</h3>
+        <h3 className="sub-section-title">全体ファネル（全ユーザー合計・{periodLabel}）</h3>
         <div className="all-users-table-container">
           <table className="all-users-table">
             <thead>
@@ -4435,7 +4466,7 @@ const FunnelAnalysisSection: React.FC<{
           </table>
         </div>
 
-        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（今月の歩留まり %）</h3>
+        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}の歩留まり %）</h3>
         <div className="all-users-table-container">
           <table className="all-users-table">
             <thead>
@@ -4470,9 +4501,17 @@ const FunnelAnalysisSection: React.FC<{
           </table>
         </div>
 
-        <div style={{ marginTop: '1.5rem' }}>
-          <button type="button" onClick={handleGenerateSuggestion} disabled={isGeneratingSuggestion} className="submit-button">
-            {isGeneratingSuggestion ? 'AIが分析中...' : 'AIに改善提案をもらう'}
+        <div className="ai-insight-panel">
+          <label htmlFor="ai-insight-question">AIに質問・分析を依頼（空欄の場合は改善提案を生成します）</label>
+          <textarea
+            id="ai-insight-question"
+            value={userQuestion}
+            onChange={(e) => setUserQuestion(e.target.value)}
+            placeholder="例：RDSとBIZの返信率の差を分析して／このメンバー間の実績差の要因を教えて"
+            rows={2}
+          />
+          <button type="button" onClick={handleAskAi} disabled={isGeneratingSuggestion} className="submit-button">
+            {isGeneratingSuggestion ? 'AIが分析中...' : (userQuestion.trim() ? 'AIに聞く' : 'AIに改善提案をもらう')}
           </button>
           {aiSuggestion && (
             <div className="summary-wrapper" style={{ marginTop: '1rem' }}>
@@ -4485,6 +4524,8 @@ const FunnelAnalysisSection: React.FC<{
   );
 };
 
+const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()}`;
+
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -4496,8 +4537,10 @@ const AllUsersDashboard: React.FC<{
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit') => void;
   showGrossProfit?: boolean;
-}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, showGrossProfit = true }) => {
+  periodOverride?: { start: Date; end: Date } | null;
+}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, showGrossProfit = true, periodOverride = null }) => {
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
+  const periodLabel = periodOverride ? `${formatPeriodDate(periodOverride.start)}〜${formatPeriodDate(periodOverride.end)}` : '今月';
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
     () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
     [users, allUsersData, activeMedia, weekStartDate]
@@ -4514,6 +4557,54 @@ const AllUsersDashboard: React.FC<{
     () => users.flatMap(user => allUsersData[user]?.candidates || []),
     [users, allUsersData]
   );
+  const grossProfitStageTotals = useMemo(
+    () => (showGrossProfit ? computeGrossProfitByStage(candidatesAcrossUsers, allMedia) : undefined),
+    [showGrossProfit, candidatesAcrossUsers, allMedia]
+  );
+
+  // Hoisted out of the table's render loop so the same per-user period totals can also be
+  // handed to the AI panel as context, instead of duplicating this calculation twice.
+  const perUserProgressStats = useMemo(() => users.map(user => {
+    const userData = allUsersData[user];
+    if (!userData) return { user, displayName: user, userData: null as null };
+    const displayName = userData.displayName || user;
+    const totals = periodOverride
+      ? calculateTotalsForRange(userData.entries || [], allMedia, periodOverride.start, periodOverride.end)
+      : calculateMonthlyTotals(userData.entries || [], allMedia);
+    const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
+
+    const sent = getTotalFromLump(totals, '_scoutsSent', allMedia);
+    const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
+    const effectiveReplies = getTotalFromLump(totals, '_effectiveReplies', allMedia);
+    const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
+    const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
+
+    // Actuals (numerator) include archived media — their historical performance still
+    // counts — but targets (denominator) must only sum activeMedia; see note elsewhere in
+    // this file on why summing allMedia for targets silently mismatches the settings form.
+    const documentsCollected = getTotalFromLump(totals, '_documentsCollected', allMedia);
+    const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', activeMedia);
+    const effectiveDocumentsCollected = getTotalFromLump(totals, '_effectiveDocumentsCollected', allMedia);
+    const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', activeMedia);
+
+    const initialInterviews = getTotalFromLump(totals, '_initialInterviews', allMedia);
+    const effectiveInitialInterviews = getTotalFromLump(totals, '_effectiveInitialInterviews', allMedia);
+    const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
+    const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', activeMedia);
+
+    const generalKpis = (Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => ({
+      key, label: GENERAL_KPIS[key].label, value: totals[key] || 0, target: kpiTargets[key] || 0,
+    }));
+
+    return {
+      user, displayName, userData,
+      sent, replies, effectiveReplies, replyRate, effectiveReplyRate,
+      documentsCollected, documentsCollectedTarget, effectiveDocumentsCollected, effectiveDocumentsCollectedTarget,
+      initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
+      generalKpis,
+    };
+  }), [users, allUsersData, allMedia, activeMedia, periodOverride]);
+
   return (
     <>
       <section aria-labelledby="all-users-dashboard-title">
@@ -4527,10 +4618,13 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.progress}
             aria-controls="all-users-progress-content"
         >
-          <span>全ユーザーの月次進捗</span>
+          <span>全ユーザーの進捗（{periodLabel}）</span>
           <span className={`toggle-icon ${visibility.progress ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
+          {periodOverride && (
+            <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
+          )}
           <div className="all-users-table-container">
             <table className="all-users-table">
               <thead>
@@ -4548,42 +4642,18 @@ const AllUsersDashboard: React.FC<{
                 </tr>
               </thead>
               <tbody>
-                {users.map(user => {
-                  const userData = allUsersData[user];
-                  const displayName = userData?.displayName || user;
-                  if (!userData) {
-                    return <tr key={user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{displayName}のデータがありません。</td></tr>;
+                {perUserProgressStats.map(stat => {
+                  if (!stat.userData) {
+                    return <tr key={stat.user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{stat.displayName}のデータがありません。</td></tr>;
                   }
-
-                  const monthlyTotals = calculateMonthlyTotals(userData.entries || [], allMedia);
-                  const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
-
-                  const sent = getTotalFromLump(monthlyTotals, '_scoutsSent', allMedia);
-                  const replies = getTotalFromLump(monthlyTotals, '_scoutReplies', allMedia);
-                  const effectiveReplies = getTotalFromLump(monthlyTotals, '_effectiveReplies', allMedia);
-
-                  const replyRate = sent > 0 ? (replies / sent) * 100 : 0;
-                  const effectiveReplyRate = replies > 0 ? (effectiveReplies / replies) * 100 : 0;
-
-                  // Actuals (numerator) include archived media — their historical performance
-                  // still counts — but targets (denominator) must only sum activeMedia: the
-                  // 月次目標設定 form only ever lets anyone edit targets for active media, so
-                  // summing allMedia would silently add in stale/default target values for
-                  // archived media nobody can see or edit, making this total never match what
-                  // was actually set in the settings form.
-                  const documentsCollected = getTotalFromLump(monthlyTotals, '_documentsCollected', allMedia);
-                  const documentsCollectedTarget = getTotalFromLump(kpiTargets, '_documentsCollected', activeMedia);
+                  const {
+                    user, displayName, sent, replies, effectiveReplies, replyRate, effectiveReplyRate,
+                    documentsCollected, documentsCollectedTarget, effectiveDocumentsCollected, effectiveDocumentsCollectedTarget,
+                    initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
+                    generalKpis,
+                  } = stat;
                   const documentsCollectedProgress = documentsCollectedTarget > 0 ? Math.min((documentsCollected / documentsCollectedTarget) * 100, 100) : 0;
-
-                  const effectiveDocumentsCollected = getTotalFromLump(monthlyTotals, '_effectiveDocumentsCollected', allMedia);
-                  const effectiveDocumentsCollectedTarget = getTotalFromLump(kpiTargets, '_effectiveDocumentsCollected', activeMedia);
                   const effectiveDocumentsCollectedProgress = effectiveDocumentsCollectedTarget > 0 ? Math.min((effectiveDocumentsCollected / effectiveDocumentsCollectedTarget) * 100, 100) : 0;
-
-                  const initialInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', allMedia);
-                  const effectiveInitialInterviews = getTotalFromLump(monthlyTotals, '_effectiveInitialInterviews', allMedia);
-                  const effectiveInterviewRate = initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0;
-
-                  const initialInterviewsTarget = getTotalFromLump(kpiTargets, '_initialInterviews', activeMedia);
                   const initialInterviewsProgress = initialInterviewsTarget > 0 ? Math.min((initialInterviews / initialInterviewsTarget) * 100, 100) : 0;
 
                   return (
@@ -4604,22 +4674,28 @@ const AllUsersDashboard: React.FC<{
                         <small>({effectiveReplies}/{replies})</small>
                       </td>
                       <td className="progress-cell">
-                          <span>{documentsCollected} / {documentsCollectedTarget}</span>
-                          <div className="mini-progress-bar">
-                              <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
-                          </div>
+                          <span>{documentsCollected}{!periodOverride && ` / ${documentsCollectedTarget}`}</span>
+                          {!periodOverride && (
+                            <div className="mini-progress-bar">
+                                <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
+                            </div>
+                          )}
                       </td>
                        <td className="progress-cell">
-                          <span>{effectiveDocumentsCollected} / {effectiveDocumentsCollectedTarget}</span>
-                          <div className="mini-progress-bar">
-                              <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
-                          </div>
+                          <span>{effectiveDocumentsCollected}{!periodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
+                          {!periodOverride && (
+                            <div className="mini-progress-bar">
+                                <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
+                            </div>
+                          )}
                       </td>
                       <td className="progress-cell">
-                          <span>{initialInterviews} / {initialInterviewsTarget}</span>
-                          <div className="mini-progress-bar">
-                              <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
-                          </div>
+                          <span>{initialInterviews}{!periodOverride && ` / ${initialInterviewsTarget}`}</span>
+                          {!periodOverride && (
+                            <div className="mini-progress-bar">
+                                <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
+                            </div>
+                          )}
                       </td>
                       <td className="progress-cell">
                         <span>{effectiveInterviewRate.toFixed(1)}%</span>
@@ -4628,16 +4704,16 @@ const AllUsersDashboard: React.FC<{
                         </div>
                         <small>({effectiveInitialInterviews}/{initialInterviews})</small>
                       </td>
-                      {(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => {
-                          const value = monthlyTotals[key] || 0;
-                          const target = kpiTargets[key] || 0;
+                      {generalKpis.map(({ key, value, target }) => {
                           const progress = target > 0 ? Math.min((value / target) * 100, 100) : 0;
                           return (
                               <td key={key} className="progress-cell">
-                                  <span>{value} / {target}</span>
-                                  <div className="mini-progress-bar">
-                                      <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
-                                  </div>
+                                  <span>{value}{!periodOverride && ` / ${target}`}</span>
+                                  {!periodOverride && (
+                                    <div className="mini-progress-bar">
+                                        <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
+                                    </div>
+                                  )}
                               </td>
                           );
                       })}
@@ -4726,7 +4802,15 @@ const AllUsersDashboard: React.FC<{
         </div>
       </section>
 
-      <FunnelAnalysisSection users={users} allUsersData={allUsersData} allMedia={allMedia} />
+      <FunnelAnalysisSection
+        users={users}
+        allUsersData={allUsersData}
+        allMedia={allMedia}
+        periodOverride={periodOverride}
+        periodLabel={periodLabel}
+        perUserProgressStats={perUserProgressStats}
+        grossProfitStageTotals={grossProfitStageTotals}
+      />
 
       {dayOfWeekReplyRateData && (
         <section aria-labelledby="all-users-dow-title">
@@ -5098,6 +5182,13 @@ const App: React.FC = () => {
   const [comparisonUserEmails, setComparisonUserEmails] = useState<string[]>([]);
   const [customExportStartDate, setCustomExportStartDate] = useState('');
   const [customExportEndDate, setCustomExportEndDate] = useState('');
+  // Reuses the same start/end fields the custom-period CSV export already had: when both are
+  // filled in, the 全ユーザー/チーム別 progress dashboard below switches from "this month" to
+  // this range too, instead of needing a second, separate period picker.
+  const dashboardPeriodOverride = useMemo(() => {
+    if (!customExportStartDate || !customExportEndDate) return null;
+    return { start: new Date(customExportStartDate + 'T00:00:00'), end: new Date(customExportEndDate + 'T23:59:59') };
+  }, [customExportStartDate, customExportEndDate]);
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -6506,10 +6597,15 @@ const App: React.FC = () => {
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
               <div className="custom-period-export-bar">
-                <span>カスタム期間で出力:</span>
+                <span>表示・出力期間（未入力の場合は今月）:</span>
                 <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
                 <span>〜</span>
                 <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+                {dashboardPeriodOverride && (
+                  <button onClick={() => { setCustomExportStartDate(''); setCustomExportEndDate(''); }} className="secondary-action-button">
+                    今月表示に戻す
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     const label = comparisonUserEmails.length > 0 ? `選択ユーザー${comparisonUsers.length}名` : '全ユーザー';
@@ -6517,7 +6613,7 @@ const App: React.FC = () => {
                   }}
                   className="export-button"
                 >
-                  出力
+                  CSVで出力
                 </button>
               </div>
               <AllUsersDashboard
@@ -6531,6 +6627,7 @@ const App: React.FC = () => {
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
                   toggleSection={toggleSection}
                   showGrossProfit={false}
+                  periodOverride={dashboardPeriodOverride}
               />
             </>
           )
@@ -6575,10 +6672,15 @@ const App: React.FC = () => {
               </div>
             </div>
             <div className="custom-period-export-bar">
-              <span>カスタム期間で出力:</span>
+              <span>表示・出力期間（未入力の場合は今月）:</span>
               <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
               <span>〜</span>
               <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+              {dashboardPeriodOverride && (
+                <button onClick={() => { setCustomExportStartDate(''); setCustomExportEndDate(''); }} className="secondary-action-button">
+                  今月表示に戻す
+                </button>
+              )}
               <button
                 onClick={() => {
                   const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
@@ -6588,7 +6690,7 @@ const App: React.FC = () => {
                 disabled={!selectedTeamId}
                 className="export-button"
               >
-                出力
+                CSVで出力
               </button>
             </div>
             {!selectedTeamId ? (
@@ -6606,6 +6708,7 @@ const App: React.FC = () => {
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit }}
                   toggleSection={toggleSection}
+                  periodOverride={dashboardPeriodOverride}
               />
             )}
           </div>
