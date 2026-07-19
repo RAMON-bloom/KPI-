@@ -16,6 +16,7 @@ const MEDIA_SUBJECT_MATCHERS: { mediaId: string; test: (subject: string) => bool
   { mediaId: 'biz', test: (s) => s.includes('ビズリーチ') && s.includes('スカウト返信') },
   { mediaId: 'rds', test: (s) => s.includes('リクルートダイレクトスカウト') && s.includes('スカウト送付') },
   { mediaId: 'doda', test: (s) => s.includes('返信・質問') && s.includes('スカウト') && s.toLowerCase().includes('doda') },
+  { mediaId: 'liiga', test: (s) => s.includes('詳しく聞きたい') && s.includes('メッセージをお送りください') },
 ];
 
 function toGmailDate(d: Date): string {
