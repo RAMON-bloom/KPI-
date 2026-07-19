@@ -4652,13 +4652,14 @@ const FunnelAnalysisSection: React.FC<{
           </table>
         </div>
 
-        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}の歩留まり %）</h3>
+        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}）</h3>
         <div className="all-users-table-container">
           <table className="all-users-table">
             <thead>
               <tr>
                 <th>ユーザー</th>
-                {FUNNEL_STAGES.slice(1).map(stage => <th key={stage.key}>{stage.label}</th>)}
+                <th>{FUNNEL_STAGES[0].label}（件数）</th>
+                {FUNNEL_STAGES.slice(1).map(stage => <th key={stage.key}>{stage.label}（歩留まり %）</th>)}
               </tr>
             </thead>
             <tbody>
@@ -4672,6 +4673,7 @@ const FunnelAnalysisSection: React.FC<{
                 return (
                   <tr key={email}>
                     <td>{label}</td>
+                    <td>{values[0]}</td>
                     {rates.slice(1).map((rate, idx) => {
                       const i = idx + 1;
                       return (
