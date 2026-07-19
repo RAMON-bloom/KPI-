@@ -3324,26 +3324,29 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
 
 
 interface PipelineCalendarEvent {
-    candidateName: string;
-    companyName: string;
-    stage: PipelineStage;
-    ownerLabel?: string;
+    candidate: Candidate;
+    application: CompanyApplication;
 }
 
 /**
  * Month calendar of every visible application's manually-set scheduledDate. Reads whatever
  * `candidates` list the caller passes in, so it's automatically scoped by the pipeline's
  * existing 自分/全ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here.
- * Clicking a day lets the signed-in user schedule (or edit) one of their own candidates'
- * applications for that date, via onDayClick.
+ * Clicking empty day space lets the signed-in user schedule (or edit) one of their own
+ * candidates' applications for that date, via onDayClick. Clicking an existing event bar
+ * instead jumps straight to editing THAT application — but only when it belongs to the
+ * signed-in user (stops propagation so it doesn't also trigger onDayClick); other people's
+ * events are shown for visibility only and aren't clickable.
  */
 const PipelineCalendarView: React.FC<{
     candidates: Candidate[];
     viewDate: Date;
+    currentUserEmail: string;
     onPrevMonth: () => void;
     onNextMonth: () => void;
     onDayClick: (dateStr: string) => void;
-}> = ({ candidates, viewDate, onPrevMonth, onNextMonth, onDayClick }) => {
+    onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
+}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
@@ -3352,7 +3355,7 @@ const PipelineCalendarView: React.FC<{
         candidates.filter(c => !c.isHidden).forEach(c => {
             c.applications.filter(app => !app.isHidden && app.scheduledDate).forEach(app => {
                 const list = map.get(app.scheduledDate!) || [];
-                list.push({ candidateName: c.name, companyName: app.companyName, stage: app.stage, ownerLabel: c.ownerLabel });
+                list.push({ candidate: c, application: app });
                 map.set(app.scheduledDate!, list);
             });
         });
@@ -3389,17 +3392,28 @@ const PipelineCalendarView: React.FC<{
                 <div className="day-number">{i}</div>
                 {events.length > 0 && (
                     <div className="pipeline-calendar-events">
-                        {events.map((ev, idx) => (
-                            <div
-                                key={idx}
-                                className="pipeline-calendar-event"
-                                style={{ '--badge-color': STAGE_COLOR_MAP[ev.stage] } as React.CSSProperties}
-                                title={`${ev.candidateName} / ${ev.companyName} / ${ev.stage}${ev.ownerLabel ? ` (${ev.ownerLabel})` : ''}`}
-                            >
-                                <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.stage]}</span>
-                                {ev.candidateName} - {ev.companyName}
-                            </div>
-                        ))}
+                        {events.map((ev, idx) => {
+                            const isOwnEvent = !ev.candidate.ownerEmail || ev.candidate.ownerEmail === currentUserEmail;
+                            const handleEventActivate = (e: React.SyntheticEvent) => {
+                                e.stopPropagation();
+                                onEditApplication(ev.candidate, ev.application);
+                            };
+                            return (
+                                <div
+                                    key={idx}
+                                    className={`pipeline-calendar-event ${isOwnEvent ? 'is-editable' : ''}`}
+                                    style={{ '--badge-color': STAGE_COLOR_MAP[ev.application.stage] } as React.CSSProperties}
+                                    title={`${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
+                                    role={isOwnEvent ? 'button' : undefined}
+                                    tabIndex={isOwnEvent ? 0 : undefined}
+                                    onClick={isOwnEvent ? handleEventActivate : undefined}
+                                    onKeyDown={isOwnEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEventActivate(e); } } : undefined}
+                                >
+                                    <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.application.stage]}</span>
+                                    {ev.candidate.name} - {ev.application.companyName}
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
             </div>
@@ -4076,9 +4090,11 @@ const CandidatePipelineView: React.FC<{
                     <PipelineCalendarView
                         candidates={candidates}
                         viewDate={calendarViewDate}
+                        currentUserEmail={currentUserEmail}
                         onPrevMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
                         onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
                         onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
+                        onEditApplication={handleOpenApplicationModal}
                     />
                 </div>
             </div>

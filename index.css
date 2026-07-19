@@ -622,6 +622,15 @@ section {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.pipeline-calendar-event.is-editable {
+  cursor: pointer;
+}
+.pipeline-calendar-event.is-editable:hover,
+.pipeline-calendar-event.is-editable:focus-visible {
+  filter: brightness(1.15);
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
+}
 .pipeline-calendar-event-stage {
   display: inline-block;
   font-weight: bold;
