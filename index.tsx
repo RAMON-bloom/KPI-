@@ -5337,18 +5337,24 @@ const App: React.FC = () => {
   };
 
   const handleSaveEntry = (date: string, newValues: KpiTotals) => {
-    setCurrentUserData(prevData => {
-      if (!prevData) return null;
-      const otherEntries = prevData.entries.filter(entry => entry.date !== date);
-      const newEntry: KpiEntry = {
-        id: Date.now(),
-        date: date,
-        values: newValues,
-      };
-      const updatedEntries = [...otherEntries, newEntry].sort((a,b) => a.date.localeCompare(b.date));
-      return { ...prevData, entries: updatedEntries };
-    });
+    if (!currentUserData) return;
+    const otherEntries = currentUserData.entries.filter(entry => entry.date !== date);
+    const newEntry: KpiEntry = {
+      id: Date.now(),
+      date: date,
+      values: newValues,
+    };
+    const updatedEntries = [...otherEntries, newEntry].sort((a, b) => a.date.localeCompare(b.date));
+    const updatedData = { ...currentUserData, entries: updatedEntries };
+    setCurrentUserData(updatedData);
     setSelectedDate(null);
+    // Sync to Drive right away on every calendar save, instead of waiting out the usual 2s
+    // debounce — a save here is a single deliberate action (unlike rapid KPI-form keystrokes),
+    // so there's no batching benefit to waiting, only a window where the entry looks saved but
+    // isn't yet on Drive.
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
   };
 
   const handleSaveCandidate = (candidateData: Candidate) => {
