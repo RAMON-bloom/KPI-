@@ -5514,7 +5514,14 @@ const App: React.FC = () => {
 
     const normalize = (d: Partial<UserData>): UserData => ({
       entries: d.entries || [],
-      candidates: d.candidates || [],
+      // ownerEmail/ownerLabel are presentation-only tags applied when flattening candidates for
+      // an aggregate (全ユーザー/チーム/ユーザー別) pipeline view — never meant to be persisted.
+      // Editing one's own candidate while viewing such a scope used to save the tagged copy
+      // straight through, baking a stray "登録者: (自分)" label into that one candidate forever
+      // while untouched candidates stayed clean, which read as "some cards have the label, some
+      // don't". Stripped here (self-heals anything already saved with the leak) and again at
+      // the actual save point below (handleSaveCandidate) to stop it recurring.
+      candidates: (d.candidates || []).map(({ ownerEmail, ownerLabel, ...c }) => c),
       kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
       weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
       dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
@@ -6027,14 +6034,19 @@ const App: React.FC = () => {
   };
 
   const handleSaveCandidate = (candidateData: Candidate) => {
+    // candidateData may be a copy tagged with ownerEmail/ownerLabel (e.g. edited while viewing
+    // an aggregate pipeline scope on one's own candidate) — those tags are presentation-only and
+    // must never be written into this account's own stored candidates. See normalize()'s
+    // same-shaped strip above for why.
+    const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
     setCurrentUserData(prevData => {
         if (!prevData) return null;
-        const existing = prevData.candidates.find(c => c.id === candidateData.id);
+        const existing = prevData.candidates.find(c => c.id === sanitized.id);
         let updatedCandidates;
         if (existing) {
-            updatedCandidates = prevData.candidates.map(c => c.id === candidateData.id ? candidateData : c);
+            updatedCandidates = prevData.candidates.map(c => c.id === sanitized.id ? sanitized : c);
         } else {
-            updatedCandidates = [...prevData.candidates, candidateData];
+            updatedCandidates = [...prevData.candidates, sanitized];
         }
         return { ...prevData, candidates: updatedCandidates };
     });
