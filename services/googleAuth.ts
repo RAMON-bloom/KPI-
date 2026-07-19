@@ -13,7 +13,15 @@ interface StoredSession {
 const SESSION_KEY = 'kpiGoogleSession';
 const LAST_EMAIL_KEY = 'kpiLastSignedInEmail';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
-const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/gmail.readonly';
+// Full `drive` (not just drive.file/drive.readonly) is required so that a designated teams
+// editor — someone other than a shared file's original creator — can actually write to it:
+// drive.file only grants per-file write access to files this specific app instance created,
+// regardless of any Drive-level "writer" sharing permission on the file. Broadening to full
+// Drive access removes that restriction (the existing domain "writer" permission on
+// kpi-manager-teams.json etc. becomes actionable for anyone holding it), at the cost of
+// granting this app read/write access to each signed-in user's entire Drive, not just files
+// it created — a real scope increase, accepted deliberately for the multi-editor teams feature.
+const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly';
 
 declare global {
   interface Window {

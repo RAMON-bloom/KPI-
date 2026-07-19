@@ -35,6 +35,10 @@ ChartJS.register(
 // Media (scouting source) management is restricted to this single account, regardless of who
 // happens to own the underlying Drive file — everyone else gets read-only access.
 const MEDIA_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
+// The one account that can always create/edit teams and grant that ability to others (see
+// TeamsModal's permission section). Others gain edit access only via teamsAuthorizedEditors,
+// a list this admin manages, persisted alongside the teams themselves.
+const TEAMS_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
 
 const GENERAL_KPIS = {
   candidatesSubmitted: { label: '候補者推薦数', target: 30 },
@@ -329,6 +333,7 @@ interface Team {
 interface TeamsConfig {
   schemaVersion: number;
   teams: Team[];
+  authorizedEditorEmails?: string[];
 }
 
 const getStartOfWeek = (date: Date): Date => {
@@ -1700,7 +1705,8 @@ const CalendarView: React.FC<{
 const TeamsModal: React.FC<{
     teams: Team[];
     isEditable: boolean;
-    ownerEmail: string | null;
+    isAdmin: boolean;
+    authorizedEditorEmails: string[];
     userOptions: { email: string; label: string }[];
     onClose: () => void;
     onCreateTeam: (name: string) => void;
@@ -1708,13 +1714,28 @@ const TeamsModal: React.FC<{
     onDeleteTeam: (teamId: string) => void;
     onAddMember: (teamId: string, email: string) => void;
     onRemoveMember: (teamId: string, email: string) => void;
-}> = ({ teams, isEditable, ownerEmail, userOptions, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember }) => {
+    onGrantEditor: (email: string) => void;
+    onRevokeEditor: (email: string) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
+    const [newEditorEmail, setNewEditorEmail] = useState('');
 
     const labelByEmail = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
+
+    const handleGrantEditor = (e: React.FormEvent) => {
+        e.preventDefault();
+        const email = newEditorEmail.trim();
+        if (!email) return;
+        if (!email.toLowerCase().endsWith('@bloom-firm.com')) {
+            alert('bloom-firm.com のメールアドレスを入力してください。');
+            return;
+        }
+        onGrantEditor(email);
+        setNewEditorEmail('');
+    };
 
     const handleCreate = (e: React.FormEvent) => {
         e.preventDefault();
@@ -1752,9 +1773,43 @@ const TeamsModal: React.FC<{
                     <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
                 </div>
                 <div className="modal-body">
+                    {isAdmin && (
+                        <div className="teams-permission-section">
+                            <h4 className="sub-section-title">チーム作成・編集権限の管理</h4>
+                            <p className="modal-description">
+                                ここに登録したメールアドレスの人は「チーム管理」からチームの作成・編集ができるようになります。
+                            </p>
+                            {authorizedEditorEmails.length === 0 ? (
+                                <p className="no-data-message">まだ誰にも権限を付与していません。</p>
+                            ) : (
+                                <ul className="user-management-list">
+                                    {authorizedEditorEmails.map(email => (
+                                        <li key={email} className="user-management-item">
+                                            <span className="user-management-name">
+                                                {labelByEmail.get(email) || email}
+                                                {labelByEmail.has(email) && <small style={{ color: 'var(--text-muted-color)' }}> ({email})</small>}
+                                            </span>
+                                            <button onClick={() => onRevokeEditor(email)} className="delete-user-button">削除</button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                            <form onSubmit={handleGrantEditor} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                <input
+                                    type="email"
+                                    value={newEditorEmail}
+                                    onChange={(e) => setNewEditorEmail(e.target.value)}
+                                    placeholder="example@bloom-firm.com"
+                                    style={{ flex: 1 }}
+                                />
+                                <button type="submit" className="submit-button" disabled={!newEditorEmail.trim()}>権限を付与</button>
+                            </form>
+                            <hr style={{ margin: '1rem 0' }} />
+                        </div>
+                    )}
                     {!isEditable && (
                         <p className="no-data-message">
-                            チーム設定の編集は作成者（{ownerEmail || '不明'}）のみ可能です。閲覧のみできます。
+                            チームの作成・編集は権限を付与された人のみ可能です。閲覧のみできます。
                         </p>
                     )}
                     {isEditable && (
@@ -5261,6 +5316,7 @@ const App: React.FC = () => {
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamsDriveFileId, setTeamsDriveFileId] = useState<string | null>(null);
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
+  const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
@@ -5505,6 +5561,7 @@ const App: React.FC = () => {
         setTeams(result.data?.teams || []);
         setTeamsDriveFileId(result.driveFileId);
         setTeamsOwnerEmail(result.ownerEmail);
+        setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
       } catch (error) {
         console.error('Failed to load teams config from Drive', error);
       }
@@ -5512,7 +5569,12 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [currentIdentity, isInitialized, needsTeams]);
 
-  const isTeamsEditable = !teamsOwnerEmail || teamsOwnerEmail === currentIdentity?.email;
+  // Only TEAMS_ADMIN_EMAIL and whoever they've explicitly granted access to (via TeamsModal's
+  // permission section) can create/edit teams — file ownership no longer determines this, since
+  // the full `drive` scope now lets any of these accounts actually write the shared file
+  // regardless of who originally created it.
+  const isTeamsAdmin = currentIdentity?.email === TEAMS_ADMIN_EMAIL;
+  const isTeamsEditable = isTeamsAdmin || (!!currentIdentity && teamsAuthorizedEditors.includes(currentIdentity.email));
 
   // Load the shared media list once per sign-in. Unlike Teams, this is required for the KPI
   // forms to render at all, so it loads unconditionally after login (not gated by view/modal).
@@ -5672,22 +5734,34 @@ const App: React.FC = () => {
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  const persistTeams = (updatedTeams: Team[]) => {
+  const persistTeamsConfig = (updatedTeams: Team[], updatedAuthorizedEditors: string[]) => {
     setTeams(updatedTeams);
+    setTeamsAuthorizedEditors(updatedAuthorizedEditors);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
-        const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams };
+        const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams, authorizedEditorEmails: updatedAuthorizedEditors };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
         setTeamsDriveFileId(newFileId);
         setTeamsOwnerEmail(prev => prev || email);
       } catch (error) {
         console.error('Failed to save teams config', error);
-        alert('チーム設定の保存に失敗しました。編集できるのは作成者のみです。');
+        alert('チーム設定の保存に失敗しました。');
       }
     });
+  };
+
+  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors);
+
+  const handleGrantTeamsEditor = (email: string) => {
+    if (teamsAuthorizedEditors.includes(email)) return;
+    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email]);
+  };
+
+  const handleRevokeTeamsEditor = (email: string) => {
+    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email));
   };
 
   const handleCreateTeam = (name: string) => {
@@ -6180,7 +6254,8 @@ const App: React.FC = () => {
         <TeamsModal
           teams={teams}
           isEditable={isTeamsEditable}
-          ownerEmail={teamsOwnerEmail}
+          isAdmin={isTeamsAdmin}
+          authorizedEditorEmails={teamsAuthorizedEditors}
           userOptions={pipelineUserOptions}
           onClose={() => setIsTeamsModalOpen(false)}
           onCreateTeam={handleCreateTeam}
@@ -6188,6 +6263,8 @@ const App: React.FC = () => {
           onDeleteTeam={handleDeleteTeam}
           onAddMember={handleAddTeamMember}
           onRemoveMember={handleRemoveTeamMember}
+          onGrantEditor={handleGrantTeamsEditor}
+          onRevokeEditor={handleRevokeTeamsEditor}
         />
       )}
       {isMediaModalOpen && (

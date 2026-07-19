@@ -249,6 +249,14 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.teams-permission-section {
+  background-color: var(--background-color-secondary, #f8f9fa);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;
