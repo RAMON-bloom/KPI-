@@ -322,6 +322,24 @@ interface UserData {
   displayName?: string;
 }
 
+const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+
+/**
+ * Case-insensitively resolves a Team's free-typed memberEmails entry against allUsersData's
+ * keys (which are always exactly the casing Google returned at sign-in). A member email typed
+ * or pasted with different casing than the account's actual sign-in email would otherwise be an
+ * exact-match miss on every lookup keyed straight off that string — silently dropping that
+ * member's data everywhere (team-scoped pipeline candidates, team KPI dashboards, etc.) even
+ * though the member is genuinely in the team. Returns the canonical key so callers can tag/
+ * store that instead of the original, possibly-miscased, string.
+ */
+const resolveUserDataEntry = (allData: Record<string, UserData>, email: string): [string, UserData] | null => {
+  if (allData[email]) return [email, allData[email]];
+  const target = normalizeEmail(email);
+  const foundKey = Object.keys(allData).find(k => normalizeEmail(k) === target);
+  return foundKey ? [foundKey, allData[foundKey]] : null;
+};
+
 interface Team {
   id: string;
   name: string;
@@ -1755,9 +1773,14 @@ const TeamsModal: React.FC<{
     };
 
     const handleAddMember = (teamId: string, emailOverride?: string) => {
-        const email = (emailOverride ?? memberInputs[teamId] ?? '').trim();
+        // Lowercased before storing — this is free-typed (or pasted) input, not picked from a
+        // list of known signed-in accounts, so a mismatched case here would silently make this
+        // member invisible to every scope that indexes allUsersData directly by this string
+        // (Google's own email casing is otherwise always consistent, since that comes straight
+        // from account data rather than someone's keyboard).
+        const email = (emailOverride ?? memberInputs[teamId] ?? '').trim().toLowerCase();
         if (!email) return;
-        if (!email.toLowerCase().endsWith('@bloom-firm.com')) {
+        if (!email.endsWith('@bloom-firm.com')) {
             alert('bloom-firm.com のメールアドレスを入力してください。');
             return;
         }
@@ -3674,11 +3697,19 @@ const CandidatePipelineView: React.FC<{
         setSelectedMemberFilters(prev => prev.includes(email) ? prev.filter(e => e !== email) : [...prev, email]);
     };
     const labelByEmailForPipeline = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
+    // team.memberEmails is free-typed and may not exactly match the casing of a member's actual
+    // sign-in email (canonicalized here via userOptions, which is always Google-cased) — without
+    // this, a mis-cased entry would show a raw, unlabeled email AND fail to match candidates'
+    // (canonically-tagged) ownerEmail, silently filtering out that member's candidates entirely.
+    const canonicalEmailByLower = useMemo(() => new Map(userOptions.map(u => [normalizeEmail(u.email), u.email])), [userOptions]);
     const teamMemberOptions = useMemo(() => {
         if (scope !== 'team' || !selectedTeamId) return [];
         const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
-        return memberEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
-    }, [scope, selectedTeamId, teams, labelByEmailForPipeline]);
+        const canonicalEmails = Array.from(new Set(
+            memberEmails.map(email => canonicalEmailByLower.get(normalizeEmail(email)) || email)
+        ));
+        return canonicalEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
+    }, [scope, selectedTeamId, teams, canonicalEmailByLower, labelByEmailForPipeline]);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(true);
@@ -6039,10 +6070,11 @@ const App: React.FC = () => {
         ? (pipelineSelectedUserEmail ? [pipelineSelectedUserEmail] : [])
         : Object.keys(displayedAllUsersData);
       return emailsInScope.flatMap(email => {
-        const data = displayedAllUsersData[email];
-        if (!data) return [];
-        const ownerLabel = data.displayName || email;
-        return (data.candidates || []).map(c => ({ ...c, ownerEmail: email, ownerLabel }));
+        const resolved = resolveUserDataEntry(displayedAllUsersData, email);
+        if (!resolved) return [];
+        const [ownerEmail, data] = resolved;
+        const ownerLabel = data.displayName || ownerEmail;
+        return (data.candidates || []).map(c => ({ ...c, ownerEmail, ownerLabel }));
       });
     }, [pipelineScope, pipelineSelectedTeamId, pipelineSelectedUserEmail, teams, displayedAllUsersData, candidates]);
 
@@ -6130,10 +6162,15 @@ const App: React.FC = () => {
     };
   }, [entries, allMedia]);
 
+  // Resolved to displayedAllUsersData's canonical (Google-cased) keys — memberEmails is
+  // free-typed, so an exact-match filter/index against it would silently drop any member whose
+  // stored casing doesn't match their actual sign-in email (see resolveUserDataEntry).
   const selectedTeamMemberEmails = useMemo(() => {
     if (!selectedTeamId) return [];
-    return teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
-  }, [teams, selectedTeamId]);
+    const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
+    const resolved = memberEmails.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email);
+    return Array.from(new Set(resolved));
+  }, [teams, selectedTeamId, displayedAllUsersData]);
 
   const dayOfWeekReplyRateData = useMemo(() => {
     const days = ['日', '月', '火', '水', '木', '金', '土'];
