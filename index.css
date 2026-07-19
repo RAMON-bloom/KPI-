@@ -101,6 +101,28 @@ button:disabled {
   color: var(--text-muted-color);
 }
 
+.gmail-scout-fetch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.gmail-scout-fetch-bar .secondary-action-button {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.8rem;
+}
+
+.gmail-scout-message {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+}
+
+.gmail-scout-message.is-error {
+  color: #b02a37;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;

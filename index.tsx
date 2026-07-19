@@ -15,9 +15,10 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { signIn, signOut, getCurrentSession, getLastKnownEmail, GoogleIdentity } from './services/googleAuth';
+import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
+import { fetchScoutReplyCounts, GmailPermissionError } from './services/gmailScout';
 
 ChartJS.register(
   CategoryScale,
@@ -1198,6 +1199,9 @@ const DateEntryModal: React.FC<{
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
+  const [gmailStatus, setGmailStatus] = useState<'idle' | 'loading' | 'error' | 'done'>('idle');
+  const [gmailMessage, setGmailMessage] = useState('');
+  const [gmailNeedsReauth, setGmailNeedsReauth] = useState(false);
 
   const formattedDate = new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', {
     year: 'numeric',
@@ -1233,6 +1237,60 @@ const DateEntryModal: React.FC<{
     onSave(date, valuesWithDefaults);
   };
 
+  const handleFetchGmailReplies = async () => {
+    const session = getCurrentSession();
+    if (!session) {
+      setGmailStatus('error');
+      setGmailMessage('ログイン情報が確認できませんでした。再読み込みしてからお試しください。');
+      setGmailNeedsReauth(false);
+      return;
+    }
+    setGmailStatus('loading');
+    setGmailMessage('');
+    setGmailNeedsReauth(false);
+    try {
+      const result = await fetchScoutReplyCounts(session.accessToken, date);
+      const appliedLabels: string[] = [];
+      setEntryValues(prev => {
+        const next = { ...prev };
+        activeMedia.forEach(media => {
+          const count = result.counts[media.id];
+          if (count !== undefined) {
+            next[`${media.id}_scoutReplies` as KpiKey] = count;
+            appliedLabels.push(`${media.name}: ${count}件`);
+          }
+        });
+        return next;
+      });
+      setGmailStatus('done');
+      setGmailMessage(
+        appliedLabels.length > 0
+          ? `Gmailの返信通知メールから反映しました（${appliedLabels.join(' / ')}）。内容を確認のうえ保存してください。`
+          : 'この日付に該当するスカウト返信メールは見つかりませんでした。'
+      );
+    } catch (err) {
+      setGmailStatus('error');
+      if (err instanceof GmailPermissionError) {
+        setGmailMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setGmailNeedsReauth(true);
+      } else {
+        setGmailMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
+      }
+    }
+  };
+
+  const handleReauthorizeGmail = async () => {
+    setGmailStatus('loading');
+    setGmailMessage('');
+    try {
+      await reauthorizeWithConsent();
+      await handleFetchGmailReplies();
+    } catch (err) {
+      setGmailStatus('error');
+      setGmailMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+    }
+  };
+
   const isFormEmpty = Object.values(entryValues).every(val => val === undefined || val === 0 || val === null);
   const isSaveDisabled = isFormEmpty && (!initialValues || Object.values(initialValues).every(v => v === 0));
   const canClear = initialValues && Object.values(initialValues).some(v => v > 0);
@@ -1266,6 +1324,19 @@ const DateEntryModal: React.FC<{
 
           <div className="media-kpi-section">
             <h3 className="sub-section-title">媒体別実績</h3>
+            <div className="gmail-scout-fetch-bar">
+              <button type="button" onClick={handleFetchGmailReplies} disabled={gmailStatus === 'loading'} className="secondary-action-button">
+                {gmailStatus === 'loading' ? 'Gmailを確認中...' : 'Gmailから返信数を取得'}
+              </button>
+              {gmailNeedsReauth && (
+                <button type="button" onClick={handleReauthorizeGmail} className="secondary-action-button">
+                  Gmailの権限を許可する
+                </button>
+              )}
+              {gmailMessage && (
+                <span className={`gmail-scout-message ${gmailStatus === 'error' ? 'is-error' : ''}`}>{gmailMessage}</span>
+              )}
+            </div>
             {/* One compact row per media instead of a tall stacked fieldset per media —
                 the same 7 fields laid out vertically per source was the main source of the
                 excessive scrolling in this modal. */}

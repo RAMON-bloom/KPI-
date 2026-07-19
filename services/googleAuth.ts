@@ -13,7 +13,7 @@ interface StoredSession {
 const SESSION_KEY = 'kpiGoogleSession';
 const LAST_EMAIL_KEY = 'kpiLastSignedInEmail';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
-const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly';
+const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/gmail.readonly';
 
 declare global {
   interface Window {
@@ -189,6 +189,17 @@ export async function refreshTokenSilently(): Promise<GoogleIdentity> {
   await waitForGis();
   const lastEmail = getLastKnownEmail() ?? undefined;
   return requestToken('', lastEmail);
+}
+
+/**
+ * Forces the interactive consent screen even if a session already exists — used when a
+ * newly-added scope (e.g. Gmail) needs to be granted by users who signed in before it existed;
+ * a silent request would keep re-using the older, narrower grant instead of prompting for it.
+ */
+export async function reauthorizeWithConsent(): Promise<GoogleIdentity> {
+  await waitForGis();
+  const lastEmail = getLastKnownEmail() ?? undefined;
+  return requestToken('consent', lastEmail);
 }
 
 export function signOut() {
