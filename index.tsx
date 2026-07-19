@@ -4346,6 +4346,7 @@ const FunnelAnalysisSection: React.FC<{
   const [aiSuggestion, setAiSuggestion] = useState('');
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
   const [userQuestion, setUserQuestion] = useState('');
+  const [historyMonths, setHistoryMonths] = useState(6);
 
   const { totalStageValues, perUserStageValues } = useMemo(() => {
     const perUser: Record<string, number[]> = {};
@@ -4365,6 +4366,32 @@ const FunnelAnalysisSection: React.FC<{
 
   const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
   const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
+
+  // A separate, always-monthly-bucketed trend series (independent of periodOverride, which is
+  // just a single snapshot window) — this is what lets the AI compare "this month vs last
+  // month" or extrapolate a simple trend, neither of which is possible from one totals object.
+  const monthlyHistory = useMemo(() => {
+    const now = new Date();
+    const months: { label: string; start: Date; end: Date }[] = [];
+    for (let i = historyMonths - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        label: `${d.getFullYear()}年${d.getMonth() + 1}月`,
+        start: new Date(d.getFullYear(), d.getMonth(), 1),
+        end: new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59),
+      });
+    }
+    return months.map(({ label, start, end }) => {
+      const values = FUNNEL_STAGES.map(() => 0);
+      users.forEach(email => {
+        const data = allUsersData[email];
+        if (!data) return;
+        const rangeTotals = calculateTotalsForRange(data.entries || [], allMedia, start, end);
+        FUNNEL_STAGES.forEach((stage, i) => { values[i] += stage.getValue(rangeTotals, allMedia); });
+      });
+      return { label, values };
+    });
+  }, [users, allUsersData, allMedia, historyMonths]);
 
   const handleAskAi = async () => {
     setIsGeneratingSuggestion(true);
@@ -4408,11 +4435,20 @@ const FunnelAnalysisSection: React.FC<{
         });
       }
 
+      if (monthlyHistory.length > 1) {
+        lines.push('', `【月別実績推移（全ユーザー合計・直近${monthlyHistory.length}ヶ月、最後の行が最新月）】`);
+        monthlyHistory.forEach(({ label, values }) => {
+          const parts = FUNNEL_STAGES.map((stage, i) => `${stage.label} ${values[i]}件`);
+          lines.push(`${label}: ${parts.join(', ')}`);
+        });
+      }
+
       const question = userQuestion.trim() ||
         '各ステップの歩留まり（前段階からの通過率）を踏まえて、ボトルネックとなっている工程を指摘し、改善のための具体的な施策を日本語で3〜5点、簡潔に提案してください。';
       const prompt =
-        `あなたは人材紹介会社の営業KPIを分析するアシスタントです。以下は採用エージェントの求人紹介パイプラインにおける${periodLabel}の実績データです。` +
-        `このデータに基づいて、次の質問に日本語で分かりやすく回答してください。データにない情報については推測せず、その旨を述べてください。\n\n` +
+        `あなたは人材紹介会社の営業KPIを分析するアシスタントです。以下は採用エージェントの求人紹介パイプラインにおける${periodLabel}の実績データと、月別の推移データです。` +
+        `このデータに基づいて、次の質問に日本語で分かりやすく回答してください。月別推移データがある場合は月同士の比較や今後の傾向の推定に活用してかまいませんが、` +
+        `将来予測をする場合は必ず「過去の傾向に基づく推定であり保証ではない」旨を明記してください。データにない情報については推測せず、その旨を述べてください。\n\n` +
         `${lines.join('\n')}\n\n【質問】\n${question}`;
 
       const response = await ai.models.generateContent({
@@ -4507,9 +4543,27 @@ const FunnelAnalysisSection: React.FC<{
             id="ai-insight-question"
             value={userQuestion}
             onChange={(e) => setUserQuestion(e.target.value)}
-            placeholder="例：RDSとBIZの返信率の差を分析して／このメンバー間の実績差の要因を教えて"
+            placeholder="例：先月と比較してどう変化した？／今後3ヶ月の返信数を予測して"
             rows={2}
           />
+          <div className="ai-insight-quick-questions">
+            <button type="button" className="secondary-action-button" onClick={() => setUserQuestion('直近数ヶ月の月別実績を比較し、良くなっている点・悪化している点を指摘してください。')}>月次比較</button>
+            <button type="button" className="secondary-action-button" onClick={() => setUserQuestion('月別実績の推移から、今後の傾向を推定してください（保証ではない推定である旨を明記してください）。')}>今後の予測</button>
+            <button type="button" className="secondary-action-button" onClick={() => setUserQuestion('')}>質問をクリア</button>
+          </div>
+          <label htmlFor="ai-insight-history-months" style={{ marginTop: '0.25rem' }}>
+            比較・予測に使う月別履歴データ:
+            <select
+              id="ai-insight-history-months"
+              value={historyMonths}
+              onChange={(e) => setHistoryMonths(Number(e.target.value))}
+              style={{ marginLeft: '0.5rem' }}
+            >
+              <option value={3}>直近3ヶ月</option>
+              <option value={6}>直近6ヶ月</option>
+              <option value={12}>直近12ヶ月</option>
+            </select>
+          </label>
           <button type="button" onClick={handleAskAi} disabled={isGeneratingSuggestion} className="submit-button">
             {isGeneratingSuggestion ? 'AIが分析中...' : (userQuestion.trim() ? 'AIに聞く' : 'AIに改善提案をもらう')}
           </button>

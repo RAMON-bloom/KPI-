@@ -199,6 +199,17 @@ button:disabled {
   align-self: flex-start;
 }
 
+.ai-insight-quick-questions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.ai-insight-quick-questions .secondary-action-button {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;
