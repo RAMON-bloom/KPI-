@@ -2843,6 +2843,7 @@ interface StageGrossProfit {
     revenue: number;
     cost: number;
     profit: number;
+    entries: CompanyPipelineEntry[];
 }
 
 /**
@@ -2892,12 +2893,14 @@ function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipeli
 function computeGrossProfitByStage(candidates: Candidate[], allMedia: MediaEntry[]): StageGrossProfit[] {
     const mediaFeeRateById = new Map(allMedia.map(m => [m.id, m.feeRate || 0]));
     const totalsByStage = new Map<PipelineStage, StageGrossProfit>(
-        PIPELINE_STAGES.map(stage => [stage, { stage, count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 }])
+        PIPELINE_STAGES.map(stage => [stage, { stage, count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0, entries: [] }])
     );
 
-    pickBestApplicationPerCandidate(candidates).forEach(({ candidate, application }) => {
+    pickBestApplicationPerCandidate(candidates).forEach(entry => {
+        const { candidate, application } = entry;
         const bucket = totalsByStage.get(application.stage)!;
         bucket.count++;
+        bucket.entries.push(entry);
         const result = computeApplicationGrossProfit(candidate, application, mediaFeeRateById);
         if (result) {
             bucket.estimableCount++;
@@ -2920,22 +2923,55 @@ const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}�
  * sums, and that gap is surfaced rather than silently under-reporting the total.
  */
 const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
+    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
+    const toggleStageFilter = (stage: PipelineStage) => {
+        setSelectedStageFilters(prev => prev.includes(stage) ? prev.filter(s => s !== stage) : [...prev, stage]);
+    };
+
     const stageTotals = useMemo(() => computeGrossProfitByStage(candidates, allMedia), [candidates, allMedia]);
 
+    // With no explicit filter, cards show every stage that has data but the total still
+    // excludes lost stages (they'll never generate revenue) — the same default as before this
+    // filter existed. Once the user picks specific stages, both the cards and the total narrow
+    // to exactly that selection, even if it includes お見送り/選考辞退 — that's an explicit choice.
+    const visibleStageTotals = useMemo(() => {
+        if (selectedStageFilters.length === 0) return stageTotals;
+        return stageTotals.filter(s => selectedStageFilters.includes(s.stage));
+    }, [stageTotals, selectedStageFilters]);
+
     const grandTotal = useMemo(() => {
-        return stageTotals
-            .filter(s => s.stage !== 'お見送り' && s.stage !== '選考辞退')
-            .reduce((acc, s) => ({
-                count: acc.count + s.count,
-                estimableCount: acc.estimableCount + s.estimableCount,
-                revenue: acc.revenue + s.revenue,
-                cost: acc.cost + s.cost,
-                profit: acc.profit + s.profit,
-            }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
-    }, [stageTotals]);
+        const base = selectedStageFilters.length > 0
+            ? visibleStageTotals
+            : stageTotals.filter(s => s.stage !== 'お見送り' && s.stage !== '選考辞退');
+        return base.reduce((acc, s) => ({
+            count: acc.count + s.count,
+            estimableCount: acc.estimableCount + s.estimableCount,
+            revenue: acc.revenue + s.revenue,
+            cost: acc.cost + s.cost,
+            profit: acc.profit + s.profit,
+        }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+    }, [stageTotals, visibleStageTotals, selectedStageFilters]);
 
     return (
         <div className="gross-profit-summary">
+            <div className="pipeline-sort-controls">
+                <span>選考フェーズで絞り込み:</span>
+                {PIPELINE_STAGES.map(stage => (
+                    <button
+                        key={stage}
+                        type="button"
+                        onClick={() => toggleStageFilter(stage)}
+                        className={selectedStageFilters.includes(stage) ? 'active' : ''}
+                    >
+                        {stage}
+                    </button>
+                ))}
+                {selectedStageFilters.length > 0 && (
+                    <button type="button" onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
+                        クリア
+                    </button>
+                )}
+            </div>
             <div className="gross-profit-total-card">
                 <div className="gross-profit-total-item">
                     <span>想定紹介料（合計）</span>
@@ -2952,11 +2988,11 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
             </div>
             {grandTotal.count > grandTotal.estimableCount && (
                 <p className="gross-profit-note">
-                    ※ お見送り・選考辞退を除く{grandTotal.count}件中、想定年収とfee料率が両方入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
+                    ※ {selectedStageFilters.length > 0 ? '選択中のフェーズ' : 'お見送り・選考辞退を除く'}{grandTotal.count}件中、想定年収とfee料率が両方入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
                 </p>
             )}
             <div className="detail-application-grid">
-                {stageTotals.filter(s => s.count > 0).map(s => (
+                {visibleStageTotals.filter(s => s.count > 0).map(s => (
                     <div key={s.stage} className="detail-application-card" style={{ borderLeftColor: STAGE_COLOR_MAP[s.stage] }}>
                         <div className="detail-card-header">
                             <span className="status-badge" style={{ '--badge-color': STAGE_COLOR_MAP[s.stage] } as React.CSSProperties}>{s.stage}</span>
@@ -2967,6 +3003,18 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
                             <div className="detail-card-item"><span>想定媒体手数料:</span><span>{formatManYen(s.cost)}</span></div>
                             <div className="detail-card-item"><span>想定粗利:</span><span>{formatManYen(s.profit)}</span></div>
                         </div>
+                        {s.entries.length > 0 && (
+                            <div className="company-pipeline-entries" style={{ marginTop: '0.75rem' }}>
+                                {s.entries.map(({ candidate, application }) => (
+                                    <div key={application.id} className="company-pipeline-entry">
+                                        <span className="company-pipeline-entry-name">
+                                            {candidate.name} - {application.companyName}
+                                            {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 ))}
             </div>
