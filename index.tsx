@@ -5774,9 +5774,9 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  // Single CSV button for the 全ユーザー tab: exports whatever the dashboard is currently
-  // showing — the custom period (if the period filter toggle is enabled) or the regular
-  // this-month/this-week data otherwise — instead of having a separate button per mode.
+  // Single CSV button for the 全ユーザー/チーム別 tabs: exports whatever the dashboard is
+  // currently showing — the custom period (if the period filter toggle is enabled) or the
+  // regular this-month/this-week data otherwise — instead of having a separate button per mode.
   const handleExportAllUsersProgress = (label: string, exportUsers: string[]) => {
     if (dashboardPeriodOverride) {
       handleCustomPeriodExport(label, exportUsers);
@@ -5789,6 +5789,24 @@ const App: React.FC = () => {
     link.setAttribute('href', url);
     const today = new Date().toISOString().slice(0, 10);
     link.setAttribute('download', `all_users_progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleExportTeamProgress = (teamName: string, teamUsers: string[]) => {
+    if (dashboardPeriodOverride) {
+      handleCustomPeriodExport(teamName, teamUsers);
+      return;
+    }
+    const csvContent = buildTeamProgressCsv(teamName, teamUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    const today = new Date().toISOString().slice(0, 10);
+    link.setAttribute('download', `team_progress_${teamName.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -6970,17 +6988,7 @@ const App: React.FC = () => {
                   onClick={() => {
                     const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
                     const teamUsers = selectedTeamMemberEmails.filter(email => displayedAllUsersData[email]);
-                    const csvContent = buildTeamProgressCsv(teamName, teamUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
-                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                    const link = document.createElement('a');
-                    const url = URL.createObjectURL(blob);
-                    link.setAttribute('href', url);
-                    const today = new Date().toISOString().slice(0, 10);
-                    link.setAttribute('download', `team_progress_${teamName.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${today}.csv`);
-                    link.style.visibility = 'hidden';
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
+                    handleExportTeamProgress(teamName, teamUsers);
                   }}
                   disabled={!selectedTeamId}
                   className="export-button"
@@ -6995,21 +7003,8 @@ const App: React.FC = () => {
               <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
               <span>〜</span>
               <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-              {dashboardPeriodOverride && (
-                <button onClick={() => { setCustomExportStartDate(''); setCustomExportEndDate(''); }} className="secondary-action-button">
-                  今月表示に戻す
-                </button>
-              )}
-              <button
-                onClick={() => {
-                  const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
-                  const teamUsers = selectedTeamMemberEmails.filter(email => displayedAllUsersData[email]);
-                  handleCustomPeriodExport(teamName, teamUsers);
-                }}
-                disabled={!selectedTeamId}
-                className="export-button"
-              >
-                CSVで出力
+              <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
+                {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
               </button>
             </div>
             {!selectedTeamId ? (
