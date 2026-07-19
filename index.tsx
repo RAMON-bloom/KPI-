@@ -4824,7 +4824,7 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.dowRate}
             aria-controls="all-users-dow-content"
           >
-            <span>全ユーザー 曜日別 累積返信率</span>
+            <span>全ユーザー 曜日別返信率（{periodLabel}）</span>
             <span className={`toggle-icon ${visibility.dowRate ? 'open' : ''}`}>▼</span>
           </h2>
           <div id="all-users-dow-content" className={`collapsible-content ${visibility.dowRate ? 'open' : ''}`}>
@@ -5908,9 +5908,23 @@ const App: React.FC = () => {
       : view === 'team_kpi'
       ? Object.entries(displayedAllUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
       : entries;
-    if (allEntries.length === 0) return null;
 
-    allEntries.forEach(entry => {
+    // 全ユーザー/チーム別タブでは月次進捗・ファネル分析と同じ期間（カスタム指定時はその範囲、未指定
+    // 時は今月）に絞り込む。個人実績タブは従来通り全期間のまま。
+    const periodFilteredEntries = view === 'all_users_kpi' || view === 'team_kpi'
+      ? allEntries.filter(entry => {
+          const entryTime = new Date(entry.date).getTime();
+          if (dashboardPeriodOverride) {
+            return entryTime >= dashboardPeriodOverride.start.getTime() && entryTime <= dashboardPeriodOverride.end.getTime();
+          }
+          const entryDate = new Date(entry.date);
+          const now = new Date();
+          return entryDate.getMonth() === now.getMonth() && entryDate.getFullYear() === now.getFullYear();
+        })
+      : allEntries;
+    if (periodFilteredEntries.length === 0) return null;
+
+    periodFilteredEntries.forEach(entry => {
         const dayOfWeek = new Date(entry.date).getDay();
         const scouts = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutsSent` as KpiKey] || 0), 0);
         const replies = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutReplies` as KpiKey] || 0), 0);
@@ -5932,7 +5946,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dashboardPeriodOverride]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
