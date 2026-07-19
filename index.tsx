@@ -18,7 +18,7 @@ import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
-import { fetchScoutReplyCounts, GmailPermissionError } from './services/gmailScout';
+import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 
 ChartJS.register(
   CategoryScale,
@@ -1402,6 +1402,173 @@ const DateEntryModal: React.FC<{
           {canClear && <button type="button" onClick={handleClear} className="reset-button" style={{ marginRight: 'auto' }}>実績をクリア</button>}
           <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
           <button type="submit" form="date-entry-form" className="submit-button" disabled={isSaveDisabled}>実績を保存</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const BulkGmailReplyImportModal: React.FC<{
+  allMedia: MediaEntry[];
+  entriesByDate: Map<string, KpiTotals>;
+  onApply: (countsByDate: Record<string, Record<string, number>>) => void;
+  onClose: () => void;
+}> = ({ allMedia, entriesByDate, onApply, onClose }) => {
+  const toDateInputValue = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const todayStr = toDateInputValue(new Date());
+  const defaultStartStr = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return toDateInputValue(d);
+  })();
+
+  const [startDate, setStartDate] = useState(defaultStartStr);
+  const [endDate, setEndDate] = useState(todayStr);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'preview'>('idle');
+  const [message, setMessage] = useState('');
+  const [needsReauth, setNeedsReauth] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [result, setResult] = useState<ScoutReplyRangeResult | null>(null);
+
+  const rangeDays = Math.round((new Date(endDate + 'T00:00:00').getTime() - new Date(startDate + 'T00:00:00').getTime()) / 86400000) + 1;
+
+  const runScan = async () => {
+    const session = getCurrentSession();
+    if (!session) {
+      setStatus('error');
+      setMessage('ログイン情報が確認できませんでした。再読み込みしてからお試しください。');
+      return;
+    }
+    if (startDate > endDate) {
+      setStatus('error');
+      setMessage('開始日は終了日より前の日付にしてください。');
+      return;
+    }
+    setStatus('loading');
+    setMessage('');
+    setNeedsReauth(false);
+    setProgress(null);
+    try {
+      const rangeResult = await fetchScoutReplyCountsForRange(session.accessToken, startDate, endDate, (done, total) => setProgress({ done, total }));
+      setResult(rangeResult);
+      setStatus('preview');
+    } catch (err) {
+      setStatus('error');
+      if (err instanceof GmailPermissionError) {
+        setMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setNeedsReauth(true);
+      } else {
+        setMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
+      }
+    }
+  };
+
+  const handleReauthorize = async () => {
+    setStatus('loading');
+    setMessage('');
+    try {
+      await reauthorizeWithConsent();
+      await runScan();
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+    }
+  };
+
+  const previewRows = useMemo(() => {
+    if (!result) return [];
+    return Object.keys(result.countsByDate).sort().map(dateStr => {
+      const mediaCounts = result.countsByDate[dateStr];
+      const existingValues = entriesByDate.get(dateStr);
+      const cells = Object.keys(mediaCounts).map(mediaId => {
+        const media = allMedia.find(m => m.id === mediaId);
+        const fetchedCount = mediaCounts[mediaId];
+        const currentValue = existingValues?.[`${mediaId}_scoutReplies` as KpiKey] || 0;
+        return { mediaId, mediaName: media?.name || mediaId, fetchedCount, currentValue, willChange: currentValue !== fetchedCount };
+      });
+      return { dateStr, cells };
+    }).filter(row => row.cells.length > 0);
+  }, [result, allMedia, entriesByDate]);
+
+  const totalChanges = previewRows.reduce((acc, row) => acc + row.cells.filter(c => c.willChange).length, 0);
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="bulk-gmail-modal-title">
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="bulk-gmail-modal-title">Gmailから返信数を一括取得</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            指定した期間のGmailからスカウト返信通知メール（BIZ/RDS/Doda/Liiga）を検索し、日付ごとの返信数をまとめて反映します。
+            既に入力済みの日も「スカウト返信数」のみ取得結果で上書きされ、他の項目は変更されません。
+          </p>
+          <div className="bulk-gmail-date-range">
+            <div className="form-group">
+              <label htmlFor="bulk-gmail-start">開始日</label>
+              <input type="date" id="bulk-gmail-start" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="bulk-gmail-end">終了日</label>
+              <input type="date" id="bulk-gmail-end" value={endDate} min={startDate} max={todayStr} onChange={(e) => setEndDate(e.target.value)} />
+            </div>
+          </div>
+          {rangeDays > 120 && (
+            <p className="gmail-scout-message is-error">期間が{rangeDays}日と長いため、取得に時間がかかる場合があります。</p>
+          )}
+
+          <div className="gmail-scout-fetch-bar">
+            <button type="button" onClick={runScan} disabled={status === 'loading'} className="secondary-action-button">
+              {status === 'loading' ? 'Gmailを確認中...' : 'Gmailを検索する'}
+            </button>
+            {needsReauth && (
+              <button type="button" onClick={handleReauthorize} className="secondary-action-button">Gmailの権限を許可する</button>
+            )}
+            {status === 'loading' && progress && progress.total > 0 && (
+              <span className="gmail-scout-message">{progress.done} / {progress.total} 件を確認中...</span>
+            )}
+            {message && <span className={`gmail-scout-message ${status === 'error' ? 'is-error' : ''}`}>{message}</span>}
+          </div>
+
+          {status === 'preview' && result && (
+            <div className="bulk-gmail-preview">
+              {previewRows.length === 0 ? (
+                <p className="gmail-scout-message">この期間に該当するスカウト返信メールは見つかりませんでした（メール{result.totalScanned}件を確認）。</p>
+              ) : (
+                <>
+                  <p className="gmail-scout-message">
+                    {previewRows.length}日分・{result.totalMatched}件のメールを検出しました（うち{totalChanges}件が現在の入力値と異なります）。反映すると各日の「スカウト返信数」が上書きされます。
+                  </p>
+                  <div className="bulk-gmail-preview-table-container">
+                    <table className="bulk-gmail-preview-table">
+                      <thead>
+                        <tr><th>日付</th><th>媒体</th><th>取得件数</th><th>現在の値</th></tr>
+                      </thead>
+                      <tbody>
+                        {previewRows.map(row => row.cells.map((cell, i) => (
+                          <tr key={`${row.dateStr}-${cell.mediaId}`}>
+                            {i === 0 && <td rowSpan={row.cells.length}>{row.dateStr}</td>}
+                            <td>{cell.mediaName}</td>
+                            <td>{cell.fetchedCount}</td>
+                            <td className={cell.willChange ? 'is-changed' : ''}>{cell.currentValue}</td>
+                          </tr>
+                        )))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+          {status === 'preview' && result && previewRows.length > 0 && (
+            <button type="button" onClick={() => onApply(result.countsByDate)} className="submit-button">
+              反映する（{previewRows.length}日分）
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -4949,7 +5116,8 @@ const App: React.FC = () => {
   const [hasSyncError, setHasSyncError] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [isForcingSync, setIsForcingSync] = useState(false);
-  
+  const [isBulkGmailModalOpen, setIsBulkGmailModalOpen] = useState(false);
+
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -5475,6 +5643,30 @@ const App: React.FC = () => {
     }
   };
 
+  // Applies a Gmail bulk-scan result (dateISO -> mediaId -> count) across many days at once:
+  // merges each date's counts into that day's existing entry (creating one if it didn't exist
+  // yet) without touching any other field in that entry, then syncs once for the whole batch.
+  const handleApplyBulkGmailImport = (countsByDate: Record<string, Record<string, number>>) => {
+    if (!currentUserData) return;
+    const entriesByDateMap = new Map<string, KpiEntry>(currentUserData.entries.map(entry => [entry.date, entry] as [string, KpiEntry]));
+    let idOffset = 0;
+    Object.entries(countsByDate).forEach(([dateStr, mediaCounts]) => {
+      const existing = entriesByDateMap.get(dateStr);
+      const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+      Object.entries(mediaCounts).forEach(([mediaId, count]) => {
+        values[`${mediaId}_scoutReplies` as KpiKey] = count;
+      });
+      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+    });
+    const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    const updatedData = { ...currentUserData, entries: updatedEntries };
+    setCurrentUserData(updatedData);
+    setIsBulkGmailModalOpen(false);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
   const handleSaveCandidate = (candidateData: Candidate) => {
     setCurrentUserData(prevData => {
         if (!prevData) return null;
@@ -5808,7 +6000,15 @@ const App: React.FC = () => {
           onClose={() => setSelectedDate(null)}
         />
       )}
-      
+      {isBulkGmailModalOpen && (
+        <BulkGmailReplyImportModal
+          allMedia={allMedia}
+          entriesByDate={entriesByDate}
+          onApply={handleApplyBulkGmailImport}
+          onClose={() => setIsBulkGmailModalOpen(false)}
+        />
+      )}
+
       {hasSyncError && (
         <div className="sync-error-banner">
           <strong>⚠️ 一部の変更がまだGoogleドライブに保存されていません。</strong>
@@ -5905,9 +6105,14 @@ const App: React.FC = () => {
                <span>
                  最終同期: {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString('ja-JP') : '未同期'}
                </span>
-               <button type="button" onClick={handleForceSync} disabled={isForcingSync} className="secondary-action-button">
-                 {isForcingSync ? '同期中...' : '今すぐ同期'}
-               </button>
+               <span style={{ display: 'flex', gap: '0.5rem' }}>
+                 <button type="button" onClick={handleForceSync} disabled={isForcingSync} className="secondary-action-button">
+                   {isForcingSync ? '同期中...' : '今すぐ同期'}
+                 </button>
+                 <button type="button" onClick={() => setIsBulkGmailModalOpen(true)} className="secondary-action-button">
+                   Gmailから過去の返信を一括取得
+                 </button>
+               </span>
              </div>
 
              <section aria-labelledby="calendar-title">

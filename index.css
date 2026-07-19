@@ -123,6 +123,55 @@ button:disabled {
   color: #b02a37;
 }
 
+.bulk-gmail-date-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.bulk-gmail-date-range .form-group {
+  margin-bottom: 0;
+}
+
+.bulk-gmail-preview {
+  margin-top: 1rem;
+}
+
+.bulk-gmail-preview-table-container {
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  margin-top: 0.5rem;
+}
+
+.bulk-gmail-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.bulk-gmail-preview-table th,
+.bulk-gmail-preview-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.bulk-gmail-preview-table th {
+  position: sticky;
+  top: 0;
+  background-color: var(--card-background-color, #fff);
+}
+
+.bulk-gmail-preview-table td.is-changed {
+  color: #b02a37;
+  font-weight: 600;
+}
+
 .app-main-header {
   display: flex;
   justify-content: space-between;

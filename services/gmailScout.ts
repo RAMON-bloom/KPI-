@@ -12,6 +12,14 @@ export interface ScoutReplyFetchResult {
   totalScanned: number;
 }
 
+export interface ScoutReplyRangeResult {
+  countsByDate: Record<string, Record<string, number>>;
+  totalMatched: number;
+  totalScanned: number;
+}
+
+export type GmailScanProgress = (done: number, total: number) => void;
+
 const MEDIA_SUBJECT_MATCHERS: { mediaId: string; test: (subject: string) => boolean }[] = [
   { mediaId: 'biz', test: (s) => s.includes('ビズリーチ') && s.includes('スカウト返信') },
   { mediaId: 'rds', test: (s) => s.includes('リクルートダイレクトスカウト') && s.includes('スカウト送付') },
@@ -24,6 +32,11 @@ function toGmailDate(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}/${m}/${day}`;
+}
+
+function toDateISO(epochMs: number): string {
+  const d = new Date(epochMs);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 async function gmailFetch(accessToken: string, path: string): Promise<any> {
@@ -39,13 +52,36 @@ async function gmailFetch(accessToken: string, path: string): Promise<any> {
   return res.json();
 }
 
-/** Fetches per-media scout-reply-notification-email counts for a single calendar date (local time). */
-export async function fetchScoutReplyCounts(accessToken: string, dateISO: string): Promise<ScoutReplyFetchResult> {
-  const dayStart = new Date(dateISO + 'T00:00:00');
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
-  const q = `after:${toGmailDate(dayStart)} before:${toGmailDate(dayEnd)} subject:スカウト`;
+// Fetches message details with a small concurrency cap instead of one-at-a-time, so a
+// multi-month backfill (potentially hundreds of messages) doesn't take minutes to classify.
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+  onProgress?: GmailScanProgress
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  let done = 0;
+  async function worker() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+      done++;
+      onProgress?.(done, items.length);
+    }
+  }
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
 
+async function fetchAndClassifyMessages(
+  accessToken: string,
+  q: string,
+  onProgress?: GmailScanProgress
+): Promise<{ matches: { dateISO: string; mediaId: string }[]; totalScanned: number }> {
   let messages: { id: string }[] = [];
   let pageToken: string | undefined;
   do {
@@ -56,19 +92,60 @@ export async function fetchScoutReplyCounts(accessToken: string, dateISO: string
     pageToken = listRes.nextPageToken;
   } while (pageToken);
 
-  const counts: Record<string, number> = {};
-  let totalMatched = 0;
+  const details = await mapWithConcurrency(
+    messages,
+    8,
+    (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=metadata&metadataHeaders=Subject`),
+    onProgress
+  );
 
-  for (const msg of messages) {
-    const detail = await gmailFetch(accessToken, `messages/${msg.id}?format=metadata&metadataHeaders=Subject`);
+  const matches: { dateISO: string; mediaId: string }[] = [];
+  details.forEach((detail) => {
     const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
     const subject: string = subjectHeader?.value || '';
     const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.test(subject));
     if (matched) {
-      counts[matched.mediaId] = (counts[matched.mediaId] || 0) + 1;
-      totalMatched++;
+      matches.push({ dateISO: toDateISO(Number(detail.internalDate)), mediaId: matched.mediaId });
     }
-  }
+  });
 
-  return { counts, totalMatched, totalScanned: messages.length };
+  return { matches, totalScanned: messages.length };
+}
+
+/** Fetches per-media scout-reply-notification-email counts for a single calendar date (local time). */
+export async function fetchScoutReplyCounts(
+  accessToken: string,
+  dateISO: string,
+  onProgress?: GmailScanProgress
+): Promise<ScoutReplyFetchResult> {
+  const dayStart = new Date(dateISO + 'T00:00:00');
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+  const q = `after:${toGmailDate(dayStart)} before:${toGmailDate(dayEnd)} subject:スカウト`;
+
+  const { matches, totalScanned } = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  const counts: Record<string, number> = {};
+  matches.forEach((m) => { counts[m.mediaId] = (counts[m.mediaId] || 0) + 1; });
+  return { counts, totalMatched: matches.length, totalScanned };
+}
+
+/** Fetches per-media scout-reply-notification-email counts for every date in [startDateISO, endDateISOInclusive]. */
+export async function fetchScoutReplyCountsForRange(
+  accessToken: string,
+  startDateISO: string,
+  endDateISOInclusive: string,
+  onProgress?: GmailScanProgress
+): Promise<ScoutReplyRangeResult> {
+  const start = new Date(startDateISO + 'T00:00:00');
+  const endExclusive = new Date(endDateISOInclusive + 'T00:00:00');
+  endExclusive.setDate(endExclusive.getDate() + 1);
+  const q = `after:${toGmailDate(start)} before:${toGmailDate(endExclusive)} subject:スカウト`;
+
+  const { matches, totalScanned } = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  const countsByDate: Record<string, Record<string, number>> = {};
+  matches.forEach((m) => {
+    countsByDate[m.dateISO] = countsByDate[m.dateISO] || {};
+    countsByDate[m.dateISO][m.mediaId] = (countsByDate[m.dateISO][m.mediaId] || 0) + 1;
+  });
+  return { countsByDate, totalMatched: matches.length, totalScanned };
 }
