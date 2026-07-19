@@ -939,6 +939,16 @@ const WeeklySummaryTable: React.FC<{
 }> = ({ data, weeklyKpiTargets }) => {
   return (
       <div className="weekly-summary-content">
+        <div className="weekly-summary-totals">
+          <div className="total-item">
+            <span>候補者推薦数</span>
+            <strong>{data.totalCandidatesSubmitted}</strong>
+          </div>
+          <div className="total-item">
+            <span>初回面談数</span>
+            <strong>{data.totalInitialInterviews}</strong>
+          </div>
+        </div>
         <table className="weekly-summary-table">
           <thead>
             <tr>
@@ -1022,17 +1032,6 @@ const WeeklySummaryTable: React.FC<{
             })}
           </tbody>
         </table>
-        <div className="weekly-summary-totals">
-          <h4>週間進捗</h4>
-          <div className="total-item">
-            <span>候補者推薦数:</span>
-            <strong>{data.totalCandidatesSubmitted}</strong>
-          </div>
-          <div className="total-item">
-            <span>初回面談数:</span>
-            <strong>{data.totalInitialInterviews}</strong>
-          </div>
-        </div>
       </div>
   );
 };
