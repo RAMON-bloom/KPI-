@@ -5461,6 +5461,24 @@ const App: React.FC = () => {
     setIsPeriodFilterEnabled(true);
   };
 
+  const formatDateInputValue = (d: Date): string =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // Steps the 全ユーザー/チーム別 dashboards a whole calendar month forward/back with one click,
+  // instead of needing to type both dates by hand every time. Shifts relative to whichever
+  // month is currently selected (so repeated clicks keep walking further back/forward), or from
+  // today's month if the period filter isn't enabled yet.
+  const handleShiftDashboardMonth = (offset: number) => {
+    const reference = customExportStartDate ? new Date(customExportStartDate + 'T00:00:00') : new Date();
+    const targetYear = reference.getFullYear();
+    const targetMonth = reference.getMonth() + offset;
+    const monthStart = new Date(targetYear, targetMonth, 1);
+    const monthEnd = new Date(targetYear, targetMonth + 1, 0);
+    setCustomExportStartDate(formatDateInputValue(monthStart));
+    setCustomExportEndDate(formatDateInputValue(monthEnd));
+    setIsPeriodFilterEnabled(true);
+  };
+
   // Independent period control for 個人実績's own 曜日別累積返信率 chart — separate from the
   // 全ユーザー/チーム別 dashboards' period fields above, since a period picked for one's own
   // chart has no reason to be coupled to whatever is selected on a different tab. Unfiltered
@@ -7025,9 +7043,11 @@ const App: React.FC = () => {
               </div>
               <div className="custom-period-export-bar">
                 <span>表示・出力期間（未入力の場合は今月）:</span>
+                <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button">&lt; 前月</button>
                 <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
                 <span>〜</span>
                 <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+                <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button">次月 &gt;</button>
                 <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
                   {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
                 </button>
@@ -7079,9 +7099,11 @@ const App: React.FC = () => {
             </div>
             <div className="custom-period-export-bar">
               <span>表示・出力期間（未入力の場合は今月）:</span>
+              <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button">&lt; 前月</button>
               <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
               <span>〜</span>
               <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
+              <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button">次月 &gt;</button>
               <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
                 {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
               </button>
