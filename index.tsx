@@ -5452,6 +5452,9 @@ const App: React.FC = () => {
   const handleTogglePeriodFilter = () => {
     if (dashboardPeriodOverride) {
       setIsPeriodFilterEnabled(false);
+      // Returning to "this month" should also snap 週間サマリー back to the current real week,
+      // rather than leaving it wherever 前月/次月 last moved it.
+      setViewWeekStartDate(getStartOfWeek(new Date()));
       return;
     }
     if (!customExportStartDate || !customExportEndDate) {
@@ -5467,7 +5470,10 @@ const App: React.FC = () => {
   // Steps the 全ユーザー/チーム別 dashboards a whole calendar month forward/back with one click,
   // instead of needing to type both dates by hand every time. Shifts relative to whichever
   // month is currently selected (so repeated clicks keep walking further back/forward), or from
-  // today's month if the period filter isn't enabled yet.
+  // today's month if the period filter isn't enabled yet. Also moves 週間サマリー (which has its
+  // own independent 前週/次週 navigation) to the week containing this month's 1st, so it doesn't
+  // silently stay stuck on a week from a different month while everything else moved — the
+  // weekly nav remains usable afterwards for fine-tuning within/around that month.
   const handleShiftDashboardMonth = (offset: number) => {
     const reference = customExportStartDate ? new Date(customExportStartDate + 'T00:00:00') : new Date();
     const targetYear = reference.getFullYear();
@@ -5477,6 +5483,7 @@ const App: React.FC = () => {
     setCustomExportStartDate(formatDateInputValue(monthStart));
     setCustomExportEndDate(formatDateInputValue(monthEnd));
     setIsPeriodFilterEnabled(true);
+    setViewWeekStartDate(getStartOfWeek(monthStart));
   };
 
   // Independent period control for 個人実績's own 曜日別累積返信率 chart — separate from the
