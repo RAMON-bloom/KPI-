@@ -5460,6 +5460,30 @@ const App: React.FC = () => {
     }
     setIsPeriodFilterEnabled(true);
   };
+
+  // Independent period control for 個人実績's own 曜日別累積返信率 chart — separate from the
+  // 全ユーザー/チーム別 dashboards' period fields above, since a period picked for one's own
+  // chart has no reason to be coupled to whatever is selected on a different tab. Unfiltered
+  // default is all-time (unlike the other dashboards' "this month" default), matching this
+  // chart's existing behavior before this control existed.
+  const [personalDowStartDate, setPersonalDowStartDate] = useState('');
+  const [personalDowEndDate, setPersonalDowEndDate] = useState('');
+  const [isPersonalDowPeriodEnabled, setIsPersonalDowPeriodEnabled] = useState(false);
+  const personalDowPeriodOverride = useMemo(() => {
+    if (!isPersonalDowPeriodEnabled || !personalDowStartDate || !personalDowEndDate) return null;
+    return { start: new Date(personalDowStartDate + 'T00:00:00'), end: new Date(personalDowEndDate + 'T23:59:59') };
+  }, [isPersonalDowPeriodEnabled, personalDowStartDate, personalDowEndDate]);
+  const handleTogglePersonalDowPeriod = () => {
+    if (personalDowPeriodOverride) {
+      setIsPersonalDowPeriodEnabled(false);
+      return;
+    }
+    if (!personalDowStartDate || !personalDowEndDate) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    setIsPersonalDowPeriodEnabled(true);
+  };
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -6291,7 +6315,7 @@ const App: React.FC = () => {
       : entries;
 
     // 全ユーザー/チーム別タブでは月次進捗・ファネル分析と同じ期間（カスタム指定時はその範囲、未指定
-    // 時は今月）に絞り込む。個人実績タブは従来通り全期間のまま。
+    // 時は今月）に絞り込む。個人実績タブは独立した期間指定（未指定時は全期間、従来通り）。
     const periodFilteredEntries = view === 'all_users_kpi' || view === 'team_kpi'
       ? allEntries.filter(entry => {
           const entryTime = new Date(entry.date).getTime();
@@ -6301,6 +6325,11 @@ const App: React.FC = () => {
           const entryDate = new Date(entry.date);
           const now = new Date();
           return entryDate.getMonth() === now.getMonth() && entryDate.getFullYear() === now.getFullYear();
+        })
+      : personalDowPeriodOverride
+      ? allEntries.filter(entry => {
+          const entryTime = new Date(entry.date).getTime();
+          return entryTime >= personalDowPeriodOverride.start.getTime() && entryTime <= personalDowPeriodOverride.end.getTime();
         })
       : allEntries;
     if (periodFilteredEntries.length === 0) return null;
@@ -6327,7 +6356,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dashboardPeriodOverride]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dashboardPeriodOverride, personalDowPeriodOverride]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -6727,10 +6756,19 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.dayOfWeekRate}
                 aria-controls="day-of-week-rate-content"
               >
-                <span>曜日別 累積返信率</span>
+                <span>曜日別 累積返信率（{personalDowPeriodOverride ? '指定期間' : '全期間'}）</span>
                 <span className={`toggle-icon ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="day-of-week-rate-content" className={`collapsible-content ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>
+                <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
+                  <span>表示期間（未入力の場合は全期間）:</span>
+                  <input type="date" value={personalDowStartDate} onChange={(e) => setPersonalDowStartDate(e.target.value)} aria-label="開始日" />
+                  <span>〜</span>
+                  <input type="date" value={personalDowEndDate} onChange={(e) => setPersonalDowEndDate(e.target.value)} aria-label="終了日" />
+                  <button onClick={handleTogglePersonalDowPeriod} className="secondary-action-button">
+                    {personalDowPeriodOverride ? '全期間表示に戻す' : '期間で絞り込みを有効にする'}
+                  </button>
+                </div>
                 {dayOfWeekReplyRateData ? (
                     <DayOfWeekReplyRateChart data={dayOfWeekReplyRateData} />
                 ) : (
