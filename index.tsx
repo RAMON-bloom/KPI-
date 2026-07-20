@@ -1225,14 +1225,26 @@ const DateEntryModal: React.FC<{
   initialValues: KpiTotals | null;
   activeMedia: MediaEntry[];
   onSave: (date: string, values: KpiTotals) => void;
+  onNavigate: (currentDate: string, currentValues: KpiTotals, offsetDays: number) => void;
   onClose: () => void;
-}> = ({ date, initialValues, activeMedia, onSave, onClose }) => {
+}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose }) => {
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
   const [gmailStatus, setGmailStatus] = useState<'idle' | 'loading' | 'error' | 'done'>('idle');
   const [gmailMessage, setGmailMessage] = useState('');
   const [gmailNeedsReauth, setGmailNeedsReauth] = useState(false);
+
+  // This modal instance stays mounted across 前日/次日 navigation (only `date`/`initialValues`
+  // change) instead of unmounting like a normal open/close does, so entryValues must be reset
+  // by hand here — otherwise the form would keep showing the previous day's in-progress values
+  // after navigating.
+  useEffect(() => {
+    setEntryValues(initialValues || {});
+    setGmailStatus('idle');
+    setGmailMessage('');
+    setGmailNeedsReauth(false);
+  }, [date]);
 
   const formattedDate = new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', {
     year: 'numeric',
@@ -1266,6 +1278,14 @@ const DateEntryModal: React.FC<{
     const valuesWithDefaults: KpiTotals = { ...(initialValues || {}) };
     buildEditableKeys().forEach(key => { valuesWithDefaults[key] = entryValues[key] || 0; });
     onSave(date, valuesWithDefaults);
+  };
+
+  // Saves the current day's in-progress input (same as the submit button) before moving,
+  // so switching days never silently drops whatever was just typed.
+  const handleNavigate = (offsetDays: number) => {
+    const valuesWithDefaults: KpiTotals = { ...(initialValues || {}) };
+    buildEditableKeys().forEach(key => { valuesWithDefaults[key] = entryValues[key] || 0; });
+    onNavigate(date, valuesWithDefaults, offsetDays);
   };
 
   const handleFetchGmailReplies = async () => {
@@ -1329,8 +1349,14 @@ const DateEntryModal: React.FC<{
   return (
     <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
+        <div className="modal-header date-entry-modal-header">
+          <button type="button" onClick={() => handleNavigate(-1)} className="secondary-action-button date-entry-nav-button" aria-label="前日の実績入力へ">
+            &lt; 前日
+          </button>
           <h3 id="modal-title">{formattedDate} の実績入力</h3>
+          <button type="button" onClick={() => handleNavigate(1)} className="secondary-action-button date-entry-nav-button" aria-label="次日の実績入力へ">
+            次日 &gt;
+          </button>
           <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
         </div>
         <form id="date-entry-form" className="modal-body" onSubmit={handleSubmit}>
@@ -6043,7 +6069,7 @@ const App: React.FC = () => {
     setCurrentUserData(prev => prev ? ({ ...prev, dailyKpiTargets: { ...prev.dailyKpiTargets, [name]: value === '' ? 0 : Number(value) }}) : null);
   };
 
-  const handleSaveEntry = (date: string, newValues: KpiTotals) => {
+  const persistEntry = (date: string, newValues: KpiTotals) => {
     if (!currentUserData) return;
     const otherEntries = currentUserData.entries.filter(entry => entry.date !== date);
     const newEntry: KpiEntry = {
@@ -6054,7 +6080,6 @@ const App: React.FC = () => {
     const updatedEntries = [...otherEntries, newEntry].sort((a, b) => a.date.localeCompare(b.date));
     const updatedData = { ...currentUserData, entries: updatedEntries };
     setCurrentUserData(updatedData);
-    setSelectedDate(null);
     // Sync to Drive right away on every calendar save, instead of waiting out the usual 2s
     // debounce — a save here is a single deliberate action (unlike rapid KPI-form keystrokes),
     // so there's no batching benefit to waiting, only a window where the entry looks saved but
@@ -6062,6 +6087,21 @@ const App: React.FC = () => {
     if (currentIdentity) {
       forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
     }
+  };
+
+  const handleSaveEntry = (date: string, newValues: KpiTotals) => {
+    persistEntry(date, newValues);
+    setSelectedDate(null);
+  };
+
+  // 前日/次日 navigation from within the entry modal: persists the day being left (so
+  // in-progress input isn't lost) without closing, then moves selectedDate to the adjacent day.
+  const handleNavigateEntryDate = (currentDate: string, currentValues: KpiTotals, offsetDays: number) => {
+    persistEntry(currentDate, currentValues);
+    const newDate = new Date(currentDate + 'T00:00:00');
+    newDate.setDate(newDate.getDate() + offsetDays);
+    const newDateStr = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}-${String(newDate.getDate()).padStart(2, '0')}`;
+    setSelectedDate(newDateStr);
   };
 
   // Applies a Gmail bulk-scan result (dateISO -> mediaId -> count) across many days at once:
@@ -6446,6 +6486,7 @@ const App: React.FC = () => {
           initialValues={entriesByDate.get(selectedDate) || null}
           activeMedia={activeMedia}
           onSave={handleSaveEntry}
+          onNavigate={handleNavigateEntryDate}
           onClose={() => setSelectedDate(null)}
         />
       )}
