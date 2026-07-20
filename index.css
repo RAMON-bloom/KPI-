@@ -785,6 +785,12 @@ section {
 .secondary-action-button:hover {
     background-color: #5a6268;
 }
+.month-shift-button {
+    background-color: #d98a4a;
+}
+.month-shift-button:hover {
+    background-color: #c67736;
+}
 
 
 /* --- Form Styles --- */

@@ -7050,11 +7050,11 @@ const App: React.FC = () => {
               </div>
               <div className="custom-period-export-bar">
                 <span>表示・出力期間（未入力の場合は今月）:</span>
-                <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button">&lt; 前月</button>
+                <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
                 <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
                 <span>〜</span>
                 <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-                <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button">次月 &gt;</button>
+                <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
                 <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
                   {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
                 </button>
@@ -7106,11 +7106,11 @@ const App: React.FC = () => {
             </div>
             <div className="custom-period-export-bar">
               <span>表示・出力期間（未入力の場合は今月）:</span>
-              <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button">&lt; 前月</button>
+              <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
               <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
               <span>〜</span>
               <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-              <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button">次月 &gt;</button>
+              <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
               <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
                 {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
               </button>
