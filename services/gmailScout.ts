@@ -77,11 +77,101 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function decodeGmailBase64Url(data: string): string {
+  try {
+    const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch {
+    return '';
+  }
+}
+
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, '\n')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+// Gmail's payload is a MIME tree (multipart/mixed, multipart/alternative, ...) — walks it
+// collecting every text/plain part; only falls back to text/html (tags stripped) if no plain
+// part exists anywhere, since HTML markup would otherwise pollute the "候補者氏名：..." line
+// extractRdsCandidateName looks for.
+function extractMessageBody(payload: any): string {
+  if (!payload) return '';
+  const plainParts: string[] = [];
+  const htmlParts: string[] = [];
+  const walk = (part: any) => {
+    if (!part) return;
+    const mimeType: string = part.mimeType || '';
+    if (part.body?.data && mimeType === 'text/plain') {
+      plainParts.push(decodeGmailBase64Url(part.body.data));
+    } else if (part.body?.data && mimeType === 'text/html') {
+      htmlParts.push(stripHtmlTags(decodeGmailBase64Url(part.body.data)));
+    }
+    (part.parts || []).forEach(walk);
+  };
+  walk(payload);
+  return (plainParts.length > 0 ? plainParts : htmlParts).join('\n');
+}
+
+// RDS's reply-notification body has a "候補者氏名：山田 太郎" line (see kpi-mgr's gmailScout
+// history for the confirmed sample) — the subject only carries the recruiter's own name, not
+// the candidate's, so this is the only place a candidate identity is available at all.
+function extractRdsCandidateName(bodyText: string): string | null {
+  const match = bodyText.match(/候補者氏名[:：]\s*([^\r\n]+)/);
+  if (!match) return null;
+  const name = match[1].trim();
+  return name.length > 0 ? name : null;
+}
+
+/**
+ * RDS sends a separate notification email for every reply, so the same candidate replying more
+ * than once on the same day was previously counted once per email. Collapses same-day RDS
+ * matches down to one per distinct candidate name (extracted from the body) — a body fetch
+ * failure or unrecognized format leaves that message ungrouped (counted on its own) rather than
+ * risking merging two different candidates together.
+ */
+async function dedupeRdsRepliesBySameDayCandidate(
+  accessToken: string,
+  matches: { dateISO: string; mediaId: string; messageId: string }[]
+): Promise<{ dateISO: string; mediaId: string; messageId: string }[]> {
+  const rdsMatches = matches.filter((m) => m.mediaId === 'rds');
+  if (rdsMatches.length === 0) return matches;
+
+  const bodies = await mapWithConcurrency(rdsMatches, 8, async (m) => {
+    try {
+      return await gmailFetch(accessToken, `messages/${m.messageId}?format=full`);
+    } catch {
+      return null;
+    }
+  });
+
+  const seenKeys = new Set<string>();
+  const keptMessageIds = new Set<string>();
+  rdsMatches.forEach((m, i) => {
+    const detail = bodies[i];
+    const candidateName = detail ? extractRdsCandidateName(extractMessageBody(detail.payload)) : null;
+    const dedupeKey = candidateName ? `${m.dateISO}|${candidateName}` : `__unmatched__${m.messageId}`;
+    if (!seenKeys.has(dedupeKey)) {
+      seenKeys.add(dedupeKey);
+      keptMessageIds.add(m.messageId);
+    }
+  });
+
+  return matches.filter((m) => m.mediaId !== 'rds' || keptMessageIds.has(m.messageId));
+}
+
 async function fetchAndClassifyMessages(
   accessToken: string,
   q: string,
   onProgress?: GmailScanProgress
-): Promise<{ matches: { dateISO: string; mediaId: string }[]; totalScanned: number }> {
+): Promise<{ matches: { dateISO: string; mediaId: string; messageId: string }[]; totalScanned: number }> {
   let messages: { id: string }[] = [];
   let pageToken: string | undefined;
   do {
@@ -99,17 +189,18 @@ async function fetchAndClassifyMessages(
     onProgress
   );
 
-  const matches: { dateISO: string; mediaId: string }[] = [];
-  details.forEach((detail) => {
+  const matches: { dateISO: string; mediaId: string; messageId: string }[] = [];
+  details.forEach((detail, i) => {
     const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
     const subject: string = subjectHeader?.value || '';
     const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.test(subject));
     if (matched) {
-      matches.push({ dateISO: toDateISO(Number(detail.internalDate)), mediaId: matched.mediaId });
+      matches.push({ dateISO: toDateISO(Number(detail.internalDate)), mediaId: matched.mediaId, messageId: messages[i].id });
     }
   });
 
-  return { matches, totalScanned: messages.length };
+  const dedupedMatches = await dedupeRdsRepliesBySameDayCandidate(accessToken, matches);
+  return { matches: dedupedMatches, totalScanned: messages.length };
 }
 
 /** Fetches per-media scout-reply-notification-email counts for a single calendar date (local time). */
