@@ -470,7 +470,7 @@ const buildTrendMetrics = (): TrendMetricDef[] => [
 ];
 
 const TREND_METRICS: TrendMetricDef[] = buildTrendMetrics();
-const DEFAULT_TREND_METRIC_KEYS = ['replyRate', 'scoutReplies', 'documentScreeningPassed', 'offersExtended', 'placements'];
+const DEFAULT_TREND_METRIC_KEYS = ['scoutReplies'];
 
 /**
  * Generalizes the old fixed 7-series month-over-month chart into a metric picker: there are too
