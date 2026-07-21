@@ -72,20 +72,28 @@ function toNumber(value: string | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseByColumns(
+function requireColumnIndex(header: string[], columnName: string): number {
+  const idx = header.indexOf(columnName);
+  if (idx === -1) {
+    throw new Error(`CSVの列「${columnName}」が見つかりませんでした。フォーマットが変わっている可能性があります。`);
+  }
+  return idx;
+}
+
+/** scoutsSent/scoutReplies are each the sum of every column listed, so a media whose export
+ * splits sent/reply counts across several categories can include just the ones that should
+ * count (e.g. skipping a category that shouldn't be reflected). */
+function parseByDateAndSummedColumns(
   text: string,
   dateColumn: string,
-  sentColumn: string,
-  repliesColumn: string
+  sentColumns: string[],
+  repliesColumns: string[]
 ): ScoutCsvParseResult {
   const rows = parseCsvRows(text);
   const header = rows[0] || [];
-  const dateIdx = header.indexOf(dateColumn);
-  const sentIdx = header.indexOf(sentColumn);
-  const repliesIdx = header.indexOf(repliesColumn);
-  if (dateIdx === -1 || sentIdx === -1 || repliesIdx === -1) {
-    throw new Error(`CSVの列（${dateColumn}/${sentColumn}/${repliesColumn}）が見つかりませんでした。フォーマットが変わっている可能性があります。`);
-  }
+  const dateIdx = requireColumnIndex(header, dateColumn);
+  const sentIdxs = sentColumns.map(c => requireColumnIndex(header, c));
+  const repliesIdxs = repliesColumns.map(c => requireColumnIndex(header, c));
 
   const countsByDate: Record<string, ScoutCsvDayCounts> = {};
   let rowsParsed = 0;
@@ -94,8 +102,8 @@ function parseByColumns(
     const dateISO = toDateISOFromSlash(row[dateIdx] || '');
     if (!dateISO) { rowsSkipped += 1; return; }
     countsByDate[dateISO] = {
-      scoutsSent: toNumber(row[sentIdx]),
-      scoutReplies: toNumber(row[repliesIdx]),
+      scoutsSent: sentIdxs.reduce((sum, idx) => sum + toNumber(row[idx]), 0),
+      scoutReplies: repliesIdxs.reduce((sum, idx) => sum + toNumber(row[idx]), 0),
     };
     rowsParsed += 1;
   });
@@ -103,19 +111,30 @@ function parseByColumns(
   return { countsByDate, rowsParsed, rowsSkipped };
 }
 
-/** BIZ's export: 日付 column + スカウト合計送信数/スカウト合計返信数 (already the sum of 通常/プラチナ/一時未ログイン). */
+/**
+ * BIZ's export: 日付 column, summing 通常スカウト + プラチナスカウト送信数/返信数 only —
+ * deliberately excludes プラチナスカウト（一時未ログイン専用）送信数/返信数 (a separate
+ * category the platform otherwise folds into its own スカウト合計送信数/返信数 columns, which
+ * this does NOT use for that reason).
+ */
 export function parseBizScoutCsv(text: string): ScoutCsvParseResult {
-  return parseByColumns(text, '日付', 'スカウト合計送信数', 'スカウト合計返信数');
+  return parseByDateAndSummedColumns(
+    text,
+    '日付',
+    ['通常スカウト送信数', 'プラチナスカウト送信数'],
+    ['通常スカウト返信数', 'プラチナスカウト返信数']
+  );
 }
 
 /**
  * Doda's export: despite the header name, 抽出対象期間 holds one specific date per row (集計日
- * is the constant report-generation date, not a KPI date, and is ignored). Doda's own totals
- * column is 有効返信数(ALL) — there's no separate raw-reply count distinct from "effective"
- * in this export, so that's used as this media's 返信数.
+ * is the constant report-generation date, not a KPI date, and is ignored). Uses only the
+ * (ALL) columns — 送信数(ALL)/有効返信数(ALL) — never the 通常/プラチナ/ダイヤモンド/限定ダイ
+ * ヤモンド(内訳) breakdown columns. There's no separate raw-reply count distinct from
+ * "effective" in this export, so 有効返信数(ALL) is used as this media's 返信数.
  */
 export function parseDodaScoutCsv(text: string): ScoutCsvParseResult {
-  return parseByColumns(text, '抽出対象期間', '送信数(ALL)', '有効返信数(ALL)');
+  return parseByDateAndSummedColumns(text, '抽出対象期間', ['送信数(ALL)'], ['有効返信数(ALL)']);
 }
 
 export function parseScoutCsv(mediaId: ScoutCsvMediaId, text: string): ScoutCsvParseResult {
