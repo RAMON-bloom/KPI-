@@ -19,6 +19,7 @@ import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithC
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
+import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 
 ChartJS.register(
   CategoryScale,
@@ -1625,6 +1626,143 @@ const BulkGmailReplyImportModal: React.FC<{
           <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
           {status === 'preview' && result && previewRows.length > 0 && (
             <button type="button" onClick={() => onApply(result.countsByDate)} className="submit-button">
+              反映する（{previewRows.length}日分）
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Imports a media platform's own daily scout-performance CSV export (BIZ/Doda) directly,
+ * instead of relying on gmailScout.ts's Gmail-notification heuristic — these exports already
+ * carry both スカウト数 and 返信数 per day straight from the source, so no reply-notification
+ * parsing/deduping is needed. Same preview-then-apply UX as BulkGmailReplyImportModal.
+ */
+const MediaCsvImportModal: React.FC<{
+  allMedia: MediaEntry[];
+  entriesByDate: Map<string, KpiTotals>;
+  onApply: (mediaId: ScoutCsvMediaId, countsByDate: Record<string, ScoutCsvDayCounts>) => void;
+  onClose: () => void;
+}> = ({ allMedia, entriesByDate, onApply, onClose }) => {
+  const [selectedMediaId, setSelectedMediaId] = useState<ScoutCsvMediaId>('biz');
+  const [status, setStatus] = useState<'idle' | 'parsing' | 'preview' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  const [result, setResult] = useState<ScoutCsvParseResult | null>(null);
+
+  const mediaName = allMedia.find(m => m.id === selectedMediaId)?.name || selectedMediaId.toUpperCase();
+
+  const handleMediaChange = (id: ScoutCsvMediaId) => {
+    setSelectedMediaId(id);
+    setStatus('idle');
+    setMessage('');
+    setResult(null);
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setStatus('parsing');
+    setMessage('');
+    setResult(null);
+    try {
+      const text = await decodeCsvFile(file);
+      const parsed = parseScoutCsv(selectedMediaId, text);
+      if (Object.keys(parsed.countsByDate).length === 0) {
+        setStatus('error');
+        setMessage('CSVから日付ごとのデータを取得できませんでした。フォーマットをご確認ください。');
+        return;
+      }
+      setResult(parsed);
+      setStatus('preview');
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'CSVの読み込みに失敗しました。');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const previewRows = useMemo(() => {
+    if (!result) return [];
+    return Object.keys(result.countsByDate).sort().map(dateStr => {
+      const counts = result.countsByDate[dateStr];
+      const existingValues = entriesByDate.get(dateStr);
+      const currentSent = existingValues?.[`${selectedMediaId}_scoutsSent` as KpiKey] || 0;
+      const currentReplies = existingValues?.[`${selectedMediaId}_scoutReplies` as KpiKey] || 0;
+      return {
+        dateStr,
+        scoutsSent: counts.scoutsSent,
+        scoutReplies: counts.scoutReplies,
+        currentSent,
+        currentReplies,
+        willChange: currentSent !== counts.scoutsSent || currentReplies !== counts.scoutReplies,
+      };
+    });
+  }, [result, entriesByDate, selectedMediaId]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="media-csv-modal-title">
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="media-csv-modal-title">媒体CSVから実績を取り込む</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            BIZ（ビズリーチ）またはDodaの管理画面からダウンロードした日次実績CSVを取り込み、スカウト数・返信数を反映します。
+            既に入力済みの日も、この2項目だけが取り込んだ内容で上書きされ、他の項目は変更されません。
+          </p>
+          <div className="form-group">
+            <label htmlFor="media-csv-select">対象媒体</label>
+            <select
+              id="media-csv-select"
+              value={selectedMediaId}
+              onChange={(e) => handleMediaChange(e.target.value as ScoutCsvMediaId)}
+            >
+              <option value="biz">BIZ（ビズリーチ）</option>
+              <option value="doda">Doda</option>
+            </select>
+          </div>
+          <div className="gmail-scout-fetch-bar">
+            <input type="file" accept=".csv" onChange={handleFileChange} aria-label="CSVファイルを選択" />
+            {status === 'parsing' && <span className="gmail-scout-message">読み込み中...</span>}
+            {message && <span className={`gmail-scout-message ${status === 'error' ? 'is-error' : ''}`}>{message}</span>}
+          </div>
+
+          {status === 'preview' && result && (
+            <div className="bulk-gmail-preview">
+              <p className="gmail-scout-message">
+                {previewRows.length}日分を検出しました（うち{previewRows.filter(r => r.willChange).length}件が現在の入力値と異なります）。
+                反映すると各日の{mediaName}の「スカウト数」「返信数」が上書きされます。
+              </p>
+              <div className="bulk-gmail-preview-table-container">
+                <table className="bulk-gmail-preview-table">
+                  <thead>
+                    <tr><th>日付</th><th>取得スカウト数</th><th>現在の値</th><th>取得返信数</th><th>現在の値</th></tr>
+                  </thead>
+                  <tbody>
+                    {previewRows.map(row => (
+                      <tr key={row.dateStr}>
+                        <td>{row.dateStr}</td>
+                        <td>{row.scoutsSent}</td>
+                        <td className={row.currentSent !== row.scoutsSent ? 'is-changed' : ''}>{row.currentSent}</td>
+                        <td>{row.scoutReplies}</td>
+                        <td className={row.currentReplies !== row.scoutReplies ? 'is-changed' : ''}>{row.currentReplies}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+          {status === 'preview' && result && previewRows.length > 0 && (
+            <button type="button" onClick={() => onApply(selectedMediaId, result.countsByDate)} className="submit-button">
               反映する（{previewRows.length}日分）
             </button>
           )}
@@ -5588,6 +5726,7 @@ const App: React.FC = () => {
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [isBulkGmailModalOpen, setIsBulkGmailModalOpen] = useState(false);
+  const [isMediaCsvModalOpen, setIsMediaCsvModalOpen] = useState(false);
 
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
@@ -6237,6 +6376,28 @@ const App: React.FC = () => {
     }
   };
 
+  // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
+  // writing both scoutsSent and scoutReplies for that one media per date.
+  const handleApplyMediaCsvImport = (mediaId: ScoutCsvMediaId, countsByDate: Record<string, ScoutCsvDayCounts>) => {
+    if (!currentUserData) return;
+    const entriesByDateMap = new Map<string, KpiEntry>(currentUserData.entries.map(entry => [entry.date, entry] as [string, KpiEntry]));
+    let idOffset = 0;
+    Object.entries(countsByDate).forEach(([dateStr, counts]) => {
+      const existing = entriesByDateMap.get(dateStr);
+      const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+      values[`${mediaId}_scoutsSent` as KpiKey] = counts.scoutsSent;
+      values[`${mediaId}_scoutReplies` as KpiKey] = counts.scoutReplies;
+      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+    });
+    const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    const updatedData = { ...currentUserData, entries: updatedEntries };
+    setCurrentUserData(updatedData);
+    setIsMediaCsvModalOpen(false);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
   const handleSaveCandidate = (candidateData: Candidate) => {
     // candidateData may be a copy tagged with ownerEmail/ownerLabel (e.g. edited while viewing
     // an aggregate pipeline scope on one's own candidate) — those tags are presentation-only and
@@ -6612,6 +6773,14 @@ const App: React.FC = () => {
           onClose={() => setIsBulkGmailModalOpen(false)}
         />
       )}
+      {isMediaCsvModalOpen && (
+        <MediaCsvImportModal
+          allMedia={allMedia}
+          entriesByDate={entriesByDate}
+          onApply={handleApplyMediaCsvImport}
+          onClose={() => setIsMediaCsvModalOpen(false)}
+        />
+      )}
 
       {hasSyncError && (
         <div className="sync-error-banner">
@@ -6715,6 +6884,9 @@ const App: React.FC = () => {
                  </button>
                  <button type="button" onClick={() => setIsBulkGmailModalOpen(true)} className="secondary-action-button">
                    Gmailから過去の返信を一括取得
+                 </button>
+                 <button type="button" onClick={() => setIsMediaCsvModalOpen(true)} className="secondary-action-button">
+                   媒体CSVから実績を取り込む
                  </button>
                </span>
              </div>
