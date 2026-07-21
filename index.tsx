@@ -3738,9 +3738,9 @@ const CandidatePipelineView: React.FC<{
     }, [scope, selectedTeamId, teams, canonicalEmailByLower, labelByEmailForPipeline]);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
-    const [isReportVisible, setIsReportVisible] = useState(true);
+    const [isReportVisible, setIsReportVisible] = useState(false);
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
-    const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(true);
+    const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(false);
     const [isGrossProfitVisible, setIsGrossProfitVisible] = useState(true);
     const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
