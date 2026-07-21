@@ -500,9 +500,31 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
     const [compareMode, setCompareMode] = useState<'total' | 'byUser'>('total');
     const [selectedKeys, setSelectedKeys] = useState<string[]>(DEFAULT_TREND_METRIC_KEYS);
     const [selectedUserMetricKey, setSelectedUserMetricKey] = useState<string>(DEFAULT_TREND_METRIC_KEYS[0]);
+    // 'all' sums across every media (existing behavior); a specific media id scopes every
+    // metric's getValue to just that media. GENERAL_KPIS-derived metrics (候補者推薦数 onward)
+    // aren't tagged by sourcing media at all, so they're hidden while a specific media is
+    // selected — showing them would just repeat the same all-media value regardless of choice.
+    const [selectedMediaId, setSelectedMediaId] = useState<string>('all');
     const toggleMetric = (key: string) => {
         setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
     };
+
+    const mediaScope = useMemo(
+        () => (selectedMediaId === 'all' ? allMedia : allMedia.filter(m => m.id === selectedMediaId)),
+        [selectedMediaId, allMedia]
+    );
+    const visibleMetrics = useMemo(
+        () => (selectedMediaId === 'all' ? TREND_METRICS : TREND_METRICS.filter(m => !(m.key in GENERAL_KPIS))),
+        [selectedMediaId]
+    );
+    useEffect(() => {
+        const visibleKeys = visibleMetrics.map(m => m.key);
+        setSelectedKeys(prev => {
+            const filtered = prev.filter(k => visibleKeys.includes(k));
+            return filtered.length > 0 ? filtered : [visibleKeys[0]];
+        });
+        setSelectedUserMetricKey(prev => (visibleKeys.includes(prev) ? prev : visibleKeys[0]));
+    }, [visibleMetrics]);
 
     const zeroTotals = useMemo(() => buildZeroKpiTotals(allMedia), [allMedia]);
 
@@ -529,11 +551,11 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
 
     const active = useMemo(() => {
         if (compareMode === 'byUser' && canCompareByUser) {
-            const def = TREND_METRICS.find(m => m.key === selectedUserMetricKey);
+            const def = visibleMetrics.find(m => m.key === selectedUserMetricKey);
             if (!def) return { labels: allMonthLabels, datasets: [], maxRate: 0, hasCount: false, hasRate: false };
             let maxRate = 0;
             const datasets = monthlyTotalsByUser.map((u, i) => {
-                const data = allMonthLabels.map(month => def.getValue(u.monthlyData[month] || zeroTotals, allMedia));
+                const data = allMonthLabels.map(month => def.getValue(u.monthlyData[month] || zeroTotals, mediaScope));
                 if (def.unit === 'percent') maxRate = Math.max(maxRate, ...data);
                 const color = MONTHLY_TREND_COLORS[i % MONTHLY_TREND_COLORS.length];
                 return { label: u.label, data, borderColor: color, backgroundColor: color, yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count', tension: 0.2, fill: false };
@@ -541,18 +563,18 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
             return { labels: allMonthLabels, datasets, maxRate, hasCount: def.unit === 'count', hasRate: def.unit === 'percent' };
         }
 
-        const activeDefs = TREND_METRICS.filter(m => selectedKeys.includes(m.key));
+        const activeDefs = visibleMetrics.filter(m => selectedKeys.includes(m.key));
         let maxRate = 0;
         const datasets = activeDefs.map(def => {
             const data = allMonthLabels.map(month => monthlyTotalsByUser.reduce(
-                (sum, u) => sum + def.getValue(u.monthlyData[month] || zeroTotals, allMedia), 0
+                (sum, u) => sum + def.getValue(u.monthlyData[month] || zeroTotals, mediaScope), 0
             ));
             if (def.unit === 'percent') maxRate = Math.max(maxRate, ...data);
             const color = MONTHLY_TREND_COLORS[TREND_METRICS.indexOf(def) % MONTHLY_TREND_COLORS.length];
             return { label: def.label, data, borderColor: color, backgroundColor: color, yAxisID: def.unit === 'percent' ? 'y-axis-rate' : 'y-axis-count', tension: 0.2, fill: false };
         });
         return { labels: allMonthLabels, datasets, maxRate, hasCount: activeDefs.some(d => d.unit === 'count'), hasRate: activeDefs.some(d => d.unit === 'percent') };
-    }, [compareMode, canCompareByUser, selectedUserMetricKey, selectedKeys, allMonthLabels, monthlyTotalsByUser, allMedia, zeroTotals]);
+    }, [compareMode, canCompareByUser, selectedUserMetricKey, selectedKeys, allMonthLabels, monthlyTotalsByUser, mediaScope, zeroTotals, visibleMetrics]);
 
     const options = useMemo(() => ({
         responsive: true,
@@ -595,6 +617,31 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
 
     return (
         <div>
+            <div className="pipeline-sort-controls" style={{ marginBottom: '0.75rem' }}>
+                <span>媒体で切り替え:</span>
+                <button
+                    type="button"
+                    className={selectedMediaId === 'all' ? 'active' : ''}
+                    onClick={() => setSelectedMediaId('all')}
+                >
+                    全媒体合計
+                </button>
+                {allMedia.map(m => (
+                    <button
+                        key={m.id}
+                        type="button"
+                        className={selectedMediaId === m.id ? 'active' : ''}
+                        onClick={() => setSelectedMediaId(m.id)}
+                    >
+                        {m.name}{m.isArchived ? '（アーカイブ済み）' : ''}
+                    </button>
+                ))}
+            </div>
+            {selectedMediaId !== 'all' && (
+                <p className="gmail-scout-message">
+                    単一媒体を表示中は、候補者推薦数以降（媒体を区別しない項目）は選択できません。
+                </p>
+            )}
             {canCompareByUser && (
                 <div className="trend-compare-mode">
                     <label>
@@ -612,13 +659,13 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
                     <label className="trend-metric-select-label">
                         比較する項目:
                         <select value={selectedUserMetricKey} onChange={(e) => setSelectedUserMetricKey(e.target.value)}>
-                            {TREND_METRICS.map(def => <option key={def.key} value={def.key}>{def.label}</option>)}
+                            {visibleMetrics.map(def => <option key={def.key} value={def.key}>{def.label}</option>)}
                         </select>
                     </label>
                 </div>
             ) : (
                 <div className="trend-metric-picker">
-                    {TREND_METRICS.map(def => (
+                    {visibleMetrics.map(def => (
                         <label key={def.key} className="trend-metric-checkbox">
                             <input type="checkbox" checked={selectedKeys.includes(def.key)} onChange={() => toggleMetric(def.key)} />
                             {def.label}
