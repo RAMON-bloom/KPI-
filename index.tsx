@@ -2745,16 +2745,16 @@ const CandidateModal: React.FC<{
         }
     };
 
-    // Shared by both the Drive-search result path and the manual-file-drop fallback below —
-    // only how the raw transcript text is obtained differs between the two.
-    const summarizeAndAppendInterviewLog = async (text: string, sourceLabel: string, dateLabel: string) => {
+    // Shared by both the Drive-search result path and the manual-file-drop fallback below.
+    // `contents` is whatever GoogleGenAI.generateContent accepts — a plain text prompt for
+    // Drive-fetched/plain-text logs, or a multimodal {parts} array (inlineData + instruction)
+    // for PDF/Word files, letting Gemini read the document itself instead of this app trying to
+    // extract text from those formats client-side.
+    const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
         setIsSummarizingInterviewLog(true);
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
-            });
+            const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents });
             const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
             setCandidate(prev => ({
                 ...prev,
@@ -2772,7 +2772,11 @@ const CandidateModal: React.FC<{
         try {
             const text = await exportGoogleDocAsText(file.id);
             const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
-            await summarizeAndAppendInterviewLog(text, file.name, dateLabel);
+            await summarizeAndAppendInterviewLog(
+                `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
+                file.name,
+                dateLabel
+            );
             setInterviewLogResults(null);
         } catch (error) {
             console.error('Error fetching interview log from Drive:', error);
@@ -2782,15 +2786,34 @@ const CandidateModal: React.FC<{
 
     // Fallback for when the automatic Drive search doesn't find the log (e.g. it's not a native
     // Google Doc, or search just misses it) — lets the user drop/select the transcript file
-    // directly instead. Read as plain text, so it only makes sense for .txt-style exports, not
-    // PDFs/Word docs (which would need their own extraction step this app doesn't have).
+    // directly instead. Plain text is read client-side; PDF/Word files are instead sent to
+    // Gemini as inline document data (same approach already used for resume PDFs above) since
+    // this app has no PDF/DOCX text-extraction library of its own.
     const handleInterviewLogFile = async (files: FileList) => {
         if (!files || files.length === 0) return;
         const file = files[0];
+        const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
         try {
-            const text = await file.text();
-            const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
-            await summarizeAndAppendInterviewLog(text, file.name, dateLabel);
+            if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
+                const text = await file.text();
+                await summarizeAndAppendInterviewLog(
+                    `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
+                    file.name,
+                    dateLabel
+                );
+            } else {
+                const base64Data = await fileToBase64(file);
+                await summarizeAndAppendInterviewLog(
+                    {
+                        parts: [
+                            { inlineData: { mimeType: file.type, data: base64Data } },
+                            { text: 'これはGoogle Meetなどの面談議事録のファイルです。この内容をシンプルに要約してください。' },
+                        ],
+                    },
+                    file.name,
+                    dateLabel
+                );
+            }
         } catch (error) {
             console.error('Error reading dropped interview log file:', error);
             alert('ファイルの読み込み中にエラーが発生しました。');
@@ -2936,7 +2959,7 @@ const CandidateModal: React.FC<{
                         </ul>
                     )}
                     <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
-                        Driveから自動取得できない場合は、議事録のテキストファイルを直接アップロードしてください。
+                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Wordファイル）を直接アップロードしてください。
                     </p>
                     <div
                         id="interview-log-drop-zone"
@@ -2946,9 +2969,15 @@ const CandidateModal: React.FC<{
                         onDragOver={handleInterviewLogDrag}
                         onDrop={handleInterviewLogDrop}
                     >
-                        <input ref={interviewLogInputRef} type="file" id="interview-log-upload" accept=".txt,text/plain" onChange={handleInterviewLogFileChange} />
+                        <input
+                            ref={interviewLogInputRef}
+                            type="file"
+                            id="interview-log-upload"
+                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            onChange={handleInterviewLogFileChange}
+                        />
                         <p onClick={onInterviewLogButtonClick}>
-                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt）をドラッグ＆ドロップ、またはクリックして選択'}
+                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx）をドラッグ＆ドロップ、またはクリックして選択'}
                         </p>
                     </div>
                   </div>
