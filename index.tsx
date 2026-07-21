@@ -4483,12 +4483,26 @@ interface FunnelStageDef {
   getValue: (monthlyTotals: KpiTotals, allMedia: MediaEntry[]) => number;
 }
 
-// The pipeline funnel starts from 候補者推薦数 onward (GENERAL_KPIS); 返信数/面談数 are earlier,
-// media-scoped sourcing-side steps (aggregated across all media via getTotalFromLump) that
-// happen before a candidate is ever submitted to a client.
+const MEDIA_FUNNEL_STAGE_LABELS: Record<string, string> = {
+  scoutsSent: 'スカウト数',
+  scoutReplies: 'スカウト返信数',
+  effectiveReplies: '有効返信数',
+  documentsCollected: '書類回収数',
+  effectiveDocumentsCollected: '有効書類回収数',
+  initialInterviews: '初回面談数',
+  effectiveInitialInterviews: '初回有効面談数',
+};
+
+// Covers every item entered in the daily entry form: the media-scoped sourcing-side steps
+// (aggregated across all media via getTotalFromLump, in the same order as the daily entry
+// table's columns) come first, since they happen before a candidate is ever submitted to a
+// client, followed by GENERAL_KPIS (候補者推薦数 onward).
 const FUNNEL_STAGES: FunnelStageDef[] = [
-  { key: 'scoutReplies', label: '返信数', getValue: (totals, allMedia) => getTotalFromLump(totals, '_scoutReplies', allMedia) },
-  { key: 'initialInterviews', label: '面談数', getValue: (totals, allMedia) => getTotalFromLump(totals, '_initialInterviews', allMedia) },
+  ...MEDIA_KPI_SUFFIXES.map(suffix => ({
+    key: suffix as string,
+    label: MEDIA_FUNNEL_STAGE_LABELS[suffix],
+    getValue: (totals: KpiTotals, allMedia: MediaEntry[]) => getTotalFromLump(totals, `_${suffix}`, allMedia),
+  })),
   ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => ({
     key: key as string,
     label: GENERAL_KPIS[key].label,
