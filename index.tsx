@@ -2473,8 +2473,10 @@ const CandidateModal: React.FC<{
     const [isSearchingInterviewLogs, setIsSearchingInterviewLogs] = useState(false);
     const [interviewLogResults, setInterviewLogResults] = useState<InterviewLogFile[] | null>(null);
     const [isSummarizingInterviewLog, setIsSummarizingInterviewLog] = useState(false);
+    const [interviewLogDragActive, setInterviewLogDragActive] = useState(false);
     const resumeInputRef = useRef<HTMLInputElement>(null);
     const audioInputRef = useRef<HTMLInputElement>(null);
+    const interviewLogInputRef = useRef<HTMLInputElement>(null);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
@@ -2743,28 +2745,87 @@ const CandidateModal: React.FC<{
         }
     };
 
-    const handleUseInterviewLog = async (file: InterviewLogFile) => {
+    // Shared by both the Drive-search result path and the manual-file-drop fallback below —
+    // only how the raw transcript text is obtained differs between the two.
+    const summarizeAndAppendInterviewLog = async (text: string, sourceLabel: string, dateLabel: string) => {
         setIsSummarizingInterviewLog(true);
         try {
-            const text = await exportGoogleDocAsText(file.id);
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
             });
-            const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
-            const entry = `--- 面談ログ「${file.name}」(${dateLabel}) より ---\n${response.text.trim()}`;
+            const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
             setCandidate(prev => ({
                 ...prev,
                 interviewSummary: prev.interviewSummary ? `${prev.interviewSummary}\n\n${entry}` : entry,
             }));
-            setInterviewLogResults(null);
         } catch (error) {
             console.error('Error summarizing interview log:', error);
             alert('面談ログの要約生成中にエラーが発生しました。');
         } finally {
             setIsSummarizingInterviewLog(false);
         }
+    };
+
+    const handleUseInterviewLog = async (file: InterviewLogFile) => {
+        try {
+            const text = await exportGoogleDocAsText(file.id);
+            const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
+            await summarizeAndAppendInterviewLog(text, file.name, dateLabel);
+            setInterviewLogResults(null);
+        } catch (error) {
+            console.error('Error fetching interview log from Drive:', error);
+            alert('面談ログの取得中にエラーが発生しました。');
+        }
+    };
+
+    // Fallback for when the automatic Drive search doesn't find the log (e.g. it's not a native
+    // Google Doc, or search just misses it) — lets the user drop/select the transcript file
+    // directly instead. Read as plain text, so it only makes sense for .txt-style exports, not
+    // PDFs/Word docs (which would need their own extraction step this app doesn't have).
+    const handleInterviewLogFile = async (files: FileList) => {
+        if (!files || files.length === 0) return;
+        const file = files[0];
+        try {
+            const text = await file.text();
+            const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
+            await summarizeAndAppendInterviewLog(text, file.name, dateLabel);
+        } catch (error) {
+            console.error('Error reading dropped interview log file:', error);
+            alert('ファイルの読み込み中にエラーが発生しました。');
+        }
+    };
+
+    const handleInterviewLogDrag = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.type === 'dragenter' || e.type === 'dragover') {
+            setInterviewLogDragActive(true);
+        } else if (e.type === 'dragleave') {
+            setInterviewLogDragActive(false);
+        }
+    };
+
+    const handleInterviewLogDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setInterviewLogDragActive(false);
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            handleInterviewLogFile(e.dataTransfer.files);
+        }
+    };
+
+    const handleInterviewLogFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        e.preventDefault();
+        if (e.target.files && e.target.files.length > 0) {
+            handleInterviewLogFile(e.target.files);
+        }
+        e.target.value = '';
+    };
+
+    const onInterviewLogButtonClick = () => {
+        interviewLogInputRef.current?.click();
     };
 
 
@@ -2874,6 +2935,22 @@ const CandidateModal: React.FC<{
                             ))}
                         </ul>
                     )}
+                    <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
+                        Driveから自動取得できない場合は、議事録のテキストファイルを直接アップロードしてください。
+                    </p>
+                    <div
+                        id="interview-log-drop-zone"
+                        className={`drop-zone ${interviewLogDragActive ? 'drag-active' : ''}`}
+                        onDragEnter={handleInterviewLogDrag}
+                        onDragLeave={handleInterviewLogDrag}
+                        onDragOver={handleInterviewLogDrag}
+                        onDrop={handleInterviewLogDrop}
+                    >
+                        <input ref={interviewLogInputRef} type="file" id="interview-log-upload" accept=".txt,text/plain" onChange={handleInterviewLogFileChange} />
+                        <p onClick={onInterviewLogButtonClick}>
+                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt）をドラッグ＆ドロップ、またはクリックして選択'}
+                        </p>
+                    </div>
                   </div>
               </div>
 
@@ -3062,7 +3139,15 @@ const CandidateModal: React.FC<{
                 <button type="button" onClick={addApplication} className="add-button">+ 選考企業を追加</button>
               </div>
 
-              { (resumeDragActive || audioDragActive) && <div id="drag-file-element" onDragEnter={handleResumeDrag} onDragLeave={handleResumeDrag} onDragOver={handleResumeDrag} onDrop={handleResumeDrop}></div>}
+              { (resumeDragActive || audioDragActive || interviewLogDragActive) && (
+                <div
+                  id="drag-file-element"
+                  onDragEnter={audioDragActive ? handleAudioDrag : interviewLogDragActive ? handleInterviewLogDrag : handleResumeDrag}
+                  onDragLeave={audioDragActive ? handleAudioDrag : interviewLogDragActive ? handleInterviewLogDrag : handleResumeDrag}
+                  onDragOver={audioDragActive ? handleAudioDrag : interviewLogDragActive ? handleInterviewLogDrag : handleResumeDrag}
+                  onDrop={audioDragActive ? handleAudioDrop : interviewLogDragActive ? handleInterviewLogDrop : handleResumeDrop}
+                ></div>
+              )}
             </form>
             <div className="modal-footer">
                 <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
@@ -6522,9 +6607,23 @@ const App: React.FC = () => {
     };
 
 
+  // Independent from viewDate (which drives the KPI-entry calendar grid, a different concept) —
+  // lets 媒体別月次進捗/当月日次パフォーマンストレンド move to any month via 前月/次月, instead
+  // of always being locked to the real current month.
+  const [monthlyProgressViewDate, setMonthlyProgressViewDate] = useState(new Date());
+  const isCurrentRealMonth = monthlyProgressViewDate.getFullYear() === new Date().getFullYear()
+    && monthlyProgressViewDate.getMonth() === new Date().getMonth();
+  const handleShiftMonthlyProgressMonth = (offset: number) => {
+    setMonthlyProgressViewDate(d => new Date(d.getFullYear(), d.getMonth() + offset, 1));
+  };
+
   const monthlyTotals = useMemo<KpiTotals>(() => {
-    return calculateMonthlyTotals(entries, allMedia);
-  }, [entries, allMedia]);
+    const year = monthlyProgressViewDate.getFullYear();
+    const month = monthlyProgressViewDate.getMonth();
+    const start = new Date(year, month, 1);
+    const end = new Date(year, month + 1, 0, 23, 59, 59);
+    return calculateTotalsForRange(entries, allMedia, start, end);
+  }, [entries, allMedia, monthlyProgressViewDate]);
 
   const todayTotals = useMemo<KpiTotals>(() => {
     const todayStr = new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD format
@@ -6537,9 +6636,8 @@ const App: React.FC = () => {
 
 
   const currentMonthPerformanceChartData = useMemo(() => {
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
+    const currentMonth = monthlyProgressViewDate.getMonth();
+    const currentYear = monthlyProgressViewDate.getFullYear();
     const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
     
     const labels = Array.from({ length: daysInMonth }, (_, i) => `${i + 1}`);
@@ -6584,7 +6682,7 @@ const App: React.FC = () => {
             },
         ],
     };
-  }, [entries, allMedia]);
+  }, [entries, allMedia, monthlyProgressViewDate]);
 
   // Resolved to displayedAllUsersData's canonical (Google-cased) keys — memberEmails is
   // free-typed, so an exact-match filter/index against it would silently drop any member whose
@@ -6994,10 +7092,23 @@ const App: React.FC = () => {
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('mediaProgress'); } }}
                   role="button" tabIndex={0} aria-expanded={sectionVisibility.mediaProgress} aria-controls="media-progress-content"
                 >
-                  <span>媒体別 月次進捗</span>
+                  <span>媒体別 月次進捗（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>
                   <span className={`toggle-icon ${sectionVisibility.mediaProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="media-progress-content" className={`collapsible-content ${sectionVisibility.mediaProgress ? 'open' : ''}`}>
+                  <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
+                    <button type="button" onClick={() => handleShiftMonthlyProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                    <span>{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月</span>
+                    <button type="button" onClick={() => handleShiftMonthlyProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+                    {!isCurrentRealMonth && (
+                      <button type="button" onClick={() => setMonthlyProgressViewDate(new Date())} className="secondary-action-button">今月に戻す</button>
+                    )}
+                  </div>
+                  {!isCurrentRealMonth && (
+                    <p className="gmail-scout-message">
+                      目標は現在設定されている月次目標です（表示中の月の当時の目標とは異なる場合があります）。
+                    </p>
+                  )}
                   <div className="media-dashboard kpi-dashboard">
                      {activeMedia.map(source => (
                           <MediaKpiCard
@@ -7022,10 +7133,18 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.monthlyPerformance}
                 aria-controls="current-month-performance-content"
               >
-                <span>当月日次パフォーマンストレンド</span>
+                <span>日次パフォーマンストレンド（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>
                 <span className={`toggle-icon ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="current-month-performance-content" className={`collapsible-content ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>
+                 <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
+                   <button type="button" onClick={() => handleShiftMonthlyProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                   <span>{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月</span>
+                   <button type="button" onClick={() => handleShiftMonthlyProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+                   {!isCurrentRealMonth && (
+                     <button type="button" onClick={() => setMonthlyProgressViewDate(new Date())} className="secondary-action-button">今月に戻す</button>
+                   )}
+                 </div>
                  <CurrentMonthPerformanceChart data={currentMonthPerformanceChartData} />
               </div>
             </section>
