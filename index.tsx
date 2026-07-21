@@ -4510,6 +4510,12 @@ const FUNNEL_STAGES: FunnelStageDef[] = [
   })),
 ];
 
+// The media-scoped subset of FUNNEL_STAGES — used when viewing a single media's own funnel,
+// since GENERAL_KPIS entries (候補者推薦数 onward) aren't tagged by sourcing media at all and
+// would show an identical value regardless of which media is selected, which would be
+// misleading in a per-media view.
+const MEDIA_FUNNEL_STAGES = FUNNEL_STAGES.filter(s => (MEDIA_KPI_SUFFIXES as readonly string[]).includes(s.key));
+
 /** Rate at index i is "stage[i] / stage[i-1]"; index 0 has no previous stage, so it's null. */
 const computeConversionRates = (values: number[]): (number | null)[] =>
   values.map((v, i) => (i === 0 ? null : (values[i - 1] > 0 ? (v / values[i - 1]) * 100 : null)));
@@ -4540,22 +4546,33 @@ const FunnelAnalysisSection: React.FC<{
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
   const [userQuestion, setUserQuestion] = useState('');
   const [historyMonths, setHistoryMonths] = useState(6);
+  // 'all' sums across every media (existing behavior); a specific media id scopes the funnel to
+  // just that media's own numbers, using MEDIA_FUNNEL_STAGES only since GENERAL_KPIS isn't
+  // per-media data.
+  const [selectedMediaId, setSelectedMediaId] = useState<string>('all');
+
+  const visibleStages = selectedMediaId === 'all' ? FUNNEL_STAGES : MEDIA_FUNNEL_STAGES;
+  const mediaScope = useMemo(
+    () => (selectedMediaId === 'all' ? allMedia : allMedia.filter(m => m.id === selectedMediaId)),
+    [selectedMediaId, allMedia]
+  );
+  const mediaLabel = selectedMediaId === 'all' ? '全媒体合計' : (allMedia.find(m => m.id === selectedMediaId)?.name || selectedMediaId);
 
   const { totalStageValues, perUserStageValues } = useMemo(() => {
     const perUser: Record<string, number[]> = {};
-    const totals = FUNNEL_STAGES.map(() => 0);
+    const totals = visibleStages.map(() => 0);
     users.forEach(email => {
       const data = allUsersData[email];
       if (!data) return;
       const periodTotals = periodOverride
         ? calculateTotalsForRange(data.entries || [], allMedia, periodOverride.start, periodOverride.end)
         : calculateMonthlyTotals(data.entries || [], allMedia);
-      const values = FUNNEL_STAGES.map(stage => stage.getValue(periodTotals, allMedia));
+      const values = visibleStages.map(stage => stage.getValue(periodTotals, mediaScope));
       perUser[email] = values;
       values.forEach((v, i) => { totals[i] += v; });
     });
     return { totalStageValues: totals, perUserStageValues: perUser };
-  }, [users, allUsersData, allMedia, periodOverride]);
+  }, [users, allUsersData, allMedia, periodOverride, visibleStages, mediaScope]);
 
   const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
   const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
@@ -4575,35 +4592,35 @@ const FunnelAnalysisSection: React.FC<{
       });
     }
     return months.map(({ label, start, end }) => {
-      const values = FUNNEL_STAGES.map(() => 0);
+      const values = visibleStages.map(() => 0);
       users.forEach(email => {
         const data = allUsersData[email];
         if (!data) return;
         const rangeTotals = calculateTotalsForRange(data.entries || [], allMedia, start, end);
-        FUNNEL_STAGES.forEach((stage, i) => { values[i] += stage.getValue(rangeTotals, allMedia); });
+        visibleStages.forEach((stage, i) => { values[i] += stage.getValue(rangeTotals, mediaScope); });
       });
       return { label, values };
     });
-  }, [users, allUsersData, allMedia, historyMonths]);
+  }, [users, allUsersData, allMedia, historyMonths, visibleStages, mediaScope]);
 
   const handleAskAi = async () => {
     setIsGeneratingSuggestion(true);
     setAiSuggestion('');
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-      const lines: string[] = [`【全体ファネル実績（${periodLabel}・全ユーザー合計）】`];
-      FUNNEL_STAGES.forEach((stage, i) => {
+      const lines: string[] = [`【全体ファネル実績（${periodLabel}・${mediaLabel}・全ユーザー合計）】`];
+      visibleStages.forEach((stage, i) => {
         const rate = totalConversionRates[i];
         lines.push(`${stage.label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
       });
-      lines.push('', `【ユーザー別ファネル実績（${periodLabel}）】`);
+      lines.push('', `【ユーザー別ファネル実績（${periodLabel}・${mediaLabel}）】`);
       users.forEach(email => {
         const data = allUsersData[email];
         if (!data) return;
         const label = data.displayName || email;
-        const values = perUserStageValues[email] || FUNNEL_STAGES.map(() => 0);
+        const values = perUserStageValues[email] || visibleStages.map(() => 0);
         const rates = computeConversionRates(values);
-        const parts = FUNNEL_STAGES.map((stage, i) =>
+        const parts = visibleStages.map((stage, i) =>
           `${stage.label} ${values[i]}件${rates[i] !== null ? `(${rates[i]!.toFixed(1)}%)` : ''}`
         );
         lines.push(`${label}: ${parts.join(', ')}`);
@@ -4629,9 +4646,9 @@ const FunnelAnalysisSection: React.FC<{
       }
 
       if (monthlyHistory.length > 1) {
-        lines.push('', `【月別実績推移（全ユーザー合計・直近${monthlyHistory.length}ヶ月、最後の行が最新月）】`);
+        lines.push('', `【月別実績推移（${mediaLabel}・全ユーザー合計・直近${monthlyHistory.length}ヶ月、最後の行が最新月）】`);
         monthlyHistory.forEach(({ label, values }) => {
-          const parts = FUNNEL_STAGES.map((stage, i) => `${stage.label} ${values[i]}件`);
+          const parts = visibleStages.map((stage, i) => `${stage.label} ${values[i]}件`);
           lines.push(`${label}: ${parts.join(', ')}`);
         });
       }
@@ -4673,14 +4690,40 @@ const FunnelAnalysisSection: React.FC<{
         <span className={`toggle-icon ${isVisible ? 'open' : ''}`}>▼</span>
       </h2>
       <div id="funnel-analysis-content" className={`collapsible-content ${isVisible ? 'open' : ''}`}>
-        <h3 className="sub-section-title">全体ファネル（全ユーザー合計・{periodLabel}）</h3>
+        <div className="pipeline-sort-controls" style={{ marginBottom: '1rem' }}>
+          <span>媒体で切り替え:</span>
+          <button
+            type="button"
+            className={selectedMediaId === 'all' ? 'active' : ''}
+            onClick={() => setSelectedMediaId('all')}
+          >
+            全媒体合計
+          </button>
+          {allMedia.map(m => (
+            <button
+              key={m.id}
+              type="button"
+              className={selectedMediaId === m.id ? 'active' : ''}
+              onClick={() => setSelectedMediaId(m.id)}
+            >
+              {m.name}{m.isArchived ? '（アーカイブ済み）' : ''}
+            </button>
+          ))}
+        </div>
+        {selectedMediaId !== 'all' && (
+          <p className="gmail-scout-message">
+            単一媒体を表示中は、候補者推薦数以降（媒体を区別しないGENERAL_KPIS項目）はファネルから除外しています。
+          </p>
+        )}
+
+        <h3 className="sub-section-title">全体ファネル（全ユーザー合計・{periodLabel}・{mediaLabel}）</h3>
         <div className="all-users-table-container">
           <table className="all-users-table">
             <thead>
               <tr><th>指標</th><th>件数</th><th>前段階からの歩留まり</th></tr>
             </thead>
             <tbody>
-              {FUNNEL_STAGES.map((stage, i) => (
+              {visibleStages.map((stage, i) => (
                 <tr key={stage.key}>
                   <td>{stage.label}</td>
                   <td>{totalStageValues[i]}</td>
@@ -4695,14 +4738,14 @@ const FunnelAnalysisSection: React.FC<{
           </table>
         </div>
 
-        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}）</h3>
+        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}・{mediaLabel}）</h3>
         <div className="all-users-table-container">
           <table className="all-users-table">
             <thead>
               <tr>
                 <th>ユーザー</th>
-                <th>{FUNNEL_STAGES[0].label}（件数）</th>
-                {FUNNEL_STAGES.slice(1).map(stage => <th key={stage.key}>{stage.label}（歩留まり %）</th>)}
+                <th>{visibleStages[0].label}（件数）</th>
+                {visibleStages.slice(1).map(stage => <th key={stage.key}>{stage.label}（歩留まり %）</th>)}
               </tr>
             </thead>
             <tbody>
@@ -4710,7 +4753,7 @@ const FunnelAnalysisSection: React.FC<{
                 const data = allUsersData[email];
                 if (!data) return null;
                 const label = data.displayName || email;
-                const values = perUserStageValues[email] || FUNNEL_STAGES.map(() => 0);
+                const values = perUserStageValues[email] || visibleStages.map(() => 0);
                 const rates = computeConversionRates(values);
                 const userBottleneckIndex = findBottleneckIndex(rates);
                 return (
