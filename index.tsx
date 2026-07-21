@@ -4518,7 +4518,7 @@ const FunnelAnalysisSection: React.FC<{
   perUserProgressStats?: any[];
   grossProfitStageTotals?: StageGrossProfit[];
 }> = ({ users, allUsersData, allMedia, periodOverride = null, periodLabel = '今月', perUserProgressStats, grossProfitStageTotals }) => {
-  const [isVisible, setIsVisible] = useState(true);
+  const [isVisible, setIsVisible] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState('');
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
   const [userQuestion, setUserQuestion] = useState('');
@@ -5547,12 +5547,12 @@ const App: React.FC = () => {
     dailyProgress: true,
     history: false,
     customPeriodReport: false,
-    allUsersProgress: true,
-    allUsersDayOfWeekRate: true,
-    allUsersWeeklySummary: true,
-    allUsersMemberWeeklySummary: true,
-    allUsersGrossProfit: true,
-    allUsersMonthlyTrend: true,
+    allUsersProgress: false,
+    allUsersDayOfWeekRate: false,
+    allUsersWeeklySummary: false,
+    allUsersMemberWeeklySummary: false,
+    allUsersGrossProfit: false,
+    allUsersMonthlyTrend: false,
   });
 
   const toggleSection = (sectionKey: SectionVisibilityKeys) => {
