@@ -197,7 +197,7 @@ interface WeeklyData {
 
 
 // --- Candidate Pipeline Types ---
-const PIPELINE_STAGES = ['打診', '書類選考', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾', 'お見送り', '選考辞退'] as const;
+const PIPELINE_STAGES = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾', 'お見送り', '選考辞退'] as const;
 type PipelineStage = typeof PIPELINE_STAGES[number];
 
 const CONFIDENCE_GRADES = ['A', 'B+', 'B', 'B-', 'C'] as const;
@@ -210,6 +210,7 @@ const CONFIDENCE_RANK: Record<ConfidenceGrade, number> = { 'A': 0, 'B+': 1, 'B':
 const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
     '打診': 'grey',
     '書類選考': 'cadetblue',
+    '適性検査': 'mediumpurple',
     'カジュアル面談': 'lightblue',
     '1次面接': 'dodgerblue',
     '2次面接': 'royalblue',
@@ -224,6 +225,7 @@ const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
 const STAGE_SHORT_LABELS: Record<PipelineStage, string> = {
     '打診': '打診',
     '書類選考': '書類',
+    '適性検査': '適性',
     'カジュアル面談': 'カジュアル',
     '1次面接': '1次',
     '2次面接': '2次',
@@ -3129,12 +3131,13 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
     const STAGE_WEIGHTS: Record<PipelineStage, number> = {
         '打診': 1,
         '書類選考': 2,
-        'カジュアル面談': 3,
-        '1次面接': 4,
-        '2次面接': 5,
-        '最終面接': 6,
-        '内定': 7,
-        '内定承諾': 8,
+        '適性検査': 3,
+        'カジュアル面談': 4,
+        '1次面接': 5,
+        '2次面接': 6,
+        '最終面接': 7,
+        '内定': 8,
+        '内定承諾': 9,
         'お見送り': 0,
         '選考辞退': 0,
     };
@@ -3894,8 +3897,8 @@ const CandidatePipelineView: React.FC<{
 
         // --- Pipeline Summary Calculation: overall total + per-owner breakdown ---
         const STAGE_WEIGHTS: Record<PipelineStage, number> = {
-            '打診': 1, '書類選考': 2, 'カジュアル面談': 3, '1次面接': 4, '2次面接': 5,
-            '最終面接': 6, '内定': 7, '内定承諾': 8, 'お見送り': 0, '選考辞退': 0,
+            '打診': 1, '書類選考': 2, '適性検査': 3, 'カジュアル面談': 4, '1次面接': 5, '2次面接': 6,
+            '最終面接': 7, '内定': 8, '内定承諾': 9, 'お見送り': 0, '選考辞退': 0,
         };
         const computeStageCounts = (list: Candidate[]): Record<PipelineStage, number> => {
             const counts = PIPELINE_STAGES.reduce((acc, stage) => {
