@@ -3741,7 +3741,7 @@ const CandidatePipelineView: React.FC<{
     const [isReportVisible, setIsReportVisible] = useState(false);
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
     const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(false);
-    const [isGrossProfitVisible, setIsGrossProfitVisible] = useState(true);
+    const [isGrossProfitVisible, setIsGrossProfitVisible] = useState(false);
     const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
     
