@@ -3120,13 +3120,13 @@ const CandidateModal: React.FC<{
                           />
                        </div>
                        <div className="form-group">
-                          <label htmlFor={`expectedDecisionDate-${app.id}`}>決定見込み日</label>
+                          <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
                           <input
                             id={`expectedDecisionDate-${app.id}`}
                             type="date"
                             value={app.expectedDecisionDate || ''}
                             onChange={e => handleApplicationChange(index, 'expectedDecisionDate', e.target.value)}
-                            aria-label={`決定見込み日 ${index + 1}`}
+                            aria-label={`意思決定時期 ${index + 1}`}
                           />
                        </div>
                        <div className="form-group">
@@ -3306,7 +3306,7 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label htmlFor="expectedDecisionDate">決定見込み日</label>
+                        <label htmlFor="expectedDecisionDate">意思決定時期</label>
                         <input
                             type="date"
                             id="expectedDecisionDate"
@@ -3549,17 +3549,25 @@ function confidenceScore(application: CompanyApplication): number {
 }
 
 // 'nearestExpectedDecisionDate' isn't a real Candidate field — it's derived on the fly from
-// applications (a candidate can have several, each with their own 決定見込み日) rather than
+// applications (a candidate can have several, each with their own 意思決定時期) rather than
 // stored directly, unlike the other sortable fields which are plain Candidate properties.
 type PipelineSortKey = keyof Candidate | 'nearestExpectedDecisionDate';
 
-/** Soonest 決定見込み日 among a candidate's visible applications, or null if none is set. */
+/** Soonest 意思決定時期 among a candidate's visible applications, or null if none is set. */
 function getNearestExpectedDecisionDate(candidate: Candidate): string | null {
     const dates = candidate.applications
         .filter(app => !app.isHidden && app.expectedDecisionDate)
         .map(app => app.expectedDecisionDate as string);
     if (dates.length === 0) return null;
     return dates.reduce((min, d) => (d < min ? d : min));
+}
+
+/** True if dateISO falls in the calendar month `monthOffset` months from today (0 = this month, 1 = next month). */
+function isDateInRelativeMonth(dateISO: string, monthOffset: number): boolean {
+    const d = new Date(dateISO + 'T00:00:00');
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+    return d.getFullYear() === target.getFullYear() && d.getMonth() === target.getMonth();
 }
 
 /**
@@ -4053,7 +4061,11 @@ const CandidatePipelineView: React.FC<{
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [showHidden, setShowHidden] = useState(false);
-    const [showOnlyWithExpectedDecision, setShowOnlyWithExpectedDecision] = useState(false);
+    // Multi-select, like selectedStageFilters below — empty means no filtering by 意思決定時期.
+    const [selectedDecisionTimingFilters, setSelectedDecisionTimingFilters] = useState<('thisMonth' | 'nextMonth')[]>([]);
+    const toggleDecisionTimingFilter = (key: 'thisMonth' | 'nextMonth') => {
+        setSelectedDecisionTimingFilters(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+    };
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     // Narrows the team scope down to specific members (empty = show every member of the
     // selected team). Reset whenever the selected team changes, since a different team's
@@ -4176,7 +4188,7 @@ const CandidatePipelineView: React.FC<{
         const headers = [
             '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
             '集客媒体', '他エージェント使用状況', '登録日', '概要',
-            '応募企業名', '進捗状況', '次アクション', '決定見込み日', '内定確度', '入社確度',
+            '応募企業名', '進捗状況', '次アクション', '意思決定時期', '内定確度', '入社確度',
             '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
 
@@ -4318,10 +4330,14 @@ const CandidatePipelineView: React.FC<{
             );
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
-            const matchesExpectedDecision = !showOnlyWithExpectedDecision || getNearestExpectedDecisionDate(c) !== null;
-            return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesExpectedDecision;
+            const matchesDecisionTiming = selectedDecisionTimingFilters.length === 0 || (() => {
+                const nearest = getNearestExpectedDecisionDate(c);
+                if (!nearest) return false;
+                return selectedDecisionTimingFilters.some(key => isDateInRelativeMonth(nearest, key === 'thisMonth' ? 0 : 1));
+            })();
+            return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesDecisionTiming;
         });
-    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters, showOnlyWithExpectedDecision]);
+    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters, selectedDecisionTimingFilters]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -4330,7 +4346,7 @@ const CandidatePipelineView: React.FC<{
                 if (sortConfig.key === 'nearestExpectedDecisionDate') {
                     const dateA = getNearestExpectedDecisionDate(a);
                     const dateB = getNearestExpectedDecisionDate(b);
-                    // Candidates with no 決定見込み日 set always sort last, regardless of direction —
+                    // Candidates with no 意思決定時期 set always sort last, regardless of direction —
                     // "unknown" isn't meaningfully earlier or later than a known date.
                     if (!dateA && !dateB) return 0;
                     if (!dateA) return 1;
@@ -4381,7 +4397,7 @@ const CandidatePipelineView: React.FC<{
       { key: 'name', label: '氏名' },
       { key: 'currentCompany', label: '現職企業名' },
       { key: 'currentSalary', label: '現職年収' },
-      { key: 'nearestExpectedDecisionDate', label: '決定見込み日' },
+      { key: 'nearestExpectedDecisionDate', label: '意思決定時期' },
     ];
 
     return (
@@ -4600,14 +4616,25 @@ const CandidatePipelineView: React.FC<{
                     />
                     <label htmlFor="show-hidden-candidates">非表示の候補者を表示</label>
                 </div>
-                <div className="single-checkbox">
-                    <input
-                        type="checkbox"
-                        id="show-only-with-expected-decision"
-                        checked={showOnlyWithExpectedDecision}
-                        onChange={e => setShowOnlyWithExpectedDecision(e.target.checked)}
-                    />
-                    <label htmlFor="show-only-with-expected-decision">決定見込み日が入力された候補者のみ表示</label>
+                <div className="pipeline-sort-controls">
+                  <span>意思決定時期で絞り込み:</span>
+                  <button
+                    onClick={() => toggleDecisionTimingFilter('thisMonth')}
+                    className={selectedDecisionTimingFilters.includes('thisMonth') ? 'active' : ''}
+                  >
+                    今月見込み
+                  </button>
+                  <button
+                    onClick={() => toggleDecisionTimingFilter('nextMonth')}
+                    className={selectedDecisionTimingFilters.includes('nextMonth') ? 'active' : ''}
+                  >
+                    来月見込み
+                  </button>
+                  {selectedDecisionTimingFilters.length > 0 && (
+                      <button onClick={() => setSelectedDecisionTimingFilters([])} className="secondary-action-button">
+                          クリア
+                      </button>
+                  )}
                 </div>
             </div>
 
@@ -4793,7 +4820,7 @@ const CandidatePipelineView: React.FC<{
                                                               <span>{app.scheduledDate ? new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
                                                           </div>
                                                           <div className="detail-card-item">
-                                                              <span>決定見込み日:</span>
+                                                              <span>意思決定時期:</span>
                                                               <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
                                                           </div>
                                                           <div className="detail-card-item">
