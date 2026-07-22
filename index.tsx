@@ -274,6 +274,10 @@ interface CompanyApplication {
   // the pipeline calendar. Free-form text notes about the current status, separate from
   // nextAction (which is more of a short "what's next" label).
   scheduledDate?: string; // ISO yyyy-mm-dd
+  // Optional start time for scheduledDate, e.g. "13:30" — shown as a "13:30 " prefix on the
+  // Google Tasks title (see buildPipelineTaskContent) since Tasks itself has no time-of-day
+  // field, only a due date.
+  scheduledTime?: string; // HH:mm, 24-hour
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
@@ -3159,13 +3163,22 @@ const CandidateModal: React.FC<{
                        </div>
                        <div className="form-group">
                           <label htmlFor={`scheduledDate-${app.id}`}>選考予定日</label>
-                          <input
-                            id={`scheduledDate-${app.id}`}
-                            type="date"
-                            value={app.scheduledDate || ''}
-                            onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
-                            aria-label={`選考予定日 ${index + 1}`}
-                          />
+                          <div className="scheduled-date-time-inputs">
+                            <input
+                              id={`scheduledDate-${app.id}`}
+                              type="date"
+                              value={app.scheduledDate || ''}
+                              onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
+                              aria-label={`選考予定日 ${index + 1}`}
+                            />
+                            <input
+                              id={`scheduledTime-${app.id}`}
+                              type="time"
+                              value={app.scheduledTime || ''}
+                              onChange={e => handleApplicationChange(index, 'scheduledTime', e.target.value)}
+                              aria-label={`開始時刻 ${index + 1}`}
+                            />
+                          </div>
                        </div>
                        <div className="form-group">
                           <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
@@ -3345,13 +3358,23 @@ const ApplicationModal: React.FC<{
                     </div>
                     <div className="form-group">
                         <label htmlFor="scheduledDate">選考予定日</label>
-                        <input
-                            type="date"
-                            id="scheduledDate"
-                            name="scheduledDate"
-                            value={application.scheduledDate || ''}
-                            onChange={handleChange}
-                        />
+                        <div className="scheduled-date-time-inputs">
+                            <input
+                                type="date"
+                                id="scheduledDate"
+                                name="scheduledDate"
+                                value={application.scheduledDate || ''}
+                                onChange={handleChange}
+                            />
+                            <input
+                                type="time"
+                                id="scheduledTime"
+                                name="scheduledTime"
+                                aria-label="開始時刻"
+                                value={application.scheduledTime || ''}
+                                onChange={handleChange}
+                            />
+                        </div>
                     </div>
                     <div className="form-group">
                         <label htmlFor="expectedDecisionDate">意思決定時期</label>
@@ -3804,6 +3827,8 @@ const PipelineCalendarView: React.FC<{
                 map.set(app.scheduledDate!, list);
             });
         });
+        // Events without a start time sort last, after every timed event on the same day.
+        map.forEach(list => list.sort((a, b) => (a.application.scheduledTime || '99:99').localeCompare(b.application.scheduledTime || '99:99')));
         return map;
     }, [candidates]);
 
@@ -3848,13 +3873,14 @@ const PipelineCalendarView: React.FC<{
                                     key={idx}
                                     className={`pipeline-calendar-event ${isOwnEvent ? 'is-editable' : ''}`}
                                     style={{ '--badge-color': STAGE_COLOR_MAP[ev.application.stage] } as React.CSSProperties}
-                                    title={`${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
+                                    title={`${ev.application.scheduledTime ? `${ev.application.scheduledTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
                                     role={isOwnEvent ? 'button' : undefined}
                                     tabIndex={isOwnEvent ? 0 : undefined}
                                     onClick={isOwnEvent ? handleEventActivate : undefined}
                                     onKeyDown={isOwnEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEventActivate(e); } } : undefined}
                                 >
                                     <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.application.stage]}</span>
+                                    {ev.application.scheduledTime && <span className="pipeline-calendar-event-time">{ev.application.scheduledTime}</span>}
                                     {ev.candidate.name} - {ev.application.companyName}
                                 </div>
                             );
@@ -3985,6 +4011,7 @@ const CompanyPipelineView: React.FC<{
                                         {application.scheduledDate && (
                                             <span className="company-pipeline-entry-date">
                                                 {new Date(application.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+                                                {application.scheduledTime ? ` ${application.scheduledTime}` : ''}
                                             </span>
                                         )}
                                     </div>
@@ -4865,7 +4892,11 @@ const CandidatePipelineView: React.FC<{
                                                           </div>
                                                           <div className="detail-card-item">
                                                               <span>選考予定日:</span>
-                                                              <span>{app.scheduledDate ? new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                                                              <span>
+                                                                {app.scheduledDate
+                                                                  ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+                                                                  : '未設定'}
+                                                              </span>
                                                           </div>
                                                           <div className="detail-card-item">
                                                               <span>意思決定時期:</span>
@@ -6747,8 +6778,11 @@ const App: React.FC = () => {
   const [tasksSyncStatus, setTasksSyncStatus] = useState<'idle' | 'loading' | 'error' | 'needs-reauth'>('idle');
   const [tasksSyncMessage, setTasksSyncMessage] = useState('');
 
+  // Google Tasks has no time-of-day field of its own (due is a date only) — so a start time,
+  // when set, is prepended straight onto the title text instead, e.g. "13:30 山田太郎（株式会社
+  // サンプル）".
   const buildPipelineTaskContent = (candidate: Candidate, app: CompanyApplication) => ({
-    title: `${candidate.name}（${app.companyName}）`,
+    title: `${app.scheduledTime ? `${app.scheduledTime} ` : ''}${candidate.name}（${app.companyName}）`,
     notes: `ステージ: ${app.stage}${app.nextAction ? ` / 次のアクション: ${app.nextAction}` : ''}`,
     dueDateISO: app.scheduledDate!,
   });
@@ -6798,6 +6832,7 @@ const App: React.FC = () => {
             const prevApp = prevAppById.get(app.id);
             const isUnchanged = prevApp && existingTaskId
               && prevApp.scheduledDate === app.scheduledDate
+              && prevApp.scheduledTime === app.scheduledTime
               && prevApp.companyName === app.companyName
               && prevApp.stage === app.stage
               && prevApp.nextAction === app.nextAction;

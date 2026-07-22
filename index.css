@@ -700,6 +700,18 @@ section {
   padding: 0 0.3rem;
   margin-right: 0.3rem;
 }
+.pipeline-calendar-event-time {
+  font-weight: 600;
+  margin-right: 0.3rem;
+}
+.scheduled-date-time-inputs {
+  display: flex;
+  gap: 0.5rem;
+}
+.scheduled-date-time-inputs input[type="time"] {
+  flex: 0 0 auto;
+  width: 7.5rem;
+}
 .detail-card-item-memo {
   align-items: flex-start;
 }
