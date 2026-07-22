@@ -700,6 +700,9 @@ section {
   font-weight: 600;
   margin-right: 0.3rem;
 }
+.pipeline-calendar-event-revival {
+  background-color: #6c757d;
+}
 .scheduled-date-time-inputs {
   display: flex;
   gap: 0.5rem;
@@ -1495,6 +1498,15 @@ section {
 .candidate-card-actions {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.revival-info-banner {
+  background-color: var(--warning-color);
+  color: #333;
+  font-size: 0.85rem;
+  padding: 0.4rem 1rem;
+  margin: -0.5rem 0 0.5rem;
+  border-radius: calc(var(--border-radius) - 0.25rem);
 }
 .candidate-card-actions button {
   padding: 0.3rem 0.8rem;

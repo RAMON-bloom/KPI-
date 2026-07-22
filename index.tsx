@@ -313,6 +313,12 @@ interface Candidate {
   interviewSummary?: string;
   createdAt: string; // ISO string
   isHidden?: boolean;
+  // 掘り起しリスト: presence means this candidate is parked for future re-engagement rather
+  // than actively pursued right now. Adding a candidate here also sets isHidden — it's a
+  // candidate-level concept (not tied to any one CompanyApplication), since the point is
+  // reconsidering the person as a whole, not a specific past application. nextActionDate drives
+  // a reminder event on the pipeline calendar (see PipelineCalendarView).
+  revival?: { nextAction: string; nextActionDate: string /* ISO yyyy-mm-dd */ };
   // Expected annual salary (万円) this candidate is likely to be placed at — distinct from
   // `salary` (their stated desired salary) — used with each application's feeRate to project
   // gross profit.
@@ -3445,6 +3451,82 @@ const ApplicationModal: React.FC<{
 
 
 /**
+ * Registers or edits a candidate's 掘り起しリスト entry — a candidate-level (not per-
+ * application) note that this person isn't being actively pursued right now but should be
+ * revisited later. Saving here is what actually hides the candidate from the active pipeline
+ * (see CandidatePipelineView's handleSaveRevival) and schedules the reminder on the calendar.
+ */
+const RevivalModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    onSave: (data: { nextAction: string; nextActionDate: string }) => void;
+    candidateName: string;
+    initialData: { nextAction: string; nextActionDate: string } | null;
+}> = ({ isOpen, onClose, onSave, candidateName, initialData }) => {
+    const [nextAction, setNextAction] = useState('');
+    const [nextActionDate, setNextActionDate] = useState('');
+
+    useEffect(() => {
+        if (isOpen) {
+            setNextAction(initialData?.nextAction || '');
+            setNextActionDate(initialData?.nextActionDate || '');
+        }
+    }, [isOpen, initialData]);
+
+    if (!isOpen) return null;
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!nextActionDate) {
+            alert('次アクションの時期を入力してください。');
+            return;
+        }
+        onSave({ nextAction: nextAction.trim(), nextActionDate });
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h3 id="revival-modal-title">{candidateName}さん - 掘り起しリストに登録</h3>
+                    <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+                </div>
+                <form id="revival-form" className="modal-body" onSubmit={handleSubmit}>
+                    <p className="modal-description">
+                        パイプライン上は非表示になり、掘り起しリストとして確認できるようになります。指定した時期にパイプラインカレンダー上にリマインドが表示されます。
+                    </p>
+                    <div className="form-group">
+                        <label htmlFor="revival-next-action">次アクション</label>
+                        <input
+                            id="revival-next-action"
+                            type="text"
+                            placeholder="例: 半年後に改めて連絡"
+                            value={nextAction}
+                            onChange={(e) => setNextAction(e.target.value)}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="revival-next-action-date">次アクションの時期</label>
+                        <input
+                            id="revival-next-action-date"
+                            type="date"
+                            value={nextActionDate}
+                            onChange={(e) => setNextActionDate(e.target.value)}
+                            required
+                        />
+                    </div>
+                </form>
+                <div className="modal-footer">
+                    <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+                    <button type="submit" form="revival-form" className="submit-button">保存</button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+/**
  * Opened by clicking a date on the pipeline calendar. Lets the signed-in user pick one of
  * their own candidates, then either an existing application (to reschedule/edit) or a brand
  * new one, for that date — the actual company/stage/memo fields are edited via the existing
@@ -3790,18 +3872,18 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
 };
 
 
-interface PipelineCalendarEvent {
-    candidate: Candidate;
-    application: CompanyApplication;
-}
+type PipelineCalendarEvent =
+    | { kind: 'application'; candidate: Candidate; application: CompanyApplication }
+    | { kind: 'revival'; candidate: Candidate };
 
 /**
- * Month calendar of every visible application's manually-set scheduledDate. Reads whatever
- * `candidates` list the caller passes in, so it's automatically scoped by the pipeline's
- * existing 自分/全ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here.
- * Clicking empty day space lets the signed-in user schedule (or edit) one of their own
- * candidates' applications for that date, via onDayClick. Clicking an existing event bar
- * instead jumps straight to editing THAT application — but only when it belongs to the
+ * Month calendar of every visible application's manually-set scheduledDate, plus a 掘り起し
+ * reminder event on each revival-listed candidate's nextActionDate. Reads whatever `candidates`
+ * list the caller passes in, so it's automatically scoped by the pipeline's existing 自分/全
+ * ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here. Clicking empty
+ * day space lets the signed-in user schedule (or edit) one of their own candidates'
+ * applications for that date, via onDayClick. Clicking an existing event bar instead jumps
+ * straight to editing THAT application/revival entry — but only when it belongs to the
  * signed-in user (stops propagation so it doesn't also trigger onDayClick); other people's
  * events are shown for visibility only and aren't clickable.
  */
@@ -3813,21 +3895,39 @@ const PipelineCalendarView: React.FC<{
     onNextMonth: () => void;
     onDayClick: (dateStr: string) => void;
     onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
-}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication }) => {
+    onEditRevival: (candidate: Candidate) => void;
+}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
     const eventsByDate = useMemo(() => {
         const map = new Map<string, PipelineCalendarEvent[]>();
+        // Application events only come from visible (non-hidden) candidates — once a candidate
+        // is hidden (including via 掘り起しリスト, below), its past applications' scheduled
+        // events stop cluttering the calendar.
         candidates.filter(c => !c.isHidden).forEach(c => {
             c.applications.filter(app => !app.isHidden && app.scheduledDate).forEach(app => {
                 const list = map.get(app.scheduledDate!) || [];
-                list.push({ candidate: c, application: app });
+                list.push({ kind: 'application', candidate: c, application: app });
                 map.set(app.scheduledDate!, list);
             });
         });
-        // Events without a start time sort last, after every timed event on the same day.
-        map.forEach(list => list.sort((a, b) => (a.application.scheduledTime || '99:99').localeCompare(b.application.scheduledTime || '99:99')));
+        // Revival reminders come from EVERY candidate regardless of isHidden — a 掘り起しリスト
+        // entry is always hidden by definition, but its reminder must still show.
+        candidates.forEach(c => {
+            if (c.revival?.nextActionDate) {
+                const list = map.get(c.revival.nextActionDate) || [];
+                list.push({ kind: 'revival', candidate: c });
+                map.set(c.revival.nextActionDate, list);
+            }
+        });
+        // Events without a start time (including every revival reminder) sort last, after every
+        // timed application event on the same day.
+        map.forEach(list => list.sort((a, b) => {
+            const aTime = a.kind === 'application' ? (a.application.scheduledTime || '99:99') : '99:99';
+            const bTime = b.kind === 'application' ? (b.application.scheduledTime || '99:99') : '99:99';
+            return aTime.localeCompare(bTime);
+        }));
         return map;
     }, [candidates]);
 
@@ -3863,6 +3963,26 @@ const PipelineCalendarView: React.FC<{
                     <div className="pipeline-calendar-events">
                         {events.map((ev, idx) => {
                             const isOwnEvent = !ev.candidate.ownerEmail || ev.candidate.ownerEmail === currentUserEmail;
+                            if (ev.kind === 'revival') {
+                                const handleRevivalActivate = (e: React.SyntheticEvent) => {
+                                    e.stopPropagation();
+                                    onEditRevival(ev.candidate);
+                                };
+                                return (
+                                    <div
+                                        key={idx}
+                                        className={`pipeline-calendar-event pipeline-calendar-event-revival ${isOwnEvent ? 'is-editable' : ''}`}
+                                        title={`掘り起し: ${ev.candidate.name}${ev.candidate.revival?.nextAction ? ` / ${ev.candidate.revival.nextAction}` : ''}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
+                                        role={isOwnEvent ? 'button' : undefined}
+                                        tabIndex={isOwnEvent ? 0 : undefined}
+                                        onClick={isOwnEvent ? handleRevivalActivate : undefined}
+                                        onKeyDown={isOwnEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRevivalActivate(e); } } : undefined}
+                                    >
+                                        <span className="pipeline-calendar-event-stage">掘り起し</span>
+                                        {ev.candidate.name}
+                                    </div>
+                                );
+                            }
                             const handleEventActivate = (e: React.SyntheticEvent) => {
                                 e.stopPropagation();
                                 onEditApplication(ev.candidate, ev.application);
@@ -4134,7 +4254,9 @@ const CandidatePipelineView: React.FC<{
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
-    const [showHidden, setShowHidden] = useState(false);
+    // 'active' = normal pipeline candidates; 'revival' = 掘り起しリスト entries specifically;
+    // 'hidden' = any other hidden (e.g. plainly archived/rejected) candidate.
+    const [visibilityFilter, setVisibilityFilter] = useState<'active' | 'hidden' | 'revival'>('active');
     // Multi-select, like selectedStageFilters below — empty means no filtering by 意思決定時期.
     const [selectedDecisionTimingFilters, setSelectedDecisionTimingFilters] = useState<('thisMonth' | 'nextMonth')[]>([]);
     const toggleDecisionTimingFilter = (key: 'thisMonth' | 'nextMonth') => {
@@ -4181,6 +4303,9 @@ const CandidatePipelineView: React.FC<{
 
     // State for scheduling from a pipeline-calendar date click
     const [scheduleModalDate, setScheduleModalDate] = useState<string | null>(null);
+
+    // State for the 掘り起しリスト registration/edit modal
+    const [revivalModalCandidate, setRevivalModalCandidate] = useState<Candidate | null>(null);
 
     const handleAdd = () => {
         setEditingCandidate(null);
@@ -4247,6 +4372,31 @@ const CandidatePipelineView: React.FC<{
         );
         const updatedCandidate = { ...candidate, applications: updatedApplications };
         onSave(updatedCandidate);
+    };
+
+    const handleOpenRevivalModal = (candidate: Candidate) => {
+        if (!isOwn(candidate)) return;
+        setRevivalModalCandidate(candidate);
+    };
+
+    const handleCloseRevivalModal = () => setRevivalModalCandidate(null);
+
+    // Registering here is what actually hides the candidate — it's parked for future
+    // re-engagement rather than being actively pursued, so it drops out of the normal pipeline
+    // list and surfaces instead under the 掘り起しリスト filter (and its nextActionDate as a
+    // calendar reminder).
+    const handleSaveRevival = (data: { nextAction: string; nextActionDate: string }) => {
+        if (!revivalModalCandidate) return;
+        onSave({ ...revivalModalCandidate, revival: data, isHidden: true });
+        handleCloseRevivalModal();
+    };
+
+    // "掘り起しリストから解除" — clears the revival entry and restores the candidate to the
+    // active pipeline in one step (rather than just un-hiding while leaving stale revival data).
+    const handleRemoveFromRevivalList = (candidate: Candidate) => {
+        if (!isOwn(candidate)) return;
+        const { revival, ...rest } = candidate;
+        onSave({ ...rest, isHidden: false });
     };
 
     const handleExportCSV = () => {
@@ -4398,7 +4548,11 @@ const CandidatePipelineView: React.FC<{
     const filteredCandidates = useMemo(() => {
         return candidates.filter(c => {
             const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase());
-            const matchesVisibility = showHidden ? c.isHidden === true : !c.isHidden;
+            const matchesVisibility = visibilityFilter === 'revival'
+                ? !!c.revival
+                : visibilityFilter === 'hidden'
+                ? c.isHidden === true && !c.revival
+                : !c.isHidden;
             const matchesStage = selectedStageFilters.length === 0 || c.applications.some(
                 app => !app.isHidden && selectedStageFilters.includes(app.stage)
             );
@@ -4411,7 +4565,7 @@ const CandidatePipelineView: React.FC<{
             })();
             return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesDecisionTiming;
         });
-    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters, selectedDecisionTimingFilters]);
+    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, scope, selectedMemberFilters, selectedDecisionTimingFilters]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -4503,6 +4657,14 @@ const CandidatePipelineView: React.FC<{
                     onPickApplication={handlePickApplicationForSchedule}
                 />
             )}
+
+            <RevivalModal
+                isOpen={!!revivalModalCandidate}
+                onClose={handleCloseRevivalModal}
+                onSave={handleSaveRevival}
+                candidateName={revivalModalCandidate?.name || ''}
+                initialData={revivalModalCandidate?.revival || null}
+            />
 
             <div className="pipeline-header">
                 <h2 id="pipeline-title" className="section-title">候補者パイプライン</h2>
@@ -4597,6 +4759,7 @@ const CandidatePipelineView: React.FC<{
                         onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
                         onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
                         onEditApplication={handleOpenApplicationModal}
+                        onEditRevival={handleOpenRevivalModal}
                     />
                 </div>
             </div>
@@ -4681,14 +4844,17 @@ const CandidatePipelineView: React.FC<{
                       </button>
                   ))}
                 </div>
-                 <div className="single-checkbox">
-                    <input
-                        type="checkbox"
-                        id="show-hidden-candidates"
-                        checked={showHidden}
-                        onChange={e => setShowHidden(e.target.checked)}
-                    />
-                    <label htmlFor="show-hidden-candidates">非表示の候補者を表示</label>
+                <div className="pipeline-sort-controls">
+                  <span>表示対象:</span>
+                  <button onClick={() => setVisibilityFilter('active')} className={visibilityFilter === 'active' ? 'active' : ''}>
+                    表示中の候補者
+                  </button>
+                  <button onClick={() => setVisibilityFilter('revival')} className={visibilityFilter === 'revival' ? 'active' : ''}>
+                    掘り起しリスト
+                  </button>
+                  <button onClick={() => setVisibilityFilter('hidden')} className={visibilityFilter === 'hidden' ? 'active' : ''}>
+                    非表示（その他）
+                  </button>
                 </div>
                 <div className="pipeline-sort-controls">
                   <span>意思決定時期で絞り込み:</span>
@@ -4760,14 +4926,31 @@ const CandidatePipelineView: React.FC<{
                                     {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
                                     {candidateIsOwn && (
                                         <div className="candidate-card-actions">
-                                            <button onClick={() => handleOpenApplicationModal(c, null)} className="add-selection-button">+ 選考追加</button>
-                                            <button onClick={() => handleEdit(c)} className="edit-user-button">編集</button>
-                                            <button onClick={() => onToggleVisibility(c.id)} className={showHidden ? "secondary-action-button" : "delete-user-button"}>
-                                                {showHidden ? '再表示' : '非表示'}
-                                            </button>
+                                            {visibilityFilter === 'revival' ? (
+                                                <>
+                                                    <button onClick={() => handleOpenRevivalModal(c)} className="edit-user-button">編集</button>
+                                                    <button onClick={() => handleRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <button onClick={() => handleOpenApplicationModal(c, null)} className="add-selection-button">+ 選考追加</button>
+                                                    <button onClick={() => handleEdit(c)} className="edit-user-button">編集</button>
+                                                    {visibilityFilter === 'active' && (
+                                                        <button onClick={() => handleOpenRevivalModal(c)} className="secondary-action-button">掘り起しリストに追加</button>
+                                                    )}
+                                                    <button onClick={() => onToggleVisibility(c.id)} className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}>
+                                                        {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
+                                                    </button>
+                                                </>
+                                            )}
                                         </div>
                                     )}
                                 </div>
+                                {visibilityFilter === 'revival' && c.revival && (
+                                    <div className="revival-info-banner">
+                                        次アクション: {c.revival.nextAction || '未設定'} / 予定日: {new Date(c.revival.nextActionDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+                                    </div>
+                                )}
                                 <div className="candidate-card-body">
                                     <div className="candidate-key-info">
                                         <div className="key-info-item"><span>現職:</span> {c.currentCompany || 'N/A'}</div>
@@ -6797,8 +6980,13 @@ const App: React.FC = () => {
     const session = getCurrentSession();
     if (!session) return;
     const accessToken = session.accessToken;
+    // A hidden candidate (via the plain 非表示 toggle, or via 掘り起しリストへの追加, which also
+    // hides) is archived out of active pursuit — treat it the same as a removed candidate here
+    // so its applications' reminders don't linger as open Google Tasks. Un-hiding (either
+    // toggle) conversely lets any still-scheduled applications recreate their tasks normally.
+    const effectiveNext = nextCandidate && !nextCandidate.isHidden ? nextCandidate : null;
     const prevApps = prevCandidate?.applications || [];
-    const nextApps = nextCandidate?.applications || [];
+    const nextApps = effectiveNext?.applications || [];
     const nextAppById = new Map(nextApps.map(a => [a.id, a]));
     const removedAppIds = prevApps.filter(a => !nextAppById.has(a.id)).map(a => a.id);
     const prevAppById = new Map(prevApps.map(a => [a.id, a]));
@@ -6816,7 +7004,7 @@ const App: React.FC = () => {
             changed = true;
           }
         }
-        if (nextCandidate) {
+        if (effectiveNext) {
           for (const app of nextApps) {
             const existingTaskId = idMap[app.id];
             if (!app.scheduledDate) {
@@ -6835,7 +7023,7 @@ const App: React.FC = () => {
               && prevApp.stage === app.stage
               && prevApp.nextAction === app.nextAction;
             if (isUnchanged) continue;
-            const content = buildPipelineTaskContent(nextCandidate, app);
+            const content = buildPipelineTaskContent(effectiveNext, app);
             if (existingTaskId) {
               const taskId = await updatePipelineTask(accessToken, existingTaskId, content);
               if (taskId !== existingTaskId) { idMap[app.id] = taskId; changed = true; }
