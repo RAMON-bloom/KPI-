@@ -273,6 +273,10 @@ interface CompanyApplication {
   // the pipeline calendar. Free-form text notes about the current status, separate from
   // nextAction (which is more of a short "what's next" label).
   scheduledDate?: string; // ISO yyyy-mm-dd
+  // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
+  // this application — distinct from scheduledDate, which is the next scheduled
+  // interview/action, not the eventual outcome date.
+  expectedDecisionDate?: string; // ISO yyyy-mm-dd
   memo?: string;
   isHidden?: boolean;
   // Referral fee rate charged to this client company (% of the candidate's expected annual
@@ -3116,6 +3120,16 @@ const CandidateModal: React.FC<{
                           />
                        </div>
                        <div className="form-group">
+                          <label htmlFor={`expectedDecisionDate-${app.id}`}>決定見込み日</label>
+                          <input
+                            id={`expectedDecisionDate-${app.id}`}
+                            type="date"
+                            value={app.expectedDecisionDate || ''}
+                            onChange={e => handleApplicationChange(index, 'expectedDecisionDate', e.target.value)}
+                            aria-label={`決定見込み日 ${index + 1}`}
+                          />
+                       </div>
+                       <div className="form-group">
                           <label htmlFor={`feeRate-${app.id}`}>fee料率(%)</label>
                           <input
                             id={`feeRate-${app.id}`}
@@ -3288,6 +3302,16 @@ const ApplicationModal: React.FC<{
                             id="scheduledDate"
                             name="scheduledDate"
                             value={application.scheduledDate || ''}
+                            onChange={handleChange}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label htmlFor="expectedDecisionDate">決定見込み日</label>
+                        <input
+                            type="date"
+                            id="expectedDecisionDate"
+                            name="expectedDecisionDate"
+                            value={application.expectedDecisionDate || ''}
                             onChange={handleChange}
                         />
                     </div>
@@ -3522,6 +3546,20 @@ function confidenceScore(application: CompanyApplication): number {
     const offerRank = application.offerConfidence ? CONFIDENCE_RANK[application.offerConfidence] : CONFIDENCE_GRADES.length;
     const acceptanceRank = application.acceptanceConfidence ? CONFIDENCE_RANK[application.acceptanceConfidence] : CONFIDENCE_GRADES.length;
     return offerRank + acceptanceRank;
+}
+
+// 'nearestExpectedDecisionDate' isn't a real Candidate field — it's derived on the fly from
+// applications (a candidate can have several, each with their own 決定見込み日) rather than
+// stored directly, unlike the other sortable fields which are plain Candidate properties.
+type PipelineSortKey = keyof Candidate | 'nearestExpectedDecisionDate';
+
+/** Soonest 決定見込み日 among a candidate's visible applications, or null if none is set. */
+function getNearestExpectedDecisionDate(candidate: Candidate): string | null {
+    const dates = candidate.applications
+        .filter(app => !app.isHidden && app.expectedDecisionDate)
+        .map(app => app.expectedDecisionDate as string);
+    if (dates.length === 0) return null;
+    return dates.reduce((min, d) => (d < min ? d : min));
 }
 
 /**
@@ -4015,6 +4053,7 @@ const CandidatePipelineView: React.FC<{
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [showHidden, setShowHidden] = useState(false);
+    const [showOnlyWithExpectedDecision, setShowOnlyWithExpectedDecision] = useState(false);
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     // Narrows the team scope down to specific members (empty = show every member of the
     // selected team). Reset whenever the selected team changes, since a different team's
@@ -4038,7 +4077,7 @@ const CandidatePipelineView: React.FC<{
         ));
         return canonicalEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
     }, [scope, selectedTeamId, teams, canonicalEmailByLower, labelByEmailForPipeline]);
-    const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
+    const [sortConfig, setSortConfig] = useState<{ key: PipelineSortKey; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(false);
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
@@ -4137,7 +4176,7 @@ const CandidatePipelineView: React.FC<{
         const headers = [
             '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
             '集客媒体', '他エージェント使用状況', '登録日', '概要',
-            '応募企業名', '進捗状況', '次アクション', '内定確度', '入社確度',
+            '応募企業名', '進捗状況', '次アクション', '決定見込み日', '内定確度', '入社確度',
             '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
 
@@ -4177,6 +4216,7 @@ const CandidatePipelineView: React.FC<{
                         escapeCSV(app.companyName),
                         escapeCSV(app.stage),
                         escapeCSV(app.nextAction),
+                        escapeCSV(app.expectedDecisionDate || ''),
                         escapeCSV(app.offerConfidence || ''),
                         escapeCSV(app.acceptanceConfidence || ''),
                         escapeCSV(profit ? Math.round(profit.revenue) : ''),
@@ -4190,7 +4230,7 @@ const CandidatePipelineView: React.FC<{
                     }
                 });
             } else {
-                 rows.push([...commonData, '', '', '', '', '', '', '', '']);
+                 rows.push([...commonData, '', '', '', '', '', '', '', '', '']);
             }
         });
 
@@ -4278,14 +4318,26 @@ const CandidatePipelineView: React.FC<{
             );
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
-            return matchesSearch && matchesVisibility && matchesStage && matchesMember;
+            const matchesExpectedDecision = !showOnlyWithExpectedDecision || getNearestExpectedDecisionDate(c) !== null;
+            return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesExpectedDecision;
         });
-    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters]);
+    }, [candidates, searchTerm, showHidden, selectedStageFilters, scope, selectedMemberFilters, showOnlyWithExpectedDecision]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
         if (sortConfig !== null) {
             sortableItems.sort((a, b) => {
+                if (sortConfig.key === 'nearestExpectedDecisionDate') {
+                    const dateA = getNearestExpectedDecisionDate(a);
+                    const dateB = getNearestExpectedDecisionDate(b);
+                    // Candidates with no 決定見込み日 set always sort last, regardless of direction —
+                    // "unknown" isn't meaningfully earlier or later than a known date.
+                    if (!dateA && !dateB) return 0;
+                    if (!dateA) return 1;
+                    if (!dateB) return -1;
+                    return sortConfig.direction === 'asc' ? dateA.localeCompare(dateB) : dateB.localeCompare(dateA);
+                }
+
                 const valA = a[sortConfig.key];
                 const valB = b[sortConfig.key];
 
@@ -4304,7 +4356,7 @@ const CandidatePipelineView: React.FC<{
         return sortableItems;
     }, [filteredCandidates, sortConfig]);
 
-    const requestSort = (key: keyof Candidate) => {
+    const requestSort = (key: PipelineSortKey) => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
             direction = 'desc';
@@ -4319,16 +4371,17 @@ const CandidatePipelineView: React.FC<{
     };
 
 
-    const getSortIndicator = (key: keyof Candidate) => {
+    const getSortIndicator = (key: PipelineSortKey) => {
         if (!sortConfig || sortConfig.key !== key) return '';
         return sortConfig.direction === 'asc' ? ' ▲' : ' ▼';
     };
 
-    const sortOptions: { key: keyof Candidate, label: string }[] = [
+    const sortOptions: { key: PipelineSortKey, label: string }[] = [
       { key: 'createdAt', label: '登録日' },
       { key: 'name', label: '氏名' },
       { key: 'currentCompany', label: '現職企業名' },
       { key: 'currentSalary', label: '現職年収' },
+      { key: 'nearestExpectedDecisionDate', label: '決定見込み日' },
     ];
 
     return (
@@ -4547,6 +4600,15 @@ const CandidatePipelineView: React.FC<{
                     />
                     <label htmlFor="show-hidden-candidates">非表示の候補者を表示</label>
                 </div>
+                <div className="single-checkbox">
+                    <input
+                        type="checkbox"
+                        id="show-only-with-expected-decision"
+                        checked={showOnlyWithExpectedDecision}
+                        onChange={e => setShowOnlyWithExpectedDecision(e.target.checked)}
+                    />
+                    <label htmlFor="show-only-with-expected-decision">決定見込み日が入力された候補者のみ表示</label>
+                </div>
             </div>
 
             {scope === 'team' && teamMemberOptions.length > 0 && (
@@ -4729,6 +4791,10 @@ const CandidatePipelineView: React.FC<{
                                                           <div className="detail-card-item">
                                                               <span>選考予定日:</span>
                                                               <span>{app.scheduledDate ? new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                                                          </div>
+                                                          <div className="detail-card-item">
+                                                              <span>決定見込み日:</span>
+                                                              <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
                                                           </div>
                                                           <div className="detail-card-item">
                                                               <span>内定確度 / 入社確度:</span>
