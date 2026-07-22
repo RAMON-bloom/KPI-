@@ -20,6 +20,7 @@ import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasP
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
+import { createPipelineTask, updatePipelineTask, deletePipelineTask, GoogleTasksPermissionError } from './services/googleTasks';
 
 ChartJS.register(
   CategoryScale,
@@ -327,6 +328,14 @@ interface UserData {
   dailyKpiTargets: Record<KpiKey, number>;
   candidates: Candidate[];
   displayName?: string;
+  // Opt-in: mirrors this user's own パイプラインカレンダー entries (applications' scheduledDate)
+  // into their own Google Tasks default list. googleTaskIdsByApplicationId tracks the Google-
+  // assigned task ID per CompanyApplication.id so edits update the same task instead of
+  // creating duplicates — kept as a separate map (not a field on CompanyApplication itself) so
+  // it survives untouched even through form code that rebuilds application objects field-by-
+  // field and would otherwise silently drop an unrecognized property.
+  googleTasksSyncEnabled?: boolean;
+  googleTaskIdsByApplicationId?: Record<string, string>;
 }
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
@@ -6726,12 +6735,132 @@ const App: React.FC = () => {
     }
   };
 
+  // Mirrors googleTaskIdsByApplicationId — kept in sync with state via the effect below, but
+  // also written to directly (synchronously) inside the sync queue itself, so a second sync
+  // queued right after the first always sees the first one's freshly-created task IDs instead
+  // of a stale pre-sync snapshot (React's own state update wouldn't land in time otherwise).
+  const googleTaskIdsRef = useRef<Record<string, string>>(currentUserData?.googleTaskIdsByApplicationId || {});
+  useEffect(() => {
+    googleTaskIdsRef.current = currentUserData?.googleTaskIdsByApplicationId || {};
+  }, [currentUserData?.googleTaskIdsByApplicationId]);
+  const tasksSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [tasksSyncStatus, setTasksSyncStatus] = useState<'idle' | 'loading' | 'error' | 'needs-reauth'>('idle');
+  const [tasksSyncMessage, setTasksSyncMessage] = useState('');
+
+  const buildPipelineTaskContent = (candidate: Candidate, app: CompanyApplication) => ({
+    title: `${candidate.name}（${app.companyName}）`,
+    notes: `ステージ: ${app.stage}${app.nextAction ? ` / 次のアクション: ${app.nextAction}` : ''}`,
+    dueDateISO: app.scheduledDate!,
+  });
+
+  /**
+   * Diffs one candidate's applications (prev vs next; next=null means the candidate itself was
+   * removed/hidden, so every one of its tracked tasks should be deleted) against the
+   * already-synced task IDs, and pushes only the create/update/delete calls actually needed.
+   * Chained through tasksSyncQueueRef so two rapid edits never race into duplicate task
+   * creation for the same application.
+   */
+  const queueCandidateTasksSync = (prevCandidate: Candidate | undefined, nextCandidate: Candidate | null) => {
+    if (!currentUserData?.googleTasksSyncEnabled) return;
+    const session = getCurrentSession();
+    if (!session) return;
+    const accessToken = session.accessToken;
+    const prevApps = prevCandidate?.applications || [];
+    const nextApps = nextCandidate?.applications || [];
+    const nextAppById = new Map(nextApps.map(a => [a.id, a]));
+    const removedAppIds = prevApps.filter(a => !nextAppById.has(a.id)).map(a => a.id);
+    const prevAppById = new Map(prevApps.map(a => [a.id, a]));
+
+    tasksSyncQueueRef.current = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
+      const idMap = { ...googleTaskIdsRef.current };
+      let changed = false;
+      try {
+        setTasksSyncStatus('loading');
+        for (const appId of removedAppIds) {
+          const taskId = idMap[appId];
+          if (taskId) {
+            await deletePipelineTask(accessToken, taskId);
+            delete idMap[appId];
+            changed = true;
+          }
+        }
+        if (nextCandidate) {
+          for (const app of nextApps) {
+            const existingTaskId = idMap[app.id];
+            if (!app.scheduledDate) {
+              if (existingTaskId) {
+                await deletePipelineTask(accessToken, existingTaskId);
+                delete idMap[app.id];
+                changed = true;
+              }
+              continue;
+            }
+            const prevApp = prevAppById.get(app.id);
+            const isUnchanged = prevApp && existingTaskId
+              && prevApp.scheduledDate === app.scheduledDate
+              && prevApp.companyName === app.companyName
+              && prevApp.stage === app.stage
+              && prevApp.nextAction === app.nextAction;
+            if (isUnchanged) continue;
+            const content = buildPipelineTaskContent(nextCandidate, app);
+            if (existingTaskId) {
+              const taskId = await updatePipelineTask(accessToken, existingTaskId, content);
+              if (taskId !== existingTaskId) { idMap[app.id] = taskId; changed = true; }
+            } else {
+              idMap[app.id] = await createPipelineTask(accessToken, content);
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          googleTaskIdsRef.current = idMap;
+          setCurrentUserData(prev => (prev ? { ...prev, googleTaskIdsByApplicationId: idMap } : prev));
+        }
+        setTasksSyncStatus('idle');
+        setTasksSyncMessage('');
+      } catch (error) {
+        console.error('Failed to sync pipeline entries to Google Tasks', error);
+        if (error instanceof GoogleTasksPermissionError) {
+          setTasksSyncStatus('needs-reauth');
+          setTasksSyncMessage('Googleタスクの利用権限がまだ許可されていません。下のボタンから許可してください。');
+        } else {
+          setTasksSyncStatus('error');
+          setTasksSyncMessage(error instanceof Error ? error.message : 'Googleタスクへの同期に失敗しました。');
+        }
+      }
+    });
+  };
+
+  const handleToggleGoogleTasksSync = () => {
+    setCurrentUserData(prev => (prev ? { ...prev, googleTasksSyncEnabled: !prev.googleTasksSyncEnabled } : prev));
+  };
+
+  // Manual backfill/resync — loops every visible candidate as both "prev" and "next" for the
+  // same diff logic above, so already-synced tasks are left alone (isUnchanged) while anything
+  // scheduled before sync was ever turned on gets created for the first time.
+  const handleSyncAllTasksNow = () => {
+    (currentUserData?.candidates || []).filter(c => !c.isHidden).forEach(c => queueCandidateTasksSync(c, c));
+  };
+
+  const handleReauthorizeTasks = async () => {
+    setTasksSyncStatus('loading');
+    setTasksSyncMessage('');
+    try {
+      await reauthorizeWithConsent();
+      handleSyncAllTasksNow();
+    } catch (err) {
+      setTasksSyncStatus('error');
+      setTasksSyncMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+    }
+  };
+
   const handleSaveCandidate = (candidateData: Candidate) => {
     // candidateData may be a copy tagged with ownerEmail/ownerLabel (e.g. edited while viewing
     // an aggregate pipeline scope on one's own candidate) — those tags are presentation-only and
     // must never be written into this account's own stored candidates. See normalize()'s
     // same-shaped strip above for why.
     const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
+    const prevCandidate = currentUserData?.candidates.find(c => c.id === sanitized.id);
     setCurrentUserData(prevData => {
         if (!prevData) return null;
         const existing = prevData.candidates.find(c => c.id === sanitized.id);
@@ -6743,16 +6872,24 @@ const App: React.FC = () => {
         }
         return { ...prevData, candidates: updatedCandidates };
     });
+    queueCandidateTasksSync(prevCandidate, sanitized);
   };
 
   const handleToggleCandidateVisibility = (candidateId: string) => {
+      const target = currentUserData?.candidates.find(c => c.id === candidateId);
       setCurrentUserData(prevData => {
           if (!prevData) return null;
-          const updatedCandidates = prevData.candidates.map(c => 
+          const updatedCandidates = prevData.candidates.map(c =>
               c.id === candidateId ? { ...c, isHidden: !c.isHidden } : c
           );
           return { ...prevData, candidates: updatedCandidates };
       });
+      // Hiding archives the candidate — clear any Google Tasks tied to its applications too, so
+      // an inactive pipeline entry doesn't keep showing up as an open task. Un-hiding doesn't
+      // recreate them automatically; the next edit that touches the candidate will.
+      if (target && !target.isHidden) {
+          queueCandidateTasksSync(target, null);
+      }
   };
 
     // Extract data for child components from the single source of truth
@@ -7869,6 +8006,39 @@ const App: React.FC = () => {
           </div>
         )}
         {view === 'pipeline' && (
+          <>
+            <div className="google-tasks-sync-bar">
+              <label className="google-tasks-sync-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!currentUserData?.googleTasksSyncEnabled}
+                  onChange={handleToggleGoogleTasksSync}
+                />
+                自分の面談予定をGoogleタスクに同期する
+              </label>
+              {currentUserData?.googleTasksSyncEnabled && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
+                  <button
+                    type="button"
+                    onClick={handleSyncAllTasksNow}
+                    disabled={tasksSyncStatus === 'loading'}
+                    className="secondary-action-button"
+                  >
+                    {tasksSyncStatus === 'loading' ? '同期中...' : '今すぐ同期'}
+                  </button>
+                  {tasksSyncStatus === 'needs-reauth' && (
+                    <button type="button" onClick={handleReauthorizeTasks} className="secondary-action-button">
+                      Googleタスクの利用を許可
+                    </button>
+                  )}
+                  {tasksSyncMessage && (
+                    <span className={`google-tasks-sync-message ${tasksSyncStatus === 'error' || tasksSyncStatus === 'needs-reauth' ? 'is-error' : ''}`}>
+                      {tasksSyncMessage}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
             <CandidatePipelineView
                 candidates={pipelineCandidates}
                 allMedia={allMedia}
@@ -7885,6 +8055,7 @@ const App: React.FC = () => {
                 onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
             />
+          </>
         )}
       </main>
     </div>

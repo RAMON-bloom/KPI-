@@ -21,7 +21,10 @@ const ALLOWED_DOMAIN = 'bloom-firm.com';
 // kpi-manager-teams.json etc. becomes actionable for anyone holding it), at the cost of
 // granting this app read/write access to each signed-in user's entire Drive, not just files
 // it created — a real scope increase, accepted deliberately for the multi-editor teams feature.
-const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly';
+// tasks: lets a user who opts in push their own パイプラインカレンダー entries to their own
+// Google Tasks list (see services/googleTasks.ts) — another real scope increase, same
+// re-consent story as the Gmail addition above (existing sessions need reauthorizeWithConsent).
+const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/tasks';
 
 declare global {
   interface Window {

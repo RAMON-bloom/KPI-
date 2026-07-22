@@ -123,6 +123,34 @@ button:disabled {
   color: #b02a37;
 }
 
+.google-tasks-sync-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+.google-tasks-sync-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+.google-tasks-sync-message {
+  font-size: 0.85rem;
+  color: var(--text-muted-color);
+}
+.google-tasks-sync-message.is-error {
+  color: #b02a37;
+}
+
 .bulk-gmail-date-range {
   display: flex;
   flex-wrap: wrap;
