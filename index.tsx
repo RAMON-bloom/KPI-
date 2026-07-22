@@ -355,10 +355,16 @@ interface Team {
   createdAt: string;
 }
 
+// BCA事業部 is split into two departments — every member belongs to one of these two (or is
+// unassigned); "BCA" itself isn't a real assignment, just the header switcher's "show both
+// combined" option.
+type Department = 'F+' | 'AC';
+
 interface TeamsConfig {
   schemaVersion: number;
   teams: Team[];
   authorizedEditorEmails?: string[];
+  memberDepartments?: Record<string, Department>;
 }
 
 const getStartOfWeek = (date: Date): Date => {
@@ -1943,6 +1949,7 @@ const TeamsModal: React.FC<{
     isAdmin: boolean;
     authorizedEditorEmails: string[];
     userOptions: { email: string; label: string }[];
+    memberDepartments: Record<string, Department>;
     onClose: () => void;
     onCreateTeam: (name: string) => void;
     onRenameTeam: (teamId: string, name: string) => void;
@@ -1951,7 +1958,8 @@ const TeamsModal: React.FC<{
     onRemoveMember: (teamId: string, email: string) => void;
     onGrantEditor: (email: string) => void;
     onRevokeEditor: (email: string) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor }) => {
+    onSetMemberDepartment: (email: string, department: Department | null) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -2044,6 +2052,37 @@ const TeamsModal: React.FC<{
                                 />
                                 <button type="submit" className="submit-button" disabled={!newEditorEmail.trim()}>権限を付与</button>
                             </form>
+                            <hr style={{ margin: '1rem 0' }} />
+                        </div>
+                    )}
+                    {isEditable && (
+                        <div className="teams-permission-section">
+                            <h4 className="sub-section-title">メンバーの所属部署</h4>
+                            <p className="modal-description">
+                                各メンバーがF+（Firm+）・AC（AssetCareer）のどちらに所属するかを設定します。ヘッダーの事業部切り替えで表示が絞り込まれます。
+                            </p>
+                            {userOptions.length === 0 ? (
+                                <p className="no-data-message">まだユーザーデータがありません。</p>
+                            ) : (
+                                <ul className="user-management-list">
+                                    {userOptions.map(u => (
+                                        <li key={u.email} className="user-management-item">
+                                            <span className="user-management-name">
+                                                {u.label}
+                                                {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
+                                            </span>
+                                            <select
+                                                value={memberDepartments[u.email] || ''}
+                                                onChange={(e) => onSetMemberDepartment(u.email, (e.target.value || null) as Department | null)}
+                                            >
+                                                <option value="">未設定</option>
+                                                <option value="F+">Firm+</option>
+                                                <option value="AC">AssetCareer</option>
+                                            </select>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
                             <hr style={{ margin: '1rem 0' }} />
                         </div>
                     )}
@@ -5879,11 +5918,16 @@ const App: React.FC = () => {
   const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline'>('personal_kpi');
   const [allUsersData, setAllUsersData] = useState<Record<string, UserData>>({});
 
+  // BCA事業部 header switcher — 'BCA' shows F+ and AC combined (not a real assignment of its
+  // own); filters which members' data 全ユーザー/チーム別/パイプライン(全ユーザー) show.
+  const [selectedDivision, setSelectedDivision] = useState<'BCA' | Department>('BCA');
+
   // Teams state
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamsDriveFileId, setTeamsDriveFileId] = useState<string | null>(null);
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
+  const [memberDepartments, setMemberDepartments] = useState<Record<string, Department>>({});
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
@@ -6180,17 +6224,14 @@ const App: React.FC = () => {
     fetchAllUsersData();
   }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen]);
 
-  // Load the shared teams config when opening the team-filtered view, the pipeline's team
-  // scope, or the Teams management modal.
-  // Computed as a memoized boolean (rather than inlined in the effect) specifically so the
-  // effect's dependency below is this boolean's VALUE, not the raw view/modal/scope state —
-  // otherwise, e.g., opening then closing チーム管理 while already on the team_kpi tab re-fires
-  // the effect on both transitions even though `needsTeams` was already true throughout, and
-  // that spurious refetch could land after a just-created team's local update but before its
-  // Drive write finished, overwriting the newly created team back out of view.
-  const needsTeams = view === 'team_kpi' || isTeamsModalOpen || (view === 'pipeline' && pipelineScope === 'team');
+  // Loads unconditionally after sign-in (like the media config below), not gated by
+  // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
+  // is visible everywhere, so this can no longer wait until the user happens to open Teams-
+  // related UI. Firing once per sign-in (deps are just identity/init, not view/modal state)
+  // also sidesteps the earlier redundant-refetch race this effect used to have to guard against
+  // with a memoized "needsTeams" boolean.
   useEffect(() => {
-    if (!currentIdentity || !isInitialized || !needsTeams) return;
+    if (!currentIdentity || !isInitialized) return;
     let cancelled = false;
     (async () => {
       try {
@@ -6200,12 +6241,13 @@ const App: React.FC = () => {
         setTeamsDriveFileId(result.driveFileId);
         setTeamsOwnerEmail(result.ownerEmail);
         setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
+        setMemberDepartments(result.data?.memberDepartments || {});
       } catch (error) {
         console.error('Failed to load teams config from Drive', error);
       }
     })();
     return () => { cancelled = true; };
-  }, [currentIdentity, isInitialized, needsTeams]);
+  }, [currentIdentity, isInitialized]);
 
   // Only TEAMS_ADMIN_EMAIL and whoever they've explicitly granted access to (via TeamsModal's
   // permission section) can create/edit teams — file ownership no longer determines this, since
@@ -6400,6 +6442,14 @@ const App: React.FC = () => {
     return { ...allUsersData, [currentIdentity.email]: currentUserData };
   }, [allUsersData, currentIdentity, currentUserData]);
 
+  // Division-switcher filter for 全ユーザー/チーム別/パイプライン(全ユーザー) — 'BCA' (the
+  // default) shows everyone combined; selecting F+ or AC narrows to only members explicitly
+  // assigned to that department (unassigned members are hidden once a specific one is picked).
+  const isEmailInSelectedDivision = useCallback((email: string) => {
+    if (selectedDivision === 'BCA') return true;
+    return memberDepartments[email] === selectedDivision;
+  }, [selectedDivision, memberDepartments]);
+
   // A ref (not just React state) tracking the teams-config file id, kept in sync with
   // teamsDriveFileId below. persistTeams reads/writes this ref directly rather than the state
   // value, and chains writes through teamsWriteQueueRef — otherwise, two team mutations fired
@@ -6411,14 +6461,24 @@ const App: React.FC = () => {
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  const persistTeamsConfig = (updatedTeams: Team[], updatedAuthorizedEditors: string[]) => {
+  const persistTeamsConfig = (
+    updatedTeams: Team[],
+    updatedAuthorizedEditors: string[],
+    updatedDepartments: Record<string, Department>
+  ) => {
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
+    setMemberDepartments(updatedDepartments);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
-        const payload: TeamsConfig = { schemaVersion: 1, teams: updatedTeams, authorizedEditorEmails: updatedAuthorizedEditors };
+        const payload: TeamsConfig = {
+          schemaVersion: 1,
+          teams: updatedTeams,
+          authorizedEditorEmails: updatedAuthorizedEditors,
+          memberDepartments: updatedDepartments,
+        };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
         setTeamsDriveFileId(newFileId);
@@ -6430,15 +6490,29 @@ const App: React.FC = () => {
     });
   };
 
-  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors);
+  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors, memberDepartments);
 
   const handleGrantTeamsEditor = (email: string) => {
     if (teamsAuthorizedEditors.includes(email)) return;
-    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email]);
+    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email], memberDepartments);
   };
 
   const handleRevokeTeamsEditor = (email: string) => {
-    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email));
+    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email), memberDepartments);
+  };
+
+  // Team editors (admin + authorized) can set anyone's department from チーム管理.
+  const handleSetMemberDepartment = (email: string, department: Department | null) => {
+    const updated = { ...memberDepartments };
+    if (department) updated[email] = department; else delete updated[email];
+    persistTeamsConfig(teams, teamsAuthorizedEditors, updated);
+  };
+
+  // Anyone signed in can set their OWN department, regardless of team-editor permission — this
+  // writes to the same shared config, but only ever touches this one user's own entry in it.
+  const handleSetOwnDepartment = (department: Department | null) => {
+    if (!currentIdentity) return;
+    handleSetMemberDepartment(currentIdentity.email, department);
   };
 
   const handleCreateTeam = (name: string) => {
@@ -6699,7 +6773,7 @@ const App: React.FC = () => {
         ? (teams.find(t => t.id === pipelineSelectedTeamId)?.memberEmails || [])
         : pipelineScope === 'user'
         ? (pipelineSelectedUserEmail ? [pipelineSelectedUserEmail] : [])
-        : Object.keys(displayedAllUsersData);
+        : Object.keys(displayedAllUsersData).filter(isEmailInSelectedDivision);
       return emailsInScope.flatMap(email => {
         const resolved = resolveUserDataEntry(displayedAllUsersData, email);
         if (!resolved) return [];
@@ -6707,7 +6781,7 @@ const App: React.FC = () => {
         const ownerLabel = data.displayName || ownerEmail;
         return (data.candidates || []).map(c => ({ ...c, ownerEmail, ownerLabel }));
       });
-    }, [pipelineScope, pipelineSelectedTeamId, pipelineSelectedUserEmail, teams, displayedAllUsersData, candidates]);
+    }, [pipelineScope, pipelineSelectedTeamId, pipelineSelectedUserEmail, teams, displayedAllUsersData, candidates, isEmailInSelectedDivision]);
 
     // Options for the pipeline's per-user selector, sorted by display name.
     const pipelineUserOptions = useMemo(() => {
@@ -6718,9 +6792,10 @@ const App: React.FC = () => {
 
     // The 全ユーザー tab's ad-hoc comparison selection — an empty selection means "no filter".
     const comparisonUsers = useMemo(() => {
-      if (comparisonUserEmails.length === 0) return users;
-      return users.filter(u => comparisonUserEmails.includes(u));
-    }, [users, comparisonUserEmails]);
+      const inDivision = users.filter(isEmailInSelectedDivision);
+      if (comparisonUserEmails.length === 0) return inDivision;
+      return inDivision.filter(u => comparisonUserEmails.includes(u));
+    }, [users, comparisonUserEmails, isEmailInSelectedDivision]);
 
     const toggleComparisonUser = (email: string) => {
       setComparisonUserEmails(prev =>
@@ -6813,8 +6888,8 @@ const App: React.FC = () => {
     if (!selectedTeamId) return [];
     const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
     const resolved = memberEmails.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email);
-    return Array.from(new Set(resolved));
-  }, [teams, selectedTeamId, displayedAllUsersData]);
+    return Array.from(new Set(resolved)).filter(isEmailInSelectedDivision);
+  }, [teams, selectedTeamId, displayedAllUsersData, isEmailInSelectedDivision]);
 
   const dayOfWeekReplyRateData = useMemo(() => {
     const days = ['日', '月', '火', '水', '木', '金', '土'];
@@ -6999,6 +7074,7 @@ const App: React.FC = () => {
           isAdmin={isTeamsAdmin}
           authorizedEditorEmails={teamsAuthorizedEditors}
           userOptions={pipelineUserOptions}
+          memberDepartments={memberDepartments}
           onClose={() => setIsTeamsModalOpen(false)}
           onCreateTeam={handleCreateTeam}
           onRenameTeam={handleRenameTeam}
@@ -7007,6 +7083,7 @@ const App: React.FC = () => {
           onRemoveMember={handleRemoveTeamMember}
           onGrantEditor={handleGrantTeamsEditor}
           onRevokeEditor={handleRevokeTeamsEditor}
+          onSetMemberDepartment={handleSetMemberDepartment}
         />
       )}
       {isMediaModalOpen && (
@@ -7061,6 +7138,11 @@ const App: React.FC = () => {
       )}
       <header className="app-main-header">
         <h1 className="app-title">KPI管理くん</h1>
+        <div className="division-switcher" role="group" aria-label="事業部切り替え">
+          <button onClick={() => setSelectedDivision('BCA')} disabled={selectedDivision === 'BCA'} title="F+とACを合わせた全体表示">BCA</button>
+          <button onClick={() => setSelectedDivision('F+')} disabled={selectedDivision === 'F+'}>F+</button>
+          <button onClick={() => setSelectedDivision('AC')} disabled={selectedDivision === 'AC'}>AC</button>
+        </div>
         <div className="header-controls">
           <div className="view-switcher">
             <button onClick={() => setView('personal_kpi')} disabled={view === 'personal_kpi'}>個人実績</button>
@@ -7114,6 +7196,18 @@ const App: React.FC = () => {
                   {currentUserData?.displayName || currentIdentity.name} ✎
                 </span>
               )
+            )}
+            {currentIdentity && (
+              <select
+                className="own-department-select"
+                value={memberDepartments[currentIdentity.email] || ''}
+                onChange={(e) => handleSetOwnDepartment((e.target.value || null) as Department | null)}
+                title="自分の所属部署"
+              >
+                <option value="">所属未設定</option>
+                <option value="F+">Firm+</option>
+                <option value="AC">AssetCareer</option>
+              </select>
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
