@@ -4399,6 +4399,15 @@ const CandidatePipelineView: React.FC<{
         onSave({ ...rest, isHidden: false });
     };
 
+    // "非表示に登録" from the 掘り起しリスト — clears the revival entry but stays hidden,
+    // moving the candidate into the plain 非表示（その他） bucket instead of resuming active
+    // pursuit or lingering on the revival list.
+    const handleMoveRevivalToHidden = (candidate: Candidate) => {
+        if (!isOwn(candidate)) return;
+        const { revival, ...rest } = candidate;
+        onSave({ ...rest, isHidden: true });
+    };
+
     const handleExportCSV = () => {
         const dataToExport = candidates.filter(c => !c.isHidden);
         
@@ -4930,6 +4939,7 @@ const CandidatePipelineView: React.FC<{
                                                 <>
                                                     <button onClick={() => handleOpenRevivalModal(c)} className="edit-user-button">編集</button>
                                                     <button onClick={() => handleRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
+                                                    <button onClick={() => handleMoveRevivalToHidden(c)} className="delete-user-button">非表示に登録</button>
                                                 </>
                                             ) : (
                                                 <>
@@ -6969,12 +6979,23 @@ const App: React.FC = () => {
     dueDateISO: app.scheduledDate!,
   });
 
+  // Unlike application tasks, a revival reminder is meant to stay even while the candidate is
+  // hidden (that's the whole point of 掘り起しリスト) — so it's tracked and diffed separately
+  // from the "hidden candidates lose their tasks" rule applied to applications below, under its
+  // own key in the same idMap (`revival:${candidateId}`, never collides with a real application
+  // id's format).
+  const buildRevivalTaskContent = (candidate: Candidate, revival: NonNullable<Candidate['revival']>) => ({
+    title: `掘り起し: ${candidate.name}${revival.nextAction ? ` / ${revival.nextAction}` : ''}`,
+    notes: revival.nextAction || undefined,
+    dueDateISO: revival.nextActionDate,
+  });
+
   /**
-   * Diffs one candidate's applications (prev vs next; next=null means the candidate itself was
-   * removed/hidden, so every one of its tracked tasks should be deleted) against the
-   * already-synced task IDs, and pushes only the create/update/delete calls actually needed.
-   * Chained through tasksSyncQueueRef so two rapid edits never race into duplicate task
-   * creation for the same application.
+   * Diffs one candidate's applications and 掘り起しリスト reminder (prev vs next; next=null
+   * means the candidate itself was removed, so every one of its tracked tasks should be
+   * deleted) against the already-synced task IDs, and pushes only the create/update/delete
+   * calls actually needed. Chained through tasksSyncQueueRef so two rapid edits never race into
+   * duplicate task creation for the same application/reminder.
    */
   const queueCandidateTasksSync = (prevCandidate: Candidate | undefined, nextCandidate: Candidate | null) => {
     const session = getCurrentSession();
@@ -6984,12 +7005,17 @@ const App: React.FC = () => {
     // hides) is archived out of active pursuit — treat it the same as a removed candidate here
     // so its applications' reminders don't linger as open Google Tasks. Un-hiding (either
     // toggle) conversely lets any still-scheduled applications recreate their tasks normally.
+    // This does NOT apply to the revival reminder itself, handled separately below.
     const effectiveNext = nextCandidate && !nextCandidate.isHidden ? nextCandidate : null;
     const prevApps = prevCandidate?.applications || [];
     const nextApps = effectiveNext?.applications || [];
     const nextAppById = new Map(nextApps.map(a => [a.id, a]));
     const removedAppIds = prevApps.filter(a => !nextAppById.has(a.id)).map(a => a.id);
     const prevAppById = new Map(prevApps.map(a => [a.id, a]));
+    const candidateId = prevCandidate?.id ?? nextCandidate?.id;
+    const revivalTaskKey = candidateId ? `revival:${candidateId}` : null;
+    const prevRevival = prevCandidate?.revival;
+    const nextRevival = nextCandidate?.revival;
 
     tasksSyncQueueRef.current = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
       const idMap = { ...googleTaskIdsRef.current };
@@ -7033,6 +7059,30 @@ const App: React.FC = () => {
             }
           }
         }
+        if (revivalTaskKey) {
+          const existingRevivalTaskId = idMap[revivalTaskKey];
+          if (!nextRevival) {
+            if (existingRevivalTaskId) {
+              await deletePipelineTask(accessToken, existingRevivalTaskId);
+              delete idMap[revivalTaskKey];
+              changed = true;
+            }
+          } else {
+            const isRevivalUnchanged = prevRevival && existingRevivalTaskId
+              && prevRevival.nextAction === nextRevival.nextAction
+              && prevRevival.nextActionDate === nextRevival.nextActionDate;
+            if (!isRevivalUnchanged) {
+              const content = buildRevivalTaskContent(nextCandidate!, nextRevival);
+              if (existingRevivalTaskId) {
+                const taskId = await updatePipelineTask(accessToken, existingRevivalTaskId, content);
+                if (taskId !== existingRevivalTaskId) { idMap[revivalTaskKey] = taskId; changed = true; }
+              } else {
+                idMap[revivalTaskKey] = await createPipelineTask(accessToken, content);
+                changed = true;
+              }
+            }
+          }
+        }
         if (changed) {
           googleTaskIdsRef.current = idMap;
           setCurrentUserData(prev => (prev ? { ...prev, googleTaskIdsByApplicationId: idMap } : prev));
@@ -7052,12 +7102,13 @@ const App: React.FC = () => {
     });
   };
 
-  // Manual backfill/resync — loops every visible candidate as both "prev" and "next" for the
-  // same diff logic above, so already-synced tasks are left alone (isUnchanged) while anything
-  // scheduled before this feature existed (or before permission was granted) gets created for
-  // the first time.
+  // Manual backfill/resync — loops every visible candidate, plus every 掘り起しリスト entry
+  // (hidden, but still needs its reminder task), as both "prev" and "next" for the same diff
+  // logic above, so already-synced tasks are left alone (isUnchanged) while anything scheduled
+  // before this feature existed (or before permission was granted) gets created for the first
+  // time.
   const handleSyncAllTasksNow = () => {
-    (currentUserData?.candidates || []).filter(c => !c.isHidden).forEach(c => queueCandidateTasksSync(c, c));
+    (currentUserData?.candidates || []).filter(c => !c.isHidden || c.revival).forEach(c => queueCandidateTasksSync(c, c));
   };
 
   const handleReauthorizeTasks = async () => {
