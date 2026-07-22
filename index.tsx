@@ -6790,6 +6790,15 @@ const App: React.FC = () => {
         .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
     }, [displayedAllUsersData]);
 
+    // Same list, narrowed to the header's selected division — used for the 全ユーザー tab's
+    // 比較するユーザー picker, so the picker itself (not just the resulting totals) reflects
+    // the current BCA/F+/AC scope. pipelineUserOptions itself stays unfiltered for contexts that
+    // need every known user regardless of division (TeamsModal's department assignment, the
+    // pipeline's single-user lookup).
+    const divisionScopedUserOptions = useMemo(() => {
+      return pipelineUserOptions.filter(u => isEmailInSelectedDivision(u.email));
+    }, [pipelineUserOptions, isEmailInSelectedDivision]);
+
     // The 全ユーザー tab's ad-hoc comparison selection — an empty selection means "no filter".
     const comparisonUsers = useMemo(() => {
       const inDivision = users.filter(isEmailInSelectedDivision);
@@ -7633,12 +7642,12 @@ const App: React.FC = () => {
                 <div className="comparison-user-selector-header">
                   <span>比較するユーザーを選択（未選択の場合は全員を表示）</span>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button onClick={() => setComparisonUserEmails(pipelineUserOptions.map(u => u.email))} className="secondary-action-button">全て選択</button>
+                    <button onClick={() => setComparisonUserEmails(divisionScopedUserOptions.map(u => u.email))} className="secondary-action-button">全て選択</button>
                     <button onClick={() => setComparisonUserEmails([])} className="secondary-action-button">選択をクリア</button>
                   </div>
                 </div>
                 <div className="comparison-user-checkbox-list">
-                  {pipelineUserOptions.map(u => (
+                  {divisionScopedUserOptions.map(u => (
                     <label key={u.email} className="comparison-user-checkbox">
                       <input
                         type="checkbox"
