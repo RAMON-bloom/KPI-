@@ -7061,18 +7061,30 @@ const App: React.FC = () => {
     tasksSyncQueueRef.current = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
       const idMap = { ...googleTaskIdsRef.current };
       let changed = false;
-      try {
-        setTasksSyncStatus('loading');
-        for (const appId of removedAppIds) {
+      // A failure partway through this candidate's items (permission lost mid-batch, one flaky
+      // request, etc.) must NOT discard the idMap entries already written for items that
+      // succeeded earlier in this same run — losing a just-created task's id here is exactly
+      // what causes a duplicate on the next sync (nothing left to recognize it by, so it gets
+      // created again on top of the still-existing one on Google's side). So every item below
+      // runs in its own try/catch, and idMap is persisted once at the end regardless of whether
+      // a later item failed.
+      let firstError: unknown = null;
+      setTasksSyncStatus('loading');
+      for (const appId of removedAppIds) {
+        try {
           const taskId = idMap[appId];
           if (taskId) {
             await deletePipelineTask(accessToken, taskId);
             delete idMap[appId];
             changed = true;
           }
+        } catch (error) {
+          firstError = firstError ?? error;
         }
-        if (effectiveNext) {
-          for (const app of nextApps) {
+      }
+      if (effectiveNext) {
+        for (const app of nextApps) {
+          try {
             const existingTaskId = idMap[app.id];
             if (!app.scheduledDate) {
               if (existingTaskId) {
@@ -7098,9 +7110,13 @@ const App: React.FC = () => {
               idMap[app.id] = await createPipelineTask(accessToken, content);
               changed = true;
             }
+          } catch (error) {
+            firstError = firstError ?? error;
           }
         }
-        if (revivalTaskKey) {
+      }
+      if (revivalTaskKey) {
+        try {
           const existingRevivalTaskId = idMap[revivalTaskKey];
           if (!nextRevival) {
             if (existingRevivalTaskId) {
@@ -7123,22 +7139,26 @@ const App: React.FC = () => {
               }
             }
           }
+        } catch (error) {
+          firstError = firstError ?? error;
         }
-        if (changed) {
-          googleTaskIdsRef.current = idMap;
-          setCurrentUserData(prev => (prev ? { ...prev, googleTaskIdsByApplicationId: idMap } : prev));
-        }
-        setTasksSyncStatus('idle');
-        setTasksSyncMessage('');
-      } catch (error) {
-        console.error('Failed to sync pipeline entries to Google Tasks', error);
-        if (error instanceof GoogleTasksPermissionError) {
+      }
+      if (changed) {
+        googleTaskIdsRef.current = idMap;
+        setCurrentUserData(prev => (prev ? { ...prev, googleTaskIdsByApplicationId: idMap } : prev));
+      }
+      if (firstError) {
+        console.error('Failed to sync pipeline entries to Google Tasks', firstError);
+        if (firstError instanceof GoogleTasksPermissionError) {
           setTasksSyncStatus('needs-reauth');
           setTasksSyncMessage('Googleタスクの利用権限がまだ許可されていません。下のボタンから許可してください。');
         } else {
           setTasksSyncStatus('error');
-          setTasksSyncMessage(error instanceof Error ? error.message : 'Googleタスクへの同期に失敗しました。');
+          setTasksSyncMessage(firstError instanceof Error ? firstError.message : 'Googleタスクへの同期に失敗しました。');
         }
+      } else {
+        setTasksSyncStatus('idle');
+        setTasksSyncMessage('');
       }
     });
   };
