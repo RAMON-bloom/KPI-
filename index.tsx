@@ -345,6 +345,12 @@ interface UserData {
   // it survives untouched even through form code that rebuilds application objects field-by-
   // field and would otherwise silently drop an unrecognized property.
   googleTaskIdsByApplicationId?: Record<string, string>;
+  // This user's own preferred default open/closed state for the 全ユーザー/チーム別進捗
+  // dashboard's collapsible sections (AllUsersDashboard — shared by both tabs). Captured via
+  // "現在の開閉状態をデフォルトとして保存", not edited directly; applied once right after
+  // sign-in (see the seeding effect near sectionVisibility) so later in-session toggles aren't
+  // clobbered by re-applying this same saved value on every unrelated data change.
+  allUsersSectionDefaults?: Partial<Record<Extract<SectionVisibilityKeys, `allUsers${string}`>, boolean>>;
 }
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
@@ -5491,9 +5497,16 @@ const AllUsersDashboard: React.FC<{
   onNextWeek: () => void;
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean; monthlyTrend: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
+  onSaveSectionDefaults: () => void;
   showGrossProfit?: boolean;
   periodOverride?: { start: Date; end: Date } | null;
-}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, showGrossProfit = true, periodOverride = null }) => {
+}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true, periodOverride = null }) => {
+  const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
+  const handleSaveSectionDefaultsClick = () => {
+    onSaveSectionDefaults();
+    setJustSavedSectionDefaults(true);
+    setTimeout(() => setJustSavedSectionDefaults(false), 2500);
+  };
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const periodLabel = periodOverride ? `${formatPeriodDate(periodOverride.start)}〜${formatPeriodDate(periodOverride.end)}` : '今月';
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
@@ -5566,9 +5579,15 @@ const AllUsersDashboard: React.FC<{
 
   return (
     <>
+      <div className="section-defaults-bar">
+        <button type="button" onClick={handleSaveSectionDefaultsClick} className="secondary-action-button">
+          現在の開閉状態をデフォルトとして保存
+        </button>
+        {justSavedSectionDefaults && <span className="section-defaults-saved-message">保存しました。次回以降この状態で表示されます。</span>}
+      </div>
       <section aria-labelledby="all-users-dashboard-title">
-        <h2 
-            id="all-users-dashboard-title" 
+        <h2
+            id="all-users-dashboard-title"
             className="section-title collapsible-header"
             onClick={() => toggleSection('allUsersProgress')}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersProgress'); } }}
@@ -6290,7 +6309,29 @@ const App: React.FC = () => {
         [sectionKey]: !prev[sectionKey]
     }));
   };
-  
+
+  // Applies this user's saved allUsersSectionDefaults exactly once, right after their data
+  // first loads — guarded by the ref so later saves/edits to currentUserData (which happen
+  // constantly, e.g. on every KPI entry) never re-apply this and clobber a toggle the user made
+  // earlier in the same session.
+  const hasAppliedSectionDefaultsRef = useRef(false);
+  useEffect(() => {
+    if (hasAppliedSectionDefaultsRef.current || !currentUserData) return;
+    hasAppliedSectionDefaultsRef.current = true;
+    const saved = currentUserData.allUsersSectionDefaults;
+    if (saved) setSectionVisibility(prev => ({ ...prev, ...saved }));
+  }, [currentUserData]);
+
+  // Captures the CURRENT open/closed state of the 全ユーザー/チーム別進捗 dashboard's sections
+  // as this user's own default going forward — simpler than a dedicated settings form, since
+  // the existing collapsible headers are already how the user arranges them each session.
+  const handleSaveAllUsersSectionDefaults = () => {
+    const { allUsersProgress, allUsersDayOfWeekRate, allUsersWeeklySummary, allUsersMemberWeeklySummary, allUsersGrossProfit, allUsersMonthlyTrend } = sectionVisibility;
+    const allUsersSectionDefaults = { allUsersProgress, allUsersDayOfWeekRate, allUsersWeeklySummary, allUsersMemberWeeklySummary, allUsersGrossProfit, allUsersMonthlyTrend };
+    setCurrentUserData(prev => (prev ? { ...prev, allUsersSectionDefaults } : prev));
+  };
+
+
   // Restore the Google session, if the access token from earlier in this browser tab's
   // session is still valid. We deliberately do NOT attempt a network re-auth here: any
   // token request not triggered by a real click gets blocked by the browser's popup
@@ -8208,6 +8249,7 @@ const App: React.FC = () => {
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
+                  onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
                   showGrossProfit={false}
                   periodOverride={dashboardPeriodOverride}
               />
@@ -8269,6 +8311,7 @@ const App: React.FC = () => {
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
+                  onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
                   periodOverride={dashboardPeriodOverride}
               />
             )}

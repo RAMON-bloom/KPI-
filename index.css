@@ -114,6 +114,18 @@ button:disabled {
   padding: 0.4rem 0.8rem;
 }
 
+.section-defaults-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.section-defaults-saved-message {
+  font-size: 0.85rem;
+  color: var(--success-color, #28a745);
+}
+
 .gmail-scout-message {
   font-size: 0.85rem;
   color: var(--text-muted-color);
