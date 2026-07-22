@@ -1,13 +1,26 @@
 // Scans Gmail for emails reporting a pipeline stage-pass (書類選考通過/1次面接通過/etc.) or a
-// recommendation/submission (推薦) for one of this user's own pipeline candidates. Unlike
-// gmailScout.ts's scout-reply detection, these emails come from varied ATS systems or
-// individual client-company staff with no consistent subject/sender template — so matching
-// can't rely on a fixed keyword. Instead: a cheap client-side substring pre-filter (does the
-// candidate's name literally appear in the email?) bounds which emails are worth a Gemini call,
-// then Gemini reads the actual content and decides whether it really describes an event for
-// that candidate/company and which one.
+// recommendation/submission (推薦) for one of this user's own pipeline candidates.
+//
+// Originally this classified each candidate-name-matching email with Gemini, but that was too
+// slow for routine use (one AI round-trip per matching email). Rebuilt as pure keyword/regex
+// rules after reviewing real production emails (bloom's actual inbox) — the notification
+// landscape turned out to be more tractable than expected:
+//   - Recommendations (推薦) almost always go through bloom's own internal ATS-integration
+//     mailbox (consultant-group@bloom-firm.com) with a small number of fixed templates (HERP
+//     Hire's "〜さんを〜に推薦しました", リクナビHRTech's "新規候補者推薦 〜様", HRMOS's "〜への
+//     〜様の紹介が完了しました") — not one-per-client-company free text at all.
+//   - Stage-pass emails DO vary per client (each uses their own ATS or writes by hand), but the
+//     actual result is almost always spelled out as "{stage}" + "通過"/"合格" within a short
+//     span of each other (e.g. "一次面接通過と二次面接のご案内", "書類選考結果のご連絡...書類選考
+//     の結果、通過でございます"), or a structured "【結果】\n合格" block near a stage mention.
+//   - Rejections use a small, consistent vocabulary (不合格/見送り/添いかねる/叶わず/辞退) that's
+//     cheap to detect and must gate out everything else, since many ATSes reuse the exact same
+//     subject line for both a pass and a fail (e.g. "選考結果のご連絡") — the verdict is only in
+//     the body.
+// A generic "進んでいただきたく" pass phrase with no named stage falls back to whatever stage the
+// candidate's application is CURRENTLY at in our own pipeline data — the email doesn't have to
+// spell out the stage name if we already know where that application stood.
 
-import { GoogleGenAI, Type } from '@google/genai';
 import { fetchFullMessagesInRange, GmailPermissionError } from './gmailScout';
 
 export { GmailPermissionError };
@@ -26,16 +39,6 @@ export const PIPELINE_EVENT_KPI_KEYS = [
 ] as const;
 export type PipelineEventKpiKey = typeof PIPELINE_EVENT_KPI_KEYS[number];
 
-const KPI_KEY_DESCRIPTIONS: Record<PipelineEventKpiKey, string> = {
-  candidatesSubmitted: '候補者をクライアント企業に推薦・提出したことを示す内容（書類選考の結果が出るより前の「推薦した／提出した」という内容）',
-  documentScreeningPassed: '書類選考を通過したことを示す内容',
-  firstInterviewPassed: '1次面接を通過したことを示す内容',
-  secondInterviewPassed: '2次面接を通過したことを示す内容（3次以降の中間面接に進んだ場合も含める）',
-  finalInterviewPassed: '最終面接に合格したことを示す内容',
-  offersExtended: '内定が出たことを示す内容',
-  placements: '候補者が内定を承諾したことを示す内容',
-};
-
 export interface PipelineMatchCandidate {
   candidateId: string;
   candidateName: string;
@@ -43,6 +46,9 @@ export interface PipelineMatchCandidate {
   // candidatesSubmitted is intentionally excluded here (see recommendationPending) since it's
   // a candidate-level event, not tied to any one company.
   pendingKpiKeysByCompany: Record<string, PipelineEventKpiKey[]>;
+  // This application's CURRENT stage in our own pipeline (PipelineStage value, e.g. '1次面接')
+  // — used only as a fallback when an email confirms a pass without naming which stage.
+  currentStageByCompany: Record<string, string>;
   // Whether candidatesSubmitted (推薦) is still pending for this candidate overall — true means
   // it hasn't been recorded for ANY of their applications yet.
   recommendationPending: boolean;
@@ -56,86 +62,123 @@ export interface DetectedPipelineAchievement {
   dateISO: string;
   messageId: string;
   subject: string;
-  note: string; // Gemini's short quote/reason — shown to the user to sanity-check before applying
+  note: string; // the matched snippet — shown to the user to sanity-check before applying
 }
 
-interface RawMatch {
-  candidateName: string;
-  companyName: string;
-  kpiKey: string;
-  note: string;
-}
+// Only the newest message in a thread is classified — Gmail bodies include the full quoted
+// reply chain below it, and matching against old quoted text (a different stage from weeks
+// ago) is a real source of false positives. The newest content is always at the top.
+const BODY_INSPECT_LENGTH = 3000;
 
-async function classifyEmailForCandidates(
-  subject: string,
-  body: string,
-  matchedCandidates: PipelineMatchCandidate[]
-): Promise<RawMatch[]> {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-  const candidateListText = matchedCandidates
-    .map(c => {
-      const companies = Object.keys(c.pendingKpiKeysByCompany);
-      return `- 候補者名: ${c.candidateName} / 応募先企業: ${companies.length > 0 ? companies.join('、') : '（登録なし）'}`;
-    })
-    .join('\n');
-  const kpiListText = PIPELINE_EVENT_KPI_KEYS.map(k => `- ${k}: ${KPI_KEY_DESCRIPTIONS[k]}`).join('\n');
+const NEGATIVE_PATTERN = /不合格|お?見送(?:り|らせて)|添いかねる|叶わず|ご縁がなかった|辞退させて|選考を辞退|貴意に添いかねる/;
 
-  const prompt = `以下は人材紹介の候補者に関するメールです。本文を読み、次の候補者リストのいずれかについて、選考結果・推薦に関する具体的な出来事が書かれているかを判定してください。
+const RECOMMENDATION_PATTERN = /推薦しました|新規候補者推薦|候補者が推薦されました|の紹介が完了しました|のご推薦ありがとうございます/;
 
-候補者リスト:
-${candidateListText}
+// Ordered latest-stage-first: an email naming two stages (e.g. "一次面接合格・最終面接のご案内"
+// — a pass plus the next step being scheduled) must be attributed to the stage that actually
+// has a pass/合格 marker next to it, not misread as the later stage just because it's ALSO
+// mentioned somewhere in the same email.
+const STAGE_PATTERNS: { kpiKey: PipelineEventKpiKey; re: RegExp }[] = [
+  { kpiKey: 'finalInterviewPassed', re: /最終(?:面接|選考)/g },
+  { kpiKey: 'secondInterviewPassed', re: /(?:二次|2次)(?:面接|選考)/g },
+  { kpiKey: 'firstInterviewPassed', re: /(?:一次|1次)(?:面接|選考)/g },
+  { kpiKey: 'documentScreeningPassed', re: /書類選考|書類通過/g },
+];
+const RESULT_WORD_SOURCE = '通過|合格';
+const RESULT_WORD_PATTERN = /通過|合格/g;
+// Real notification templates often put the verdict a little further down, in its own
+// structured block ("【結果】\n合格"), rather than in the same sentence as the stage name. \s
+// (not [^\n]) since the marker and the verdict are typically on two separate lines.
+const RESULT_BLOCK_PATTERN = new RegExp(`【結果】\\s{0,10}(?:${RESULT_WORD_SOURCE})`);
+const MAX_ADJACENCY_GAP = 15;
 
-判定するイベントの種類（kpiKeyの値として使う文字列）:
-${kpiListText}
-
-メール件名: ${subject}
-メール本文:
-${body.slice(0, 6000)}
-
-候補者リストにある候補者名・企業名と一致する内容が本文に明確に書かれている場合のみ matches に含めてください。憶測や一般的な内容だけでは含めないでください。candidateNameとcompanyNameは候補者リストにある表記と完全に一致する文字列を使ってください（対応する企業が特定できない場合はcompanyNameを空文字にしてください）。該当がなければmatchesを空配列にしてください。`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          matches: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                candidateName: { type: Type.STRING, description: '候補者リストにある候補者名と完全一致する文字列' },
-                companyName: { type: Type.STRING, description: '候補者リストにあるその候補者の応募先企業名と完全一致する文字列。特定できない場合は空文字。' },
-                kpiKey: { type: Type.STRING, enum: PIPELINE_EVENT_KPI_KEYS as unknown as string[], description: '該当するイベントの種類' },
-                note: { type: Type.STRING, description: 'この判定の根拠となる本文中の内容の要約（日本語、50文字程度）' },
-              },
-              required: ['candidateName', 'companyName', 'kpiKey', 'note'],
-            },
-          },
-        },
-        required: ['matches'],
-      },
-    },
-  });
-
-  try {
-    const parsed = JSON.parse(response.text.trim());
-    return Array.isArray(parsed.matches) ? parsed.matches : [];
-  } catch {
-    return [];
+/**
+ * For each 通過/合格 occurrence, finds the NEAREST stage-keyword occurrence (either side, same
+ * line) and attributes the result to THAT stage only. This "nearest wins" rule is what makes
+ * "一次面接通過と二次面接のご案内" resolve to 一次面接 (immediately adjacent to 通過) and not
+ * 二次面接 (mentioned right after, but further from the actual verdict word) — a plain
+ * "stage...within 15 chars...result" test in either direction can't tell those apart, since
+ * both stages sit within the window; only comparing which one is literally closer can.
+ */
+function findExplicitStageResult(text: string): { kpiKey: PipelineEventKpiKey; note: string } | null {
+  const blockMatch = text.match(RESULT_BLOCK_PATTERN);
+  if (blockMatch && blockMatch.index !== undefined) {
+    // A structured "【結果】\n合格" block doesn't name its own stage — attribute it to whichever
+    // stage keyword's LAST occurrence appears closest before the block.
+    const before = text.slice(Math.max(0, blockMatch.index - 200), blockMatch.index);
+    let best: { kpiKey: PipelineEventKpiKey; idx: number } | null = null;
+    for (const { kpiKey, re } of STAGE_PATTERNS) {
+      const occurrences = [...before.matchAll(re)];
+      if (occurrences.length === 0) continue;
+      const lastIdx = occurrences[occurrences.length - 1].index!;
+      if (!best || lastIdx > best.idx) best = { kpiKey, idx: lastIdx };
+    }
+    if (best) return { kpiKey: best.kpiKey, note: blockMatch[0] };
   }
+
+  const stageOccurrences = STAGE_PATTERNS.flatMap(({ kpiKey, re }) =>
+    [...text.matchAll(re)].map(m => ({ kpiKey, index: m.index!, end: m.index! + m[0].length }))
+  );
+  for (const rm of text.matchAll(RESULT_WORD_PATTERN)) {
+    const resultStart = rm.index!;
+    const resultEnd = resultStart + rm[0].length;
+    let nearest: { kpiKey: PipelineEventKpiKey; gap: number; note: string } | null = null;
+    for (const sm of stageOccurrences) {
+      const gap = sm.index >= resultEnd ? sm.index - resultEnd : resultStart >= sm.end ? resultStart - sm.end : null;
+      if (gap === null || gap > MAX_ADJACENCY_GAP) continue;
+      const start = Math.min(sm.index, resultStart);
+      const end = Math.max(sm.end, resultEnd);
+      if (text.slice(start, end).includes('\n')) continue;
+      if (!nearest || gap < nearest.gap) nearest = { kpiKey: sm.kpiKey, gap, note: text.slice(start, end) };
+    }
+    if (nearest) return { kpiKey: nearest.kpiKey, note: nearest.note };
+  }
+  return null;
+}
+
+// Confirms a pass happened but doesn't name the stage (e.g. "面接選考結果のご連絡"..."選考の結果、
+// ぜひ次の選考に進んでいただきたく存じます", or "1次面接へ進めさせていただきたいと判断いたしまし
+// た") — falls back to the application's CURRENT pipeline stage (see currentStageByCompany) to
+// infer which stage was just passed.
+const GENERIC_PASS_PATTERN = /ぜひ次の(?:選考|ステップ)に進んで|次の選考に進んで|選考を進めさせていただきたく|次の面接に進んで|(?:面接|選考)へ進め|進んでいただきたく|進めさせていただきたい/;
+const GENERIC_FALLBACK_BY_STAGE: Record<string, PipelineEventKpiKey> = {
+  '書類選考': 'documentScreeningPassed',
+  '1次面接': 'firstInterviewPassed',
+  '2次面接': 'secondInterviewPassed',
+  '最終面接': 'finalInterviewPassed',
+};
+
+function classifyText(subjectAndBody: string): { kpiKey: PipelineEventKpiKey | null; note: string; isGeneric: boolean } | null {
+  if (NEGATIVE_PATTERN.test(subjectAndBody)) return null;
+  if (RECOMMENDATION_PATTERN.test(subjectAndBody)) {
+    const match = subjectAndBody.match(RECOMMENDATION_PATTERN)!;
+    return { kpiKey: 'candidatesSubmitted', note: match[0], isGeneric: false };
+  }
+  const offerOrPlacement = subjectAndBody.match(/内定承諾|内定を?承諾|入社(?:を)?決意/)
+    ? 'placements'
+    : subjectAndBody.match(/内定(?:が)?(?:決定|確定|出た|通知)|内定のご連絡|正式に内定/)
+    ? 'offersExtended'
+    : null;
+  if (offerOrPlacement) {
+    const re = offerOrPlacement === 'placements' ? /内定承諾|内定を?承諾|入社(?:を)?決意/ : /内定(?:が)?(?:決定|確定|出た|通知)|内定のご連絡|正式に内定/;
+    return { kpiKey: offerOrPlacement, note: subjectAndBody.match(re)![0], isGeneric: false };
+  }
+  const explicit = findExplicitStageResult(subjectAndBody);
+  if (explicit) return { ...explicit, isGeneric: false };
+  if (GENERIC_PASS_PATTERN.test(subjectAndBody)) {
+    const match = subjectAndBody.match(GENERIC_PASS_PATTERN)!;
+    return { kpiKey: null, note: match[0], isGeneric: true };
+  }
+  return null;
 }
 
 /**
  * Scans every message in [startDateISO, endDateISOInclusive] for stage-pass/recommendation
  * events involving any of `candidates`. Only messages whose subject+body literally contain a
- * candidate's name are sent to Gemini at all — bounds the number of Gemini calls to roughly the
- * number of genuinely name-matching emails, not the whole inbox. Results are already filtered
- * down to events that are still pending (per each candidate's pendingKpiKeysByCompany /
- * recommendationPending) — callers don't need to re-check for already-recorded duplicates.
+ * candidate's name are classified at all — same cheap pre-filter as before, now just gating a
+ * synchronous regex check instead of a Gemini call. Results are already filtered down to events
+ * that are still pending (per each candidate's pendingKpiKeysByCompany / recommendationPending)
+ * — callers don't need to re-check for already-recorded duplicates.
  */
 export async function detectPipelineAchievements(
   accessToken: string,
@@ -145,70 +188,59 @@ export async function detectPipelineAchievements(
   onProgress?: (done: number, total: number) => void
 ): Promise<DetectedPipelineAchievement[]> {
   const messages = await fetchFullMessagesInRange(accessToken, startDateISO, endDateISOInclusive);
-  const relevant = messages
-    .map(msg => ({
-      msg,
-      matched: candidates.filter(c => c.candidateName.trim() && (msg.subject + '\n' + msg.body).includes(c.candidateName.trim())),
-    }))
-    .filter(x => x.matched.length > 0);
-
   const results: DetectedPipelineAchievement[] = [];
-  const total = relevant.length;
-  let done = 0;
-  onProgress?.(0, total);
+  const total = messages.length;
 
-  // Gemini calls are far more expensive than the Gmail fetches above, so this stays modest even
-  // though gmailScout's own internal fetch used a higher concurrency cap.
-  const CONCURRENCY = 3;
-  let nextIndex = 0;
-  async function worker() {
-    while (true) {
-      const i = nextIndex++;
-      if (i >= relevant.length) return;
-      const { msg, matched } = relevant[i];
-      try {
-        const rawMatches = await classifyEmailForCandidates(msg.subject, msg.body, matched);
-        rawMatches.forEach(m => {
-          const candidate = matched.find(c => c.candidateName === m.candidateName);
-          if (!candidate) return;
-          if (!(PIPELINE_EVENT_KPI_KEYS as readonly string[]).includes(m.kpiKey)) return;
-          const kpiKey = m.kpiKey as PipelineEventKpiKey;
-          if (kpiKey === 'candidatesSubmitted') {
-            if (!candidate.recommendationPending) return; // already recorded — drop
-            results.push({
-              candidateId: candidate.candidateId,
-              candidateName: candidate.candidateName,
-              companyName: m.companyName && candidate.pendingKpiKeysByCompany[m.companyName] ? m.companyName : null,
-              kpiKey, dateISO: msg.dateISO, messageId: msg.id, subject: msg.subject, note: m.note || '',
-            });
-            return;
-          }
-          const pendingForCompany = m.companyName ? candidate.pendingKpiKeysByCompany[m.companyName] : undefined;
-          if (!pendingForCompany || !pendingForCompany.includes(kpiKey)) return; // not a real/pending company+stage combo
-          results.push({
-            candidateId: candidate.candidateId,
-            candidateName: candidate.candidateName,
-            companyName: m.companyName,
-            kpiKey, dateISO: msg.dateISO, messageId: msg.id, subject: msg.subject, note: m.note || '',
-          });
+  messages.forEach((msg, i) => {
+    onProgress?.(i, total);
+    const matched = candidates.filter(c => c.candidateName.trim() && (msg.subject + '\n' + msg.body).includes(c.candidateName.trim()));
+    if (matched.length === 0) return;
+    const inspectText = `${msg.subject}\n${msg.body.slice(0, BODY_INSPECT_LENGTH)}`;
+    const classified = classifyText(inspectText);
+    if (!classified) return;
+
+    matched.forEach(candidate => {
+      if (classified.kpiKey === 'candidatesSubmitted' && !classified.isGeneric) {
+        if (!candidate.recommendationPending) return;
+        const companyName = Object.keys(candidate.pendingKpiKeysByCompany).find(c => inspectText.includes(c)) || null;
+        results.push({
+          candidateId: candidate.candidateId, candidateName: candidate.candidateName, companyName,
+          kpiKey: 'candidatesSubmitted', dateISO: msg.dateISO, messageId: msg.id, subject: msg.subject, note: classified.note,
         });
-      } catch (error) {
-        // A single email's misclassification/timeout shouldn't abort the whole scan.
-        console.error('Failed to classify one email for pipeline achievements', error);
+        return;
       }
-      done++;
-      onProgress?.(done, total);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(CONCURRENCY, relevant.length)) }, () => worker()));
 
-  // Each per-email classification only checks against state from BEFORE this scan started, so
-  // two different emails within the same scan (e.g. an ATS's advance notice + confirmation
-  // about the same pass, or two companies' emails both mentioning an as-yet-unrecorded
-  // recommendation) can both surface the same underlying event. Collapse those down to one —
-  // per (candidate, company, stage) for stage-passes, per candidate only for candidatesSubmitted
-  // (the user's explicit requirement: a recommendation counts once per candidate, however many
-  // companies it appears across) — keeping the earliest dated occurrence.
+      // Resolve which of this candidate's companies the email is about — only the ones
+      // literally named in the subject/body qualify; if that's ambiguous (none or several
+      // match, when the candidate has more than one), skip rather than guess.
+      const companies = Object.keys(candidate.pendingKpiKeysByCompany);
+      const mentionedCompanies = companies.filter(c => inspectText.includes(c));
+      const companyName = mentionedCompanies.length === 1 ? mentionedCompanies[0]
+        : mentionedCompanies.length === 0 && companies.length === 1 ? companies[0]
+        : null;
+      if (!companyName) return;
+
+      const kpiKey = classified.isGeneric
+        ? GENERIC_FALLBACK_BY_STAGE[candidate.currentStageByCompany[companyName]]
+        : classified.kpiKey;
+      if (!kpiKey) return;
+      const pending = candidate.pendingKpiKeysByCompany[companyName];
+      if (!pending || !pending.includes(kpiKey)) return;
+
+      results.push({
+        candidateId: candidate.candidateId, candidateName: candidate.candidateName, companyName,
+        kpiKey, dateISO: msg.dateISO, messageId: msg.id, subject: msg.subject, note: classified.note,
+      });
+    });
+  });
+  onProgress?.(total, total);
+
+  // Two different emails about the same underlying event (an ATS's advance notice + a
+  // confirmation, or two companies' emails both mentioning an as-yet-unrecorded recommendation)
+  // can both surface the same event within one scan. Collapse down to one — per (candidate,
+  // company, stage) for stage-passes, per candidate only for candidatesSubmitted (a
+  // recommendation counts once per candidate, however many companies it appears across) —
+  // keeping the earliest dated occurrence.
   const seenRecommendation = new Set<string>();
   const seenStagePass = new Set<string>();
   const deduped: DetectedPipelineAchievement[] = [];

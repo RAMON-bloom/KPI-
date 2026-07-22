@@ -1943,7 +1943,7 @@ const PipelineAchievementImportModal: React.FC<{
         </div>
         <div className="modal-body">
           <p className="modal-description">
-            指定した期間のメールを確認し、自分のパイプラインにいる候補者の氏名・選考企業と一致する内容（書類選考通過・面接通過・推薦など）をAIで検出します。
+            指定した期間のメールを確認し、自分のパイプラインにいる候補者の氏名・選考企業と一致する内容（書類選考通過・面接通過・推薦など）を検出します。
             検出結果は内容を確認してから反映してください。推薦（候補者推薦数）は複数社あっても候補者1人につき1回のみ反映されます。
           </p>
           <div className="bulk-gmail-date-range">
@@ -2275,7 +2275,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-22',
     items: [
-      'メールの内容をAIで確認し、パイプラインの候補者名・選考企業と一致する書類選考通過・面接通過・推薦を検出してKPI実績に反映する機能を追加（推薦は候補者1人につき1回のみ反映）',
+      'メールを確認し、パイプラインの候補者名・選考企業と一致する書類選考通過・面接通過・推薦を検出してKPI実績に反映する機能を追加（推薦は候補者1人につき1回のみ反映、判定は高速なキーワード方式）',
       'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
       'Googleタスク同期でバッチ処理中に1件失敗すると同じタスクが重複作成されてしまう不具合を修正',
       '全ユーザー/チーム別進捗の各セクションの初期表示（開閉）状態を、ユーザーごとに保存できるように',
@@ -7481,15 +7481,18 @@ const App: React.FC = () => {
       .filter(c => !c.isHidden && c.name.trim())
       .map(c => {
         const pendingKpiKeysByCompany: Record<string, PipelineEventKpiKey[]> = {};
+        const currentStageByCompany: Record<string, string> = {};
         c.applications.filter(app => !app.isHidden && app.companyName.trim()).forEach(app => {
           const recorded = new Set(app.recordedAchievementKpiKeys || []);
           const pending = PIPELINE_EVENT_KPI_KEYS.filter(k => k !== 'candidatesSubmitted' && !recorded.has(k));
           if (pending.length > 0) pendingKpiKeysByCompany[app.companyName] = pending;
+          currentStageByCompany[app.companyName] = app.stage;
         });
         return {
           candidateId: c.id,
           candidateName: c.name,
           pendingKpiKeysByCompany,
+          currentStageByCompany,
           recommendationPending: !c.recommendationRecorded,
         };
       })
