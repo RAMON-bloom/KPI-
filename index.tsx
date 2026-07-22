@@ -332,13 +332,12 @@ interface UserData {
   dailyKpiTargets: Record<KpiKey, number>;
   candidates: Candidate[];
   displayName?: string;
-  // Opt-in: mirrors this user's own パイプラインカレンダー entries (applications' scheduledDate)
-  // into their own Google Tasks default list. googleTaskIdsByApplicationId tracks the Google-
+  // Automatically mirrors this user's own パイプラインカレンダー entries (applications'
+  // scheduledDate) into their own Google Tasks default list on every save. Tracks the Google-
   // assigned task ID per CompanyApplication.id so edits update the same task instead of
   // creating duplicates — kept as a separate map (not a field on CompanyApplication itself) so
   // it survives untouched even through form code that rebuilds application objects field-by-
   // field and would otherwise silently drop an unrecognized property.
-  googleTasksSyncEnabled?: boolean;
   googleTaskIdsByApplicationId?: Record<string, string>;
 }
 
@@ -6795,7 +6794,6 @@ const App: React.FC = () => {
    * creation for the same application.
    */
   const queueCandidateTasksSync = (prevCandidate: Candidate | undefined, nextCandidate: Candidate | null) => {
-    if (!currentUserData?.googleTasksSyncEnabled) return;
     const session = getCurrentSession();
     if (!session) return;
     const accessToken = session.accessToken;
@@ -6866,13 +6864,10 @@ const App: React.FC = () => {
     });
   };
 
-  const handleToggleGoogleTasksSync = () => {
-    setCurrentUserData(prev => (prev ? { ...prev, googleTasksSyncEnabled: !prev.googleTasksSyncEnabled } : prev));
-  };
-
   // Manual backfill/resync — loops every visible candidate as both "prev" and "next" for the
   // same diff logic above, so already-synced tasks are left alone (isUnchanged) while anything
-  // scheduled before sync was ever turned on gets created for the first time.
+  // scheduled before this feature existed (or before permission was granted) gets created for
+  // the first time.
   const handleSyncAllTasksNow = () => {
     (currentUserData?.candidates || []).filter(c => !c.isHidden).forEach(c => queueCandidateTasksSync(c, c));
   };
@@ -8043,36 +8038,27 @@ const App: React.FC = () => {
         {view === 'pipeline' && (
           <>
             <div className="google-tasks-sync-bar">
-              <label className="google-tasks-sync-toggle">
-                <input
-                  type="checkbox"
-                  checked={!!currentUserData?.googleTasksSyncEnabled}
-                  onChange={handleToggleGoogleTasksSync}
-                />
-                自分の面談予定をGoogleタスクに同期する
-              </label>
-              {currentUserData?.googleTasksSyncEnabled && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
-                  <button
-                    type="button"
-                    onClick={handleSyncAllTasksNow}
-                    disabled={tasksSyncStatus === 'loading'}
-                    className="secondary-action-button"
-                  >
-                    {tasksSyncStatus === 'loading' ? '同期中...' : '今すぐ同期'}
+              <span className="google-tasks-sync-label">選考予定はGoogleタスクに自動で同期されます</span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={handleSyncAllTasksNow}
+                  disabled={tasksSyncStatus === 'loading'}
+                  className="secondary-action-button"
+                >
+                  {tasksSyncStatus === 'loading' ? '同期中...' : '今すぐ同期'}
+                </button>
+                {tasksSyncStatus === 'needs-reauth' && (
+                  <button type="button" onClick={handleReauthorizeTasks} className="secondary-action-button">
+                    Googleタスクの利用を許可
                   </button>
-                  {tasksSyncStatus === 'needs-reauth' && (
-                    <button type="button" onClick={handleReauthorizeTasks} className="secondary-action-button">
-                      Googleタスクの利用を許可
-                    </button>
-                  )}
-                  {tasksSyncMessage && (
-                    <span className={`google-tasks-sync-message ${tasksSyncStatus === 'error' || tasksSyncStatus === 'needs-reauth' ? 'is-error' : ''}`}>
-                      {tasksSyncMessage}
-                    </span>
-                  )}
-                </div>
-              )}
+                )}
+                {tasksSyncMessage && (
+                  <span className={`google-tasks-sync-message ${tasksSyncStatus === 'error' || tasksSyncStatus === 'needs-reauth' ? 'is-error' : ''}`}>
+                    {tasksSyncMessage}
+                  </span>
+                )}
+              </div>
             </div>
             <CandidatePipelineView
                 candidates={pipelineCandidates}

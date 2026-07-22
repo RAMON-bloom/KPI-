@@ -135,12 +135,8 @@ button:disabled {
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
 }
-.google-tasks-sync-toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
+.google-tasks-sync-label {
   font-size: 0.9rem;
-  cursor: pointer;
   font-weight: 500;
 }
 .google-tasks-sync-message {
