@@ -21,7 +21,7 @@ import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } fr
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, GoogleTasksPermissionError } from './services/googleTasks';
-import { detectPipelineAchievements, DetectedPipelineAchievement, PipelineMatchCandidate, PipelineEventKpiKey, PIPELINE_EVENT_KPI_KEYS } from './services/pipelineAchievementMatch';
+import { detectPipelineAchievements, DetectedPipelineAchievement, UnregisteredRecommendation, PipelineMatchCandidate, PipelineEventKpiKey, PIPELINE_EVENT_KPI_KEYS } from './services/pipelineAchievementMatch';
 
 ChartJS.register(
   CategoryScale,
@@ -1325,7 +1325,8 @@ const DateEntryModal: React.FC<{
   onClose: () => void;
   buildMatchCandidates: () => PipelineMatchCandidate[];
   onApplyPipelineAchievements: (achievements: DetectedPipelineAchievement[]) => void;
-}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose, buildMatchCandidates, onApplyPipelineAchievements }) => {
+  onCreateAndApplyUnregistered: (item: UnregisteredRecommendation) => void;
+}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose, buildMatchCandidates, onApplyPipelineAchievements, onCreateAndApplyUnregistered }) => {
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
@@ -1337,6 +1338,8 @@ const DateEntryModal: React.FC<{
   const [achievementNeedsReauth, setAchievementNeedsReauth] = useState(false);
   const [detectedAchievements, setDetectedAchievements] = useState<DetectedPipelineAchievement[]>([]);
   const [achievementUnchecked, setAchievementUnchecked] = useState<Set<string>>(new Set());
+  const [unregisteredRecommendations, setUnregisteredRecommendations] = useState<UnregisteredRecommendation[]>([]);
+  const [createdUnregisteredNames, setCreatedUnregisteredNames] = useState<Set<string>>(new Set());
 
   // This modal instance stays mounted across 前日/次日 navigation (only `date`/`initialValues`
   // change) instead of unmounting like a normal open/close does, so entryValues must be reset
@@ -1352,6 +1355,8 @@ const DateEntryModal: React.FC<{
     setAchievementNeedsReauth(false);
     setDetectedAchievements([]);
     setAchievementUnchecked(new Set());
+    setUnregisteredRecommendations([]);
+    setCreatedUnregisteredNames(new Set());
   }, [date]);
 
   const formattedDate = new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', {
@@ -1463,11 +1468,13 @@ const DateEntryModal: React.FC<{
     setAchievementMessage('');
     setAchievementNeedsReauth(false);
     try {
-      const results = await detectPipelineAchievements(session.accessToken, date, date, buildMatchCandidates());
-      setDetectedAchievements(results);
+      const { achievements, unregisteredRecommendations: unregistered } = await detectPipelineAchievements(session.accessToken, date, date, buildMatchCandidates());
+      setDetectedAchievements(achievements);
       setAchievementUnchecked(new Set());
+      setUnregisteredRecommendations(unregistered);
+      setCreatedUnregisteredNames(new Set());
       setAchievementStatus('preview');
-      setAchievementMessage(results.length === 0 ? 'この日に該当する実績は見つかりませんでした。' : '');
+      setAchievementMessage(achievements.length === 0 && unregistered.length === 0 ? 'この日に該当する実績は見つかりませんでした。' : '');
     } catch (err) {
       setAchievementStatus('error');
       if (err instanceof GmailPermissionError) {
@@ -1516,6 +1523,11 @@ const DateEntryModal: React.FC<{
     });
     setDetectedAchievements(prev => prev.filter(a => !selected.includes(a)));
     setAchievementMessage(`${selected.length}件を反映しました。`);
+  };
+
+  const handleCreateUnregistered = (item: UnregisteredRecommendation) => {
+    onCreateAndApplyUnregistered(item);
+    setCreatedUnregisteredNames(prev => new Set(prev).add(item.name));
   };
 
   const isFormEmpty = Object.values(entryValues).every(val => val === undefined || val === 0 || val === null);
@@ -1589,6 +1601,34 @@ const DateEntryModal: React.FC<{
               <button type="button" onClick={handleApplyDetectedAchievements} className="secondary-action-button">
                 選択した実績を反映
               </button>
+            </div>
+          )}
+
+          {unregisteredRecommendations.length > 0 && (
+            <div className="achievement-preview-inline">
+              <p className="achievement-preview-note" style={{ margin: '0 0 0.5rem' }}>
+                パイプライン未登録の候補者（推薦メールと面談ログの両方で名前が一致）:
+              </p>
+              <ul className="achievement-preview-list">
+                {unregisteredRecommendations.map(item => (
+                  <li key={item.name} className="achievement-preview-item">
+                    <span className="achievement-preview-main">
+                      {item.name}{item.companyName ? `（${item.companyName}）` : ''}: 候補者推薦数
+                    </span>
+                    <p className="achievement-preview-note">
+                      「{item.note}」（件名: {item.subject}） / 面談ログ: {item.interviewLogName}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleCreateUnregistered(item)}
+                      disabled={createdUnregisteredNames.has(item.name)}
+                      className="secondary-action-button"
+                    >
+                      {createdUnregisteredNames.has(item.name) ? '登録済み' : '候補者として登録して反映'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -1855,8 +1895,9 @@ const BulkGmailReplyImportModal: React.FC<{
 const PipelineAchievementImportModal: React.FC<{
   buildMatchCandidates: () => PipelineMatchCandidate[];
   onApply: (achievements: DetectedPipelineAchievement[]) => void;
+  onCreateAndApplyUnregistered: (item: UnregisteredRecommendation) => void;
   onClose: () => void;
-}> = ({ buildMatchCandidates, onApply, onClose }) => {
+}> = ({ buildMatchCandidates, onApply, onCreateAndApplyUnregistered, onClose }) => {
   const toDateInputValue = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const todayStr = toDateInputValue(new Date());
   const defaultStartStr = (() => {
@@ -1873,6 +1914,8 @@ const PipelineAchievementImportModal: React.FC<{
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [detected, setDetected] = useState<DetectedPipelineAchievement[]>([]);
   const [uncheckedKeys, setUncheckedKeys] = useState<Set<string>>(new Set());
+  const [unregistered, setUnregistered] = useState<UnregisteredRecommendation[]>([]);
+  const [createdNames, setCreatedNames] = useState<Set<string>>(new Set());
 
   const achievementKey = (a: DetectedPipelineAchievement) => `${a.messageId}|${a.candidateId}|${a.kpiKey}`;
 
@@ -1894,12 +1937,14 @@ const PipelineAchievementImportModal: React.FC<{
     setProgress(null);
     try {
       const matchCandidates = buildMatchCandidates();
-      const results = await detectPipelineAchievements(
+      const { achievements, unregisteredRecommendations } = await detectPipelineAchievements(
         session.accessToken, startDate, endDate, matchCandidates,
         (done, total) => setProgress({ done, total })
       );
-      setDetected(results);
+      setDetected(achievements);
+      setUnregistered(unregisteredRecommendations);
       setUncheckedKeys(new Set());
+      setCreatedNames(new Set());
       setStatus('preview');
     } catch (err) {
       setStatus('error');
@@ -1933,6 +1978,11 @@ const PipelineAchievementImportModal: React.FC<{
   };
 
   const selectedAchievements = detected.filter(a => !uncheckedKeys.has(achievementKey(a)));
+
+  const handleCreateUnregistered = (item: UnregisteredRecommendation) => {
+    onCreateAndApplyUnregistered(item);
+    setCreatedNames(prev => new Set(prev).add(item.name));
+  };
 
   return (
     <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="pipeline-achievement-modal-title">
@@ -1996,6 +2046,35 @@ const PipelineAchievementImportModal: React.FC<{
                   </ul>
                 </>
               )}
+            </div>
+          )}
+
+          {status === 'preview' && unregistered.length > 0 && (
+            <div className="bulk-gmail-preview">
+              <p className="gmail-scout-message">
+                パイプライン未登録の候補者{unregistered.length}件を検出しました（推薦メールと、Drive上の過去の面談ログの両方で名前が一致した人のみ表示しています）。
+                登録すると非表示の候補者として追加され、推薦実績が1件反映されます。
+              </p>
+              <ul className="achievement-preview-list">
+                {unregistered.map(item => (
+                  <li key={item.name} className="achievement-preview-item">
+                    <span className="achievement-preview-main">
+                      {item.dateISO} — {item.name}{item.companyName ? `（${item.companyName}）` : ''}: 候補者推薦数
+                    </span>
+                    <p className="achievement-preview-note">
+                      「{item.note}」（件名: {item.subject}） / 面談ログ: {item.interviewLogName}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleCreateUnregistered(item)}
+                      disabled={createdNames.has(item.name)}
+                      className="secondary-action-button"
+                    >
+                      {createdNames.has(item.name) ? '登録済み' : '候補者として登録して反映'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
@@ -2275,6 +2354,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-22',
     items: [
+      '推薦メールの照合対象に、非表示・掘り起しリスト等の過去の候補者に加え、パイプライン未登録の候補者（推薦メールとDrive上の面談ログの両方で名前が一致した場合のみ）も追加',
       'メールを確認し、パイプラインの候補者名・選考企業と一致する書類選考通過・面接通過・推薦を検出してKPI実績に反映する機能を追加（推薦は候補者1人につき1回のみ反映、判定は高速なキーワード方式）',
       'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
       'Googleタスク同期でバッチ処理中に1件失敗すると同じタスクが重複作成されてしまう不具合を修正',
@@ -7476,9 +7556,13 @@ const App: React.FC = () => {
   // Builds the candidate list handed to detectPipelineAchievements — only this user's own,
   // currently-active (non-hidden) candidates, and only the companies/stages that haven't
   // already been recorded, so the service never needs to re-check for duplicates itself.
+  // Includes hidden/archived candidates too (お見送り・選考辞退・掘り起しリスト等) — an email
+  // confirming a real historical pass/推薦 is just as valid for a candidate no longer active in
+  // the pipeline, and the whole point of this scan is catching up on events that happened in
+  // the past regardless of the candidate's current visibility state.
   const buildPipelineMatchCandidates = useCallback((): PipelineMatchCandidate[] => {
     return (currentUserData?.candidates || [])
-      .filter(c => !c.isHidden && c.name.trim())
+      .filter(c => c.name.trim())
       .map(c => {
         const pendingKpiKeysByCompany: Record<string, PipelineEventKpiKey[]> = {};
         const currentStageByCompany: Record<string, string> = {};
@@ -7538,6 +7622,45 @@ const App: React.FC = () => {
     });
 
     const updatedData = { ...currentUserData, entries: updatedEntries, candidates: updatedCandidates };
+    setCurrentUserData(updatedData);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
+  // A recommendation-template email named someone with no candidate record at all, and an
+  // actual past interview-log document corroborated they're a real person we met (see
+  // UnregisteredRecommendation) — creates a minimal (hidden — they were never actively tracked,
+  // so surfacing them as active now would be misleading) candidate record for them and counts
+  // the recommendation in one step, so the KPI increment is never left dangling with nothing to
+  // point back to.
+  const handleCreateAndApplyUnregisteredRecommendation = (item: UnregisteredRecommendation) => {
+    if (!currentUserData) return;
+    const newCandidate: Candidate = {
+      id: `candidate-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name: item.name,
+      salary: 0,
+      currentSalary: 0,
+      currentCompany: '',
+      education: '',
+      source: '',
+      usingOtherAgents: false,
+      applications: item.companyName
+        ? [{ id: `app-${Date.now()}`, companyName: item.companyName, stage: '打診', nextAction: '' }]
+        : [],
+      summary: `メールログと面談ログ（${item.interviewLogName}）の照合により自動登録した候補者です。`,
+      createdAt: new Date().toISOString(),
+      isHidden: true,
+      recommendationRecorded: true,
+    };
+    const entriesByDateMap = new Map<string, KpiEntry>(currentUserData.entries.map(entry => [entry.date, entry] as [string, KpiEntry]));
+    const existing = entriesByDateMap.get(item.dateISO);
+    const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+    values.candidatesSubmitted = (values.candidatesSubmitted || 0) + 1;
+    entriesByDateMap.set(item.dateISO, { id: existing?.id ?? Date.now(), date: item.dateISO, values });
+    const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    const updatedData = { ...currentUserData, entries: updatedEntries, candidates: [...currentUserData.candidates, newCandidate] };
     setCurrentUserData(updatedData);
     if (currentIdentity) {
       forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
@@ -8165,6 +8288,7 @@ const App: React.FC = () => {
           onClose={() => setSelectedDate(null)}
           buildMatchCandidates={buildPipelineMatchCandidates}
           onApplyPipelineAchievements={handleApplyPipelineAchievements}
+          onCreateAndApplyUnregistered={handleCreateAndApplyUnregisteredRecommendation}
         />
       )}
       {isBulkGmailModalOpen && (
@@ -8187,6 +8311,7 @@ const App: React.FC = () => {
         <PipelineAchievementImportModal
           buildMatchCandidates={buildPipelineMatchCandidates}
           onApply={handleApplyPipelineAchievements}
+          onCreateAndApplyUnregistered={handleCreateAndApplyUnregisteredRecommendation}
           onClose={() => setIsPipelineAchievementModalOpen(false)}
         />
       )}

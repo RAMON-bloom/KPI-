@@ -22,6 +22,7 @@
 // spell out the stage name if we already know where that application stood.
 
 import { fetchFullMessagesInRange, GmailPermissionError } from './gmailScout';
+import { searchInterviewLogsByName } from './googleDrive';
 
 export { GmailPermissionError };
 
@@ -63,6 +64,28 @@ export interface DetectedPipelineAchievement {
   messageId: string;
   subject: string;
   note: string; // the matched snippet — shown to the user to sanity-check before applying
+}
+
+// A 推薦 (candidatesSubmitted) event naming someone who isn't in `candidates` at all — e.g. a
+// candidate who was quickly recommended and never entered into the pipeline, or whose record
+// was later removed. Only surfaced when corroborated by an actual past interview-log document
+// in this user's own Drive (interviewLogId/interviewLogName) — a name merely appearing in one
+// recommendation email, with nothing else backing it up, is too weak a signal on its own to
+// justify creating a new candidate record from.
+export interface UnregisteredRecommendation {
+  name: string;
+  companyName: string | null;
+  dateISO: string;
+  messageId: string;
+  subject: string;
+  note: string;
+  interviewLogId: string;
+  interviewLogName: string;
+}
+
+export interface DetectPipelineAchievementsResult {
+  achievements: DetectedPipelineAchievement[];
+  unregisteredRecommendations: UnregisteredRecommendation[];
 }
 
 // Only the newest message in a thread is classified — Gmail bodies include the full quoted
@@ -148,6 +171,34 @@ const GENERIC_FALLBACK_BY_STAGE: Record<string, PipelineEventKpiKey> = {
   '最終面接': 'finalInterviewPassed',
 };
 
+// bloom's own recommendation-confirmation templates (HERP Hire / リクナビHRTech / HRMOS — see
+// the module doc comment) all name the candidate in a structured, extractable spot, unlike
+// freeform client stage-pass emails. Tried in order; the first template that matches wins.
+function extractCandidateNameFromRecommendation(text: string): string | null {
+  const patterns = [
+    /([^\s、。\n]+?)さんを.+?に推薦しました/,
+    /候補者名[:：]\s*([^\s、。\n]+?)様?(?:\n|$)/,
+    /応募者氏名[:：]\s*([^\s、。\n]+)/,
+    /への([^\s、。\n]+?)様の紹介が完了しました/,
+    /([^\s、。\n]+?)様のご推薦ありがとうございます/,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
+// Best-effort only — many of these templates put the job title, not the client company name,
+// in the one structured spot the name comes from, so this is a generic "any 株式会社/合同会社/
+// 有限会社-suffixed phrase near the top of the email" guess. Never required for correctness:
+// candidatesSubmitted is a candidate-level flag that doesn't need a company at all — this is
+// purely to make the reviewed candidate record more informative if one gets auto-created.
+function extractCompanyNameGuess(text: string): string | null {
+  const m = text.slice(0, 300).match(/([^\s、。\n「」]{2,30}(?:株式会社|合同会社|有限会社))/);
+  return m ? m[1].trim() : null;
+}
+
 function classifyText(subjectAndBody: string): { kpiKey: PipelineEventKpiKey | null; note: string; isGeneric: boolean } | null {
   if (NEGATIVE_PATTERN.test(subjectAndBody)) return null;
   if (RECOMMENDATION_PATTERN.test(subjectAndBody)) {
@@ -174,11 +225,14 @@ function classifyText(subjectAndBody: string): { kpiKey: PipelineEventKpiKey | n
 
 /**
  * Scans every message in [startDateISO, endDateISOInclusive] for stage-pass/recommendation
- * events involving any of `candidates`. Only messages whose subject+body literally contain a
- * candidate's name are classified at all — same cheap pre-filter as before, now just gating a
- * synchronous regex check instead of a Gemini call. Results are already filtered down to events
- * that are still pending (per each candidate's pendingKpiKeysByCompany / recommendationPending)
- * — callers don't need to re-check for already-recorded duplicates.
+ * events involving any of `candidates`, PLUS recommendation-template emails naming someone not
+ * in `candidates` at all (see UnregisteredRecommendation) — corroborated against this user's
+ * own past interview-log documents in Drive before being surfaced. Only messages whose
+ * subject+body literally contain a candidate's name are classified against the known-candidate
+ * list — same cheap pre-filter as before, now just gating a synchronous regex check instead of
+ * a Gemini call. `achievements` is already filtered down to events that are still pending (per
+ * each candidate's pendingKpiKeysByCompany / recommendationPending) — callers don't need to
+ * re-check for already-recorded duplicates.
  */
 export async function detectPipelineAchievements(
   accessToken: string,
@@ -186,16 +240,33 @@ export async function detectPipelineAchievements(
   endDateISOInclusive: string,
   candidates: PipelineMatchCandidate[],
   onProgress?: (done: number, total: number) => void
-): Promise<DetectedPipelineAchievement[]> {
+): Promise<DetectPipelineAchievementsResult> {
   const messages = await fetchFullMessagesInRange(accessToken, startDateISO, endDateISOInclusive);
   const results: DetectedPipelineAchievement[] = [];
+  const knownNames = new Set(candidates.map(c => c.candidateName.trim()).filter(Boolean));
+  const unregisteredCandidates = new Map<string, { name: string; companyName: string | null; dateISO: string; messageId: string; subject: string; note: string }>();
   const total = messages.length;
 
   messages.forEach((msg, i) => {
     onProgress?.(i, total);
-    const matched = candidates.filter(c => c.candidateName.trim() && (msg.subject + '\n' + msg.body).includes(c.candidateName.trim()));
-    if (matched.length === 0) return;
     const inspectText = `${msg.subject}\n${msg.body.slice(0, BODY_INSPECT_LENGTH)}`;
+    const matched = candidates.filter(c => c.candidateName.trim() && inspectText.includes(c.candidateName.trim()));
+
+    // Independently of whether any KNOWN candidate matched — a recommendation-template email
+    // names its candidate in a structured, reliably-extractable spot (see
+    // extractCandidateNameFromRecommendation), so it doesn't need the pre-filter above at all.
+    if (!NEGATIVE_PATTERN.test(inspectText) && RECOMMENDATION_PATTERN.test(inspectText)) {
+      const name = extractCandidateNameFromRecommendation(inspectText);
+      if (name && !knownNames.has(name) && !unregisteredCandidates.has(name)) {
+        unregisteredCandidates.set(name, {
+          name, companyName: extractCompanyNameGuess(inspectText),
+          dateISO: msg.dateISO, messageId: msg.id, subject: msg.subject,
+          note: inspectText.match(RECOMMENDATION_PATTERN)![0],
+        });
+      }
+    }
+
+    if (matched.length === 0) return;
     const classified = classifyText(inspectText);
     if (!classified) return;
 
@@ -255,5 +326,23 @@ export async function detectPipelineAchievements(
     }
     deduped.push(r);
   });
-  return deduped;
+
+  // Confirm each unregistered name against this user's own interview-log documents in Drive —
+  // only names corroborated by an actual past interview log are surfaced; see
+  // UnregisteredRecommendation's doc comment for why an email mention alone isn't enough.
+  const unregisteredRecommendations: UnregisteredRecommendation[] = [];
+  for (const candidate of unregisteredCandidates.values()) {
+    try {
+      const logs = await searchInterviewLogsByName(candidate.name);
+      if (logs.length > 0) {
+        unregisteredRecommendations.push({ ...candidate, interviewLogId: logs[0].id, interviewLogName: logs[0].name });
+      }
+    } catch (error) {
+      // Best-effort — a failed lookup just means this name doesn't get corroborated this time,
+      // not that the whole scan should fail.
+      console.error(`Failed to search interview logs for "${candidate.name}"`, error);
+    }
+  }
+
+  return { achievements: deduped, unregisteredRecommendations };
 }
