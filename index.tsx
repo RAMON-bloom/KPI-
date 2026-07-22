@@ -6799,6 +6799,38 @@ const App: React.FC = () => {
       return pipelineUserOptions.filter(u => isEmailInSelectedDivision(u.email));
     }, [pipelineUserOptions, isEmailInSelectedDivision]);
 
+    // 比較するユーザーの選択肢をチーム単位でグルーピング — メンバーが増えるほどフラットな
+    // 一覧の表示面積が広がっていくのを防ぐため、チーム→メンバーの2階層で折りたたんで表示する。
+    // 複数チームに所属するメンバーはそれぞれのチームのグループに重複して現れる（チーム別タブの
+    // 挙動と同じ）。どのチームにも属さないメンバーは「未所属」グループにまとめる。
+    const comparisonTeamGroups = useMemo(() => {
+      const labelByEmail = new Map<string, string>(divisionScopedUserOptions.map(u => [u.email, u.label]));
+      const assigned = new Set<string>();
+      const groups = teams
+        .map(team => {
+          const memberEmails: string[] = Array.from(new Set(
+            team.memberEmails
+              .map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email)
+              .filter(email => labelByEmail.has(email))
+          ));
+          memberEmails.forEach(email => assigned.add(email));
+          return { id: team.id, name: team.name, members: memberEmails.map(email => ({ email, label: labelByEmail.get(email)! })) };
+        })
+        .filter(g => g.members.length > 0);
+      const unassigned = divisionScopedUserOptions.filter(u => !assigned.has(u.email));
+      return { groups, unassigned };
+    }, [teams, divisionScopedUserOptions, displayedAllUsersData]);
+
+    const [expandedComparisonGroups, setExpandedComparisonGroups] = useState<Record<string, boolean>>({});
+    const toggleComparisonGroupExpanded = (groupId: string) => {
+      setExpandedComparisonGroups(prev => ({ ...prev, [groupId]: !prev[groupId] }));
+    };
+    const setComparisonGroupSelected = (emails: string[], select: boolean) => {
+      setComparisonUserEmails(prev => select
+        ? Array.from(new Set([...prev, ...emails]))
+        : prev.filter(e => !emails.includes(e)));
+    };
+
     // The 全ユーザー tab's ad-hoc comparison selection — an empty selection means "no filter".
     const comparisonUsers = useMemo(() => {
       const inDivision = users.filter(isEmailInSelectedDivision);
@@ -7646,17 +7678,95 @@ const App: React.FC = () => {
                     <button onClick={() => setComparisonUserEmails([])} className="secondary-action-button">選択をクリア</button>
                   </div>
                 </div>
-                <div className="comparison-user-checkbox-list">
-                  {divisionScopedUserOptions.map(u => (
-                    <label key={u.email} className="comparison-user-checkbox">
-                      <input
-                        type="checkbox"
-                        checked={comparisonUserEmails.includes(u.email)}
-                        onChange={() => toggleComparisonUser(u.email)}
-                      />
-                      {u.label}
-                    </label>
-                  ))}
+                <div className="comparison-team-groups">
+                  {comparisonTeamGroups.groups.map(group => {
+                    const emails = group.members.map(m => m.email);
+                    const selectedCount = emails.filter(e => comparisonUserEmails.includes(e)).length;
+                    const allSelected = selectedCount === emails.length;
+                    const isExpanded = !!expandedComparisonGroups[group.id];
+                    return (
+                      <div key={group.id} className="comparison-team-group">
+                        <div className="comparison-team-group-header">
+                          <button
+                            type="button"
+                            className="comparison-team-toggle"
+                            onClick={() => toggleComparisonGroupExpanded(group.id)}
+                            aria-expanded={isExpanded}
+                            aria-label={isExpanded ? 'メンバーを折りたたむ' : 'メンバーを表示'}
+                          >
+                            <span className={`toggle-icon ${isExpanded ? 'open' : ''}`}>▶</span>
+                          </button>
+                          <label className="comparison-user-checkbox comparison-team-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={() => setComparisonGroupSelected(emails, !allSelected)}
+                            />
+                            {group.name}
+                            <small style={{ color: 'var(--text-muted-color)' }}> ({selectedCount}/{emails.length})</small>
+                          </label>
+                        </div>
+                        {isExpanded && (
+                          <div className="comparison-user-checkbox-list nested">
+                            {group.members.map(u => (
+                              <label key={u.email} className="comparison-user-checkbox">
+                                <input
+                                  type="checkbox"
+                                  checked={comparisonUserEmails.includes(u.email)}
+                                  onChange={() => toggleComparisonUser(u.email)}
+                                />
+                                {u.label}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {comparisonTeamGroups.unassigned.length > 0 && (() => {
+                    const emails = comparisonTeamGroups.unassigned.map(u => u.email);
+                    const selectedCount = emails.filter(e => comparisonUserEmails.includes(e)).length;
+                    const allSelected = selectedCount === emails.length;
+                    const isExpanded = !!expandedComparisonGroups['__unassigned__'];
+                    return (
+                      <div className="comparison-team-group">
+                        <div className="comparison-team-group-header">
+                          <button
+                            type="button"
+                            className="comparison-team-toggle"
+                            onClick={() => toggleComparisonGroupExpanded('__unassigned__')}
+                            aria-expanded={isExpanded}
+                            aria-label={isExpanded ? 'メンバーを折りたたむ' : 'メンバーを表示'}
+                          >
+                            <span className={`toggle-icon ${isExpanded ? 'open' : ''}`}>▶</span>
+                          </button>
+                          <label className="comparison-user-checkbox comparison-team-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={() => setComparisonGroupSelected(emails, !allSelected)}
+                            />
+                            未所属
+                            <small style={{ color: 'var(--text-muted-color)' }}> ({selectedCount}/{emails.length})</small>
+                          </label>
+                        </div>
+                        {isExpanded && (
+                          <div className="comparison-user-checkbox-list nested">
+                            {comparisonTeamGroups.unassigned.map(u => (
+                              <label key={u.email} className="comparison-user-checkbox">
+                                <input
+                                  type="checkbox"
+                                  checked={comparisonUserEmails.includes(u.email)}
+                                  onChange={() => toggleComparisonUser(u.email)}
+                                />
+                                {u.label}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginBottom: '0.5rem' }}>
