@@ -220,6 +220,59 @@ export async function fetchScoutReplyCounts(
   return { counts, totalMatched: matches.length, totalScanned };
 }
 
+export interface FullMessage {
+  id: string;
+  dateISO: string;
+  subject: string;
+  body: string;
+}
+
+/**
+ * Fetches every message in [startDateISO, endDateISOInclusive] with full body content — no
+ * subject-keyword narrowing, unlike fetchScoutReplyCounts above. Used by
+ * pipelineAchievementMatch.ts, which can't rely on a fixed notification template the way
+ * scout-reply detection does (these emails come from varied ATS systems or individual
+ * client-company staff, with no consistent subject/sender pattern to filter on up front).
+ */
+export async function fetchFullMessagesInRange(
+  accessToken: string,
+  startDateISO: string,
+  endDateISOInclusive: string,
+  onProgress?: GmailScanProgress
+): Promise<FullMessage[]> {
+  const start = new Date(startDateISO + 'T00:00:00');
+  const endExclusive = new Date(endDateISOInclusive + 'T00:00:00');
+  endExclusive.setDate(endExclusive.getDate() + 1);
+  const q = `after:${toGmailDate(start)} before:${toGmailDate(endExclusive)}`;
+
+  let messages: { id: string }[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({ q, maxResults: '100' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const listRes = await gmailFetch(accessToken, `messages?${params.toString()}`);
+    messages = messages.concat(listRes.messages || []);
+    pageToken = listRes.nextPageToken;
+  } while (pageToken);
+
+  const details = await mapWithConcurrency(
+    messages,
+    8,
+    (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=full`),
+    onProgress
+  );
+
+  return details.map((detail, i) => {
+    const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
+    return {
+      id: messages[i].id,
+      dateISO: toDateISO(Number(detail.internalDate)),
+      subject: subjectHeader?.value || '',
+      body: extractMessageBody(detail.payload),
+    };
+  });
+}
+
 /** Fetches per-media scout-reply-notification-email counts for every date in [startDateISO, endDateISOInclusive]. */
 export async function fetchScoutReplyCountsForRange(
   accessToken: string,

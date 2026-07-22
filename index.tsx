@@ -21,6 +21,7 @@ import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } fr
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, GoogleTasksPermissionError } from './services/googleTasks';
+import { detectPipelineAchievements, DetectedPipelineAchievement, PipelineMatchCandidate, PipelineEventKpiKey, PIPELINE_EVENT_KPI_KEYS } from './services/pipelineAchievementMatch';
 
 ChartJS.register(
   CategoryScale,
@@ -294,6 +295,12 @@ interface CompanyApplication {
   // dashboard, so a candidate interviewing at several companies isn't counted multiple times.
   offerConfidence?: ConfidenceGrade;
   acceptanceConfidence?: ConfidenceGrade;
+  // Which stage-pass KPI keys (書類選考通過/1次面接通過/etc., see PIPELINE_EVENT_KPI_KEYS) have
+  // already been counted into a day's KPI actuals for THIS application, via email-based
+  // detection (services/pipelineAchievementMatch.ts) — prevents re-scanning the same email (or
+  // an overlapping date range) from double-counting the same event. Does not include
+  // candidatesSubmitted — see Candidate.recommendationRecorded for why.
+  recordedAchievementKpiKeys?: PipelineEventKpiKey[];
 }
 
 interface Candidate {
@@ -327,6 +334,11 @@ interface Candidate {
   // identifies whose data this candidate belongs to, for display and edit-permission checks.
   ownerEmail?: string;
   ownerLabel?: string;
+  // Whether 候補者推薦数 (candidatesSubmitted) has already been counted for this candidate via
+  // email-based detection — a candidate-level flag (not per-application) because the user's
+  // requirement is that a recommendation only ever counts once per candidate, even when they've
+  // been submitted to several companies.
+  recommendationRecorded?: boolean;
 }
 
 
@@ -1311,13 +1323,20 @@ const DateEntryModal: React.FC<{
   onSave: (date: string, values: KpiTotals) => void;
   onNavigate: (currentDate: string, currentValues: KpiTotals, offsetDays: number) => void;
   onClose: () => void;
-}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose }) => {
+  buildMatchCandidates: () => PipelineMatchCandidate[];
+  onApplyPipelineAchievements: (achievements: DetectedPipelineAchievement[]) => void;
+}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose, buildMatchCandidates, onApplyPipelineAchievements }) => {
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
   const [gmailStatus, setGmailStatus] = useState<'idle' | 'loading' | 'error' | 'done'>('idle');
   const [gmailMessage, setGmailMessage] = useState('');
   const [gmailNeedsReauth, setGmailNeedsReauth] = useState(false);
+  const [achievementStatus, setAchievementStatus] = useState<'idle' | 'loading' | 'error' | 'preview'>('idle');
+  const [achievementMessage, setAchievementMessage] = useState('');
+  const [achievementNeedsReauth, setAchievementNeedsReauth] = useState(false);
+  const [detectedAchievements, setDetectedAchievements] = useState<DetectedPipelineAchievement[]>([]);
+  const [achievementUnchecked, setAchievementUnchecked] = useState<Set<string>>(new Set());
 
   // This modal instance stays mounted across 前日/次日 navigation (only `date`/`initialValues`
   // change) instead of unmounting like a normal open/close does, so entryValues must be reset
@@ -1328,6 +1347,11 @@ const DateEntryModal: React.FC<{
     setGmailStatus('idle');
     setGmailMessage('');
     setGmailNeedsReauth(false);
+    setAchievementStatus('idle');
+    setAchievementMessage('');
+    setAchievementNeedsReauth(false);
+    setDetectedAchievements([]);
+    setAchievementUnchecked(new Set());
   }, [date]);
 
   const formattedDate = new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', {
@@ -1426,6 +1450,74 @@ const DateEntryModal: React.FC<{
     }
   };
 
+  const achievementKey = (a: DetectedPipelineAchievement) => `${a.messageId}|${a.candidateId}|${a.kpiKey}`;
+
+  const handleCheckPipelineAchievements = async () => {
+    const session = getCurrentSession();
+    if (!session) {
+      setAchievementStatus('error');
+      setAchievementMessage('ログイン情報が確認できませんでした。再読み込みしてからお試しください。');
+      return;
+    }
+    setAchievementStatus('loading');
+    setAchievementMessage('');
+    setAchievementNeedsReauth(false);
+    try {
+      const results = await detectPipelineAchievements(session.accessToken, date, date, buildMatchCandidates());
+      setDetectedAchievements(results);
+      setAchievementUnchecked(new Set());
+      setAchievementStatus('preview');
+      setAchievementMessage(results.length === 0 ? 'この日に該当する実績は見つかりませんでした。' : '');
+    } catch (err) {
+      setAchievementStatus('error');
+      if (err instanceof GmailPermissionError) {
+        setAchievementMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setAchievementNeedsReauth(true);
+      } else {
+        setAchievementMessage(err instanceof Error ? err.message : 'メールの確認に失敗しました。');
+      }
+    }
+  };
+
+  const handleReauthorizeAchievements = async () => {
+    setAchievementStatus('loading');
+    setAchievementMessage('');
+    try {
+      await reauthorizeWithConsent();
+      await handleCheckPipelineAchievements();
+    } catch (err) {
+      setAchievementStatus('error');
+      setAchievementMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+    }
+  };
+
+  const toggleAchievementChecked = (key: string) => {
+    setAchievementUnchecked(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  // Applies immediately (persists to entries/candidates via the App-level handler) rather than
+  // only touching local entryValues pending this modal's own 保存 button — otherwise marking
+  // the underlying candidate/application as "recorded" would need to be deferred until save,
+  // which risks the same event being suggested again if the user navigates away without saving.
+  // entryValues is still bumped locally too, purely so the form reflects the just-applied count
+  // without waiting for a prop update from the parent.
+  const handleApplyDetectedAchievements = () => {
+    const selected = detectedAchievements.filter(a => !achievementUnchecked.has(achievementKey(a)));
+    if (selected.length === 0) return;
+    onApplyPipelineAchievements(selected);
+    setEntryValues(prev => {
+      const next = { ...prev };
+      selected.forEach(a => { next[a.kpiKey as KpiKey] = (next[a.kpiKey as KpiKey] || 0) + 1; });
+      return next;
+    });
+    setDetectedAchievements(prev => prev.filter(a => !selected.includes(a)));
+    setAchievementMessage(`${selected.length}件を反映しました。`);
+  };
+
   const isFormEmpty = Object.values(entryValues).every(val => val === undefined || val === 0 || val === null);
   const isSaveDisabled = isFormEmpty && (!initialValues || Object.values(initialValues).every(v => v === 0));
   const canClear = initialValues && Object.values(initialValues).some(v => v > 0);
@@ -1462,6 +1554,43 @@ const DateEntryModal: React.FC<{
               </div>
             ))}
           </fieldset>
+
+          <div className="gmail-scout-fetch-bar">
+            <button type="button" onClick={handleCheckPipelineAchievements} disabled={achievementStatus === 'loading'} className="secondary-action-button">
+              {achievementStatus === 'loading' ? '確認中...' : 'メールから選考実績を確認'}
+            </button>
+            {achievementNeedsReauth && (
+              <button type="button" onClick={handleReauthorizeAchievements} className="secondary-action-button">
+                Gmailの権限を許可する
+              </button>
+            )}
+            {achievementMessage && (
+              <span className={`gmail-scout-message ${achievementStatus === 'error' ? 'is-error' : ''}`}>{achievementMessage}</span>
+            )}
+          </div>
+          {achievementStatus === 'preview' && detectedAchievements.length > 0 && (
+            <div className="achievement-preview-inline">
+              <ul className="achievement-preview-list">
+                {detectedAchievements.map(a => {
+                  const key = achievementKey(a);
+                  return (
+                    <li key={key} className="achievement-preview-item">
+                      <label>
+                        <input type="checkbox" checked={!achievementUnchecked.has(key)} onChange={() => toggleAchievementChecked(key)} />
+                        <span className="achievement-preview-main">
+                          {a.candidateName}{a.companyName ? `（${a.companyName}）` : ''}: {GENERAL_KPIS[a.kpiKey].label}
+                        </span>
+                      </label>
+                      {a.note && <p className="achievement-preview-note">「{a.note}」（件名: {a.subject}）</p>}
+                    </li>
+                  );
+                })}
+              </ul>
+              <button type="button" onClick={handleApplyDetectedAchievements} className="secondary-action-button">
+                選択した実績を反映
+              </button>
+            </div>
+          )}
 
           <div className="media-kpi-section">
             <h3 className="sub-section-title">媒体別実績</h3>
@@ -1708,6 +1837,173 @@ const BulkGmailReplyImportModal: React.FC<{
           {status === 'preview' && result && previewRows.length > 0 && (
             <button type="button" onClick={() => onApply(result.countsByDate)} className="submit-button">
               反映する（{previewRows.length}日分）
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+/**
+ * Scans Gmail over a date range for stage-pass/推薦 events matching this user's own pipeline
+ * candidates (see services/pipelineAchievementMatch.ts), and lets them review/uncheck detected
+ * items — since this is AI-classified from free-form email content rather than a fixed
+ * template, a review step before writing to real KPI actuals is worth the extra click.
+ */
+const PipelineAchievementImportModal: React.FC<{
+  buildMatchCandidates: () => PipelineMatchCandidate[];
+  onApply: (achievements: DetectedPipelineAchievement[]) => void;
+  onClose: () => void;
+}> = ({ buildMatchCandidates, onApply, onClose }) => {
+  const toDateInputValue = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const todayStr = toDateInputValue(new Date());
+  const defaultStartStr = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 14);
+    return toDateInputValue(d);
+  })();
+
+  const [startDate, setStartDate] = useState(defaultStartStr);
+  const [endDate, setEndDate] = useState(todayStr);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'preview'>('idle');
+  const [message, setMessage] = useState('');
+  const [needsReauth, setNeedsReauth] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [detected, setDetected] = useState<DetectedPipelineAchievement[]>([]);
+  const [uncheckedKeys, setUncheckedKeys] = useState<Set<string>>(new Set());
+
+  const achievementKey = (a: DetectedPipelineAchievement) => `${a.messageId}|${a.candidateId}|${a.kpiKey}`;
+
+  const runScan = async () => {
+    const session = getCurrentSession();
+    if (!session) {
+      setStatus('error');
+      setMessage('ログイン情報が確認できませんでした。再読み込みしてからお試しください。');
+      return;
+    }
+    if (startDate > endDate) {
+      setStatus('error');
+      setMessage('開始日は終了日より前の日付にしてください。');
+      return;
+    }
+    setStatus('loading');
+    setMessage('');
+    setNeedsReauth(false);
+    setProgress(null);
+    try {
+      const matchCandidates = buildMatchCandidates();
+      const results = await detectPipelineAchievements(
+        session.accessToken, startDate, endDate, matchCandidates,
+        (done, total) => setProgress({ done, total })
+      );
+      setDetected(results);
+      setUncheckedKeys(new Set());
+      setStatus('preview');
+    } catch (err) {
+      setStatus('error');
+      if (err instanceof GmailPermissionError) {
+        setMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setNeedsReauth(true);
+      } else {
+        setMessage(err instanceof Error ? err.message : 'メールの確認に失敗しました。');
+      }
+    }
+  };
+
+  const handleReauthorize = async () => {
+    setStatus('loading');
+    setMessage('');
+    try {
+      await reauthorizeWithConsent();
+      await runScan();
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+    }
+  };
+
+  const toggleChecked = (key: string) => {
+    setUncheckedKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const selectedAchievements = detected.filter(a => !uncheckedKeys.has(achievementKey(a)));
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="pipeline-achievement-modal-title">
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="pipeline-achievement-modal-title">メールから選考実績を確認</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            指定した期間のメールを確認し、自分のパイプラインにいる候補者の氏名・選考企業と一致する内容（書類選考通過・面接通過・推薦など）をAIで検出します。
+            検出結果は内容を確認してから反映してください。推薦（候補者推薦数）は複数社あっても候補者1人につき1回のみ反映されます。
+          </p>
+          <div className="bulk-gmail-date-range">
+            <div className="form-group">
+              <label htmlFor="achievement-scan-start">開始日</label>
+              <input type="date" id="achievement-scan-start" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="achievement-scan-end">終了日</label>
+              <input type="date" id="achievement-scan-end" value={endDate} min={startDate} max={todayStr} onChange={(e) => setEndDate(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="gmail-scout-fetch-bar">
+            <button type="button" onClick={runScan} disabled={status === 'loading'} className="secondary-action-button">
+              {status === 'loading' ? '確認中...' : 'メールを確認する'}
+            </button>
+            {needsReauth && (
+              <button type="button" onClick={handleReauthorize} className="secondary-action-button">Gmailの権限を許可する</button>
+            )}
+            {status === 'loading' && progress && progress.total > 0 && (
+              <span className="gmail-scout-message">{progress.done} / {progress.total} 件を判定中...</span>
+            )}
+            {message && <span className={`gmail-scout-message ${status === 'error' ? 'is-error' : ''}`}>{message}</span>}
+          </div>
+
+          {status === 'preview' && (
+            <div className="bulk-gmail-preview">
+              {detected.length === 0 ? (
+                <p className="gmail-scout-message">この期間に該当する実績は見つかりませんでした。</p>
+              ) : (
+                <>
+                  <p className="gmail-scout-message">{detected.length}件の実績を検出しました。反映する項目を確認してください。</p>
+                  <ul className="achievement-preview-list">
+                    {detected.map(a => {
+                      const key = achievementKey(a);
+                      return (
+                        <li key={key} className="achievement-preview-item">
+                          <label>
+                            <input type="checkbox" checked={!uncheckedKeys.has(key)} onChange={() => toggleChecked(key)} />
+                            <span className="achievement-preview-main">
+                              {a.dateISO} — {a.candidateName}
+                              {a.companyName ? `（${a.companyName}）` : ''}: {GENERAL_KPIS[a.kpiKey].label}
+                            </span>
+                          </label>
+                          {a.note && <p className="achievement-preview-note">「{a.note}」（件名: {a.subject}）</p>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+          {status === 'preview' && selectedAchievements.length > 0 && (
+            <button type="button" onClick={() => { onApply(selectedAchievements); onClose(); }} className="submit-button">
+              反映する（{selectedAchievements.length}件）
             </button>
           )}
         </div>
@@ -1979,6 +2275,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-22',
     items: [
+      'メールの内容をAIで確認し、パイプラインの候補者名・選考企業と一致する書類選考通過・面接通過・推薦を検出してKPI実績に反映する機能を追加（推薦は候補者1人につき1回のみ反映）',
       'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
       'Googleタスク同期でバッチ処理中に1件失敗すると同じタスクが重複作成されてしまう不具合を修正',
       '全ユーザー/チーム別進捗の各セクションの初期表示（開閉）状態を、ユーザーごとに保存できるように',
@@ -6428,6 +6725,7 @@ const App: React.FC = () => {
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [isBulkGmailModalOpen, setIsBulkGmailModalOpen] = useState(false);
+  const [isPipelineAchievementModalOpen, setIsPipelineAchievementModalOpen] = useState(false);
   const [isMediaCsvModalOpen, setIsMediaCsvModalOpen] = useState(false);
 
   // UI state
@@ -7175,6 +7473,74 @@ const App: React.FC = () => {
     }
   };
 
+  // Builds the candidate list handed to detectPipelineAchievements — only this user's own,
+  // currently-active (non-hidden) candidates, and only the companies/stages that haven't
+  // already been recorded, so the service never needs to re-check for duplicates itself.
+  const buildPipelineMatchCandidates = useCallback((): PipelineMatchCandidate[] => {
+    return (currentUserData?.candidates || [])
+      .filter(c => !c.isHidden && c.name.trim())
+      .map(c => {
+        const pendingKpiKeysByCompany: Record<string, PipelineEventKpiKey[]> = {};
+        c.applications.filter(app => !app.isHidden && app.companyName.trim()).forEach(app => {
+          const recorded = new Set(app.recordedAchievementKpiKeys || []);
+          const pending = PIPELINE_EVENT_KPI_KEYS.filter(k => k !== 'candidatesSubmitted' && !recorded.has(k));
+          if (pending.length > 0) pendingKpiKeysByCompany[app.companyName] = pending;
+        });
+        return {
+          candidateId: c.id,
+          candidateName: c.name,
+          pendingKpiKeysByCompany,
+          recommendationPending: !c.recommendationRecorded,
+        };
+      })
+      .filter(c => c.recommendationPending || Object.keys(c.pendingKpiKeysByCompany).length > 0);
+  }, [currentUserData]);
+
+  // Applies a confirmed batch of detected achievements: increments each affected day's KPI
+  // actual by 1 per event (summed if several land on the same day+key — never overwritten,
+  // since other data on that day, or other achievements, must survive), and marks the
+  // originating candidate/application so the same event is never suggested again.
+  const handleApplyPipelineAchievements = (achievements: DetectedPipelineAchievement[]) => {
+    if (!currentUserData || achievements.length === 0) return;
+    const entriesByDateMap = new Map<string, KpiEntry>(currentUserData.entries.map(entry => [entry.date, entry] as [string, KpiEntry]));
+    let idOffset = 0;
+    achievements.forEach(a => {
+      const existing = entriesByDateMap.get(a.dateISO);
+      const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+      values[a.kpiKey as KpiKey] = (values[a.kpiKey as KpiKey] || 0) + 1;
+      entriesByDateMap.set(a.dateISO, { id: existing?.id ?? Date.now() + (idOffset++), date: a.dateISO, values });
+    });
+    const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+    const recommendedCandidateIds = new Set(achievements.filter(a => a.kpiKey === 'candidatesSubmitted').map(a => a.candidateId));
+    const stagePassesByCandidateId = new Map<string, { companyName: string; kpiKey: PipelineEventKpiKey }[]>();
+    achievements.filter(a => a.kpiKey !== 'candidatesSubmitted' && a.companyName).forEach(a => {
+      const list = stagePassesByCandidateId.get(a.candidateId) || [];
+      list.push({ companyName: a.companyName!, kpiKey: a.kpiKey });
+      stagePassesByCandidateId.set(a.candidateId, list);
+    });
+
+    const updatedCandidates = currentUserData.candidates.map(c => {
+      const stagePasses = stagePassesByCandidateId.get(c.id);
+      const becomesRecommended = recommendedCandidateIds.has(c.id);
+      if (!stagePasses && !becomesRecommended) return c;
+      const applications = c.applications.map(app => {
+        const relevant = stagePasses?.filter(sp => sp.companyName === app.companyName) || [];
+        if (relevant.length === 0) return app;
+        const recorded = new Set(app.recordedAchievementKpiKeys || []);
+        relevant.forEach(sp => recorded.add(sp.kpiKey));
+        return { ...app, recordedAchievementKpiKeys: Array.from(recorded) };
+      });
+      return { ...c, applications, recommendationRecorded: becomesRecommended ? true : c.recommendationRecorded };
+    });
+
+    const updatedData = { ...currentUserData, entries: updatedEntries, candidates: updatedCandidates };
+    setCurrentUserData(updatedData);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
   // Mirrors googleTaskIdsByApplicationId — kept in sync with state via the effect below, but
   // also written to directly (synchronously) inside the sync queue itself, so a second sync
   // queued right after the first always sees the first one's freshly-created task IDs instead
@@ -7794,6 +8160,8 @@ const App: React.FC = () => {
           onSave={handleSaveEntry}
           onNavigate={handleNavigateEntryDate}
           onClose={() => setSelectedDate(null)}
+          buildMatchCandidates={buildPipelineMatchCandidates}
+          onApplyPipelineAchievements={handleApplyPipelineAchievements}
         />
       )}
       {isBulkGmailModalOpen && (
@@ -7810,6 +8178,13 @@ const App: React.FC = () => {
           entriesByDate={entriesByDate}
           onApply={handleApplyMediaCsvImport}
           onClose={() => setIsMediaCsvModalOpen(false)}
+        />
+      )}
+      {isPipelineAchievementModalOpen && (
+        <PipelineAchievementImportModal
+          buildMatchCandidates={buildPipelineMatchCandidates}
+          onApply={handleApplyPipelineAchievements}
+          onClose={() => setIsPipelineAchievementModalOpen(false)}
         />
       )}
 
@@ -7936,6 +8311,9 @@ const App: React.FC = () => {
                  </button>
                  <button type="button" onClick={() => setIsMediaCsvModalOpen(true)} className="secondary-action-button">
                    媒体CSVから実績を取り込む
+                 </button>
+                 <button type="button" onClick={() => setIsPipelineAchievementModalOpen(true)} className="secondary-action-button">
+                   メールから選考実績を確認
                  </button>
                </span>
              </div>
