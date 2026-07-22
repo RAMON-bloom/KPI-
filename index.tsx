@@ -6723,6 +6723,29 @@ const App: React.FC = () => {
     return memberDepartments[email] === selectedDivision;
   }, [selectedDivision, memberDepartments]);
 
+  // Teams filtered to the header's selected division — a team counts as "in" a division if any
+  // of its members is assigned to it. Used for チーム別's team-select dropdown, so a team from
+  // the other department simply isn't offered unless the header switcher is back on BCA (the
+  // combined view). The 全ユーザー tab's team-grouped comparison picker doesn't need this
+  // separately — a team with no members in the current division already drops out there via
+  // its own member-level filtering.
+  const divisionScopedTeams = useMemo(() => {
+    if (selectedDivision === 'BCA') return teams;
+    return teams.filter(t => t.memberEmails.some(email => {
+      const resolved = resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email;
+      return memberDepartments[resolved] === selectedDivision;
+    }));
+  }, [teams, selectedDivision, memberDepartments, displayedAllUsersData]);
+
+  // If switching the division switcher makes the currently-selected team disappear from the
+  // dropdown above, drop the selection too — otherwise team_kpi would keep showing a team that
+  // is no longer even listed as an option.
+  useEffect(() => {
+    if (selectedTeamId && !divisionScopedTeams.some(t => t.id === selectedTeamId)) {
+      setSelectedTeamId(null);
+    }
+  }, [selectedTeamId, divisionScopedTeams]);
+
   // A ref (not just React state) tracking the teams-config file id, kept in sync with
   // teamsDriveFileId below. persistTeams reads/writes this ref directly rather than the state
   // value, and chains writes through teamsWriteQueueRef — otherwise, two team mutations fired
@@ -8287,7 +8310,7 @@ const App: React.FC = () => {
                   onChange={(e) => setSelectedTeamId(e.target.value || null)}
                 >
                   <option value="">選択してください</option>
-                  {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  {divisionScopedTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </div>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
