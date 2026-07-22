@@ -1967,6 +1967,158 @@ const CalendarView: React.FC<{
 };
 
 
+// アプリのアップデート履歴。新しい変更をリリースしたら、この配列の先頭（日付が新しい方）に
+// 追記する — 日付ごとにグルーピングし、各項目は利用者向けの分かりやすい文言で書く（内部の
+// 実装用語や技術的な詳細は書かない）。
+interface ChangelogEntry {
+  date: string; // yyyy-mm-dd
+  items: string[];
+}
+
+const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-07-22',
+    items: [
+      'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
+      'Googleタスク同期でバッチ処理中に1件失敗すると同じタスクが重複作成されてしまう不具合を修正',
+      '全ユーザー/チーム別進捗の各セクションの初期表示（開閉）状態を、ユーザーごとに保存できるように',
+      '掘り起しリストから直接「非表示」に移動できるボタンを追加し、掘り起しの次アクションもGoogleタスクに自動反映されるように',
+      '候補者カードに「掘り起しリストに追加」機能を追加（パイプライン上は非表示になり、専用リストとカレンダーで確認できる）',
+      'Googleタスク同期を常時自動化し、ON/OFFの切り替え設定を廃止',
+      '選考予定に開始時刻を追加し、Googleタスクのタイトルにも反映されるように',
+      'パイプラインの選考予定をGoogleタスクに自動同期する機能を追加',
+      '「比較するユーザー」の選択をチーム→メンバーの2階層の折りたたみ表示に変更（メンバーが増えても見やすいように）',
+      '全ユーザータブの「比較するユーザー」選択にも事業部の絞り込みを適用',
+      'BCA事業部をF+/ACの2部署に分割し、ヘッダーに事業部切り替えスイッチャーを追加',
+      '「意思決定時期」（旧: 決定見込み日）のフィルターを「今月見込み」「来月見込み」に変更',
+      'パイプラインの応募に意思決定時期を追加し、フィルター・並び替えに対応',
+    ],
+  },
+  {
+    date: '2026-07-21',
+    items: [
+      '面談ログの手動アップロードでPDF・Wordファイルにも対応',
+      '個人実績の月次進捗に前月/次月ボタンを追加、面談ログの手動アップロード（ドラッグ&ドロップ）に対応',
+      '月別パフォーマンストレンドをスカウト媒体ごとに確認できるように',
+      'BIZのCSV取込で「一時未ログイン専用」カテゴリを除外',
+      'BIZ/Dodaのスカウト実績CSVインポート機能を追加',
+      '歩留まり分析（ファネル）をスカウト媒体ごとに確認できるように',
+      '歩留まり分析の対象項目を日次実績の全項目に拡大',
+      'パイプラインの選考フェーズに「適性検査」を追加',
+      'パイプラインの「想定粗利」セクションもデフォルトで折りたたみ表示に',
+      '「企業別パイプライン状況」「集客媒体別決定率分析」をデフォルトで折りたたみ表示に',
+      '全ユーザー/チーム別ダッシュボードの各セクションをデフォルトで折りたたみ表示に',
+      '前月/次月ボタンの配色を見やすく調整',
+      '週間サマリーの対象週を前月/次月ボタンと連動させるように修正',
+      '全ユーザー/チーム別の期間指定バーに前月/次月ボタンを追加',
+    ],
+  },
+  {
+    date: '2026-07-20',
+    items: [
+      '個人実績の曜日別返信率グラフに期間フィルターを追加',
+      '月別パフォーマンストレンドの初期表示を「スカウト返信数」のみに変更',
+      'リクルートダイレクトスカウトの同日・同一候補者の返信を重複カウントしないように修正',
+      '日次入力モーダルに前日/翌日ボタンを追加',
+    ],
+  },
+  {
+    date: '2026-07-19',
+    items: [
+      '全ユーザー・チーム別タブのCSV出力ボタンをそれぞれ1つに統合、期間フィルターの切り替えも統合',
+      '媒体別歩留まり比較表に返信数の列を追加',
+      '候補者カードの「登録者」表示の不整合を修正',
+      'チームメンバーのメールアドレス表記ゆれにより候補者の登録者が表示されない不具合を修正',
+      'パイプラインカレンダーのイベントをクリックして編集できるように（自分の候補者のみ）',
+      'パイプラインのチームメンバーフィルターを候補者カード一覧の直上に移動',
+      'パイプラインのチームスコープにメンバー単位の絞り込みを追加',
+      'チームの作成・編集権限を管理できる仕組みを追加',
+      'チーム作成・読み込み時の不具合を修正',
+      '月別パフォーマンストレンドにユーザー単位の比較モードを追加',
+      '月別パフォーマンストレンドに指標選択機能を追加し、チームダッシュボードにも表示',
+      'AIによる改善提案パネルに月次履歴を渡し、比較・予測ができるように',
+      '曜日別返信率グラフをダッシュボードの期間指定と連動',
+      'カスタム期間でのダッシュボード表示と自由記述のAI提案パネルを追加',
+      '過去のスカウト返信数をまとめてGmailから一括取得する機能を追加',
+      'Gmailのスカウト返信検出対象にLiigaを追加',
+      '日次入力モーダルでGmailからスカウト返信数を自動反映できるように',
+      '週次サマリーの合計表示を表の上に移動',
+      '想定粗利セクションに選考フェーズの複数選択フィルターと候補者・企業の詳細を追加',
+      'カレンダーからの実績入力を保存時に即Driveへ同期するように変更',
+    ],
+  },
+  {
+    date: '2026-07-18',
+    items: [
+      '日次入力モーダルの媒体別入力欄を、縦積みからコンパクトな表形式に変更',
+      'パイプラインのCSV出力に粗利・担当者別サマリーを追加',
+      'パイプラインのCSV出力に登録者名・確度評価を追加',
+      '全ユーザー月次進捗の目標値集計にアーカイブ済み媒体が混入する不具合を修正',
+      'KPI入力カレンダーの上に最終同期時刻の表示と手動同期ボタンを追加',
+      '入力保存時にすぐ同期失敗を検知できるように改善',
+      '同期待ちデータの復旧手順を表示、再ログイン時の不具合を修正',
+      'Drive保存失敗時の自動リトライと通知を追加（セッション切れ等）',
+      'Driveへの書き込みを直列化し、データ消失を防止',
+      'ログアウト・タブを閉じる際に保存待ちのデータを確実に書き込むように',
+      '歩留まり分析に返信数・面談数を追加',
+      '全ユーザータブでのみ「想定粗利」セクションを非表示に',
+      '全ユーザー・チーム別にカスタム期間でのCSV出力を追加',
+      '全ユーザータブに任意のユーザー比較選択とCSV出力を追加',
+      '媒体設定・媒体管理の不具合を複数修正',
+      '媒体ごとの手数料率と想定粗利ダッシュボードを追加',
+      'チームメンバーを登録済みの表示名から選べるように',
+      '企業別にグループ化したパイプライン表示を追加',
+      '非表示の候補者をカレンダーの予定選択から除外',
+      'パイプラインカレンダーからクリックで選考予定を登録できるように',
+      'パイプラインカレンダーに選考フェーズを表示',
+      'パイプラインカレンダー、選考メモの手動入力、面談要約の簡略化を追加',
+      'チーム進捗のCSV出力機能を追加',
+      'チーム・全ユーザー表示にメンバー別週次サマリーを追加',
+      'チーム・全ユーザー表示に週次サマリーセクションを追加',
+      '他メンバーのデータが全ユーザー画面に表示されない不具合を複数修正（Drive共有・検出周り）',
+      '全ユーザータブに歩留まり分析とAIによる改善提案を追加',
+      'Google Meetの文字起こしを検索して候補者の面談要約に反映',
+      '候補者一覧に選考フェーズの複数選択フィルターを追加',
+      'パイプラインのスコープ切り替えにユーザー単位の絞り込みを追加',
+      '候補者パイプラインを全ユーザー・チーム単位で表示できるように',
+      'ログイン状態の保持と、他ユーザーへの共有が失敗する不具合を修正',
+    ],
+  },
+  {
+    date: '2026-07-17',
+    items: [
+      'スカウト媒体をユーザーが編集できるように',
+      'Drive経由のデータ読み込みを高速化',
+      '全ユーザー・チーム別ダッシュボードで自分のデータが古い状態のまま表示される不具合を修正',
+      '表示名の編集とGoogleログインの保持機能を追加',
+      'Googleログイン・Drive連携・チーム機能を追加',
+      '初回リリース：KPI管理くん',
+    ],
+  },
+];
+
+const ChangelogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
+  <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="changelog-modal-title">
+    <div className="modal-content" onClick={e => e.stopPropagation()}>
+      <div className="modal-header">
+        <h3 id="changelog-modal-title">アップデート履歴</h3>
+        <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+      </div>
+      <div className="modal-body">
+        {APP_CHANGELOG.map(entry => (
+          <div key={entry.date} className="changelog-entry">
+            <h4 className="changelog-date">{new Date(entry.date + 'T00:00:00').toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' })}</h4>
+            <ul className="changelog-item-list">
+              {entry.items.map((item, idx) => <li key={idx}>{item}</li>)}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+
 const TeamsModal: React.FC<{
     teams: Team[];
     isEditable: boolean;
@@ -6180,6 +6332,7 @@ const App: React.FC = () => {
   const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
   const [memberDepartments, setMemberDepartments] = useState<Record<string, Department>>({});
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
+  const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
   // specific users to compare, independent of the formal Team groupings.
@@ -7617,6 +7770,9 @@ const App: React.FC = () => {
           onSetMemberDepartment={handleSetMemberDepartment}
         />
       )}
+      {isChangelogModalOpen && (
+        <ChangelogModal onClose={() => setIsChangelogModalOpen(false)} />
+      )}
       {isMediaModalOpen && (
         <MediaModal
           allMedia={allMedia}
@@ -7742,6 +7898,7 @@ const App: React.FC = () => {
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
+            <button onClick={() => setIsChangelogModalOpen(true)}>更新履歴</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>
           </div>
         </div>
