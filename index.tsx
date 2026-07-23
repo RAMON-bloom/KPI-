@@ -50,6 +50,11 @@ const GENERAL_KPIS = {
   finalInterviewPassed: { label: '最終面接合格数', target: 7 },
   offersExtended: { label: '内定数', target: 5 },
   placements: { label: '内定承諾数', target: 3 },
+  // Exit outcomes rather than progress toward a goal — target 0 since there's nothing to aim
+  // for (see FUNNEL_EXCLUDED_GENERAL_KPI_KEYS for why these are excluded from the main
+  // sequential funnel chain and shown as their own breakdown instead).
+  declined: { label: 'お見送り数', target: 0 },
+  withdrawn: { label: '選考辞退数', target: 0 },
 };
 
 // A scouting media source (e.g. "RDS", "Doda"). User-editable and persisted to Google
@@ -212,8 +217,10 @@ const FORWARD_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適
 // (funnel-input metric: how many passed the final interview) and offersExtended (outcome
 // metric: how many offers went out) — the same real event, tracked two ways. 適性検査/カジュア
 // ル面談 both fold into documentScreeningPassed since neither has its own funnel counter — they
-// sit between 書類選考 and 1次面接 without a dedicated KPI. Stages with no entry here (打診
-// itself, お見送り/選考辞退) never trigger anything.
+// sit between 書類選考 and 1次面接 without a dedicated KPI. お見送り/選考辞退 are exit branches,
+// not forward progress — handled separately in getStageAdvanceKpiKeys below (moving INTO one
+// fires its own KPI directly, regardless of which stage the application was coming from). 打診
+// itself has no entry — nothing to have "just passed" to reach the very first stage.
 const STAGE_ADVANCE_KPI_KEYS: Partial<Record<PipelineStage, (keyof typeof GENERAL_KPIS)[]>> = {
   '書類選考': ['candidatesSubmitted'],
   '適性検査': ['documentScreeningPassed'],
@@ -223,16 +230,21 @@ const STAGE_ADVANCE_KPI_KEYS: Partial<Record<PipelineStage, (keyof typeof GENERA
   '最終面接': ['secondInterviewPassed'],
   '内定': ['finalInterviewPassed', 'offersExtended'],
   '内定承諾': ['placements'],
+  'お見送り': ['declined'],
+  '選考辞退': ['withdrawn'],
 };
 
 /**
- * Which GENERAL_KPIS keys does moving from `prevStage` to `nextStage` fire, in order — walks
- * every forward stage in between too (not just the destination), so a multi-step jump (e.g.
- * setting stage straight from 打診 to 1次面接 in one edit) still credits every gate actually
- * crossed, not just the last one. Returns [] for a backward move, a same-stage no-op save, or a
- * move into/out of お見送り・選考辞退 (not part of the forward progression at all).
+ * Which GENERAL_KPIS keys does moving from `prevStage` to `nextStage` fire. Moving INTO お見送り
+ * or 選考辞退 (from any other stage) always fires its own exit KPI directly, no walking — they're
+ * terminal branches, not steps in the forward progression. Otherwise walks every forward stage
+ * in between too (not just the destination), so a multi-step jump (e.g. setting stage straight
+ * from 打診 to 1次面接 in one edit) still credits every gate actually crossed, not just the last
+ * one. Returns [] for a backward move or a same-stage no-op save.
  */
 function getStageAdvanceKpiKeys(prevStage: PipelineStage, nextStage: PipelineStage): (keyof typeof GENERAL_KPIS)[] {
+  if (prevStage === nextStage) return [];
+  if (nextStage === 'お見送り' || nextStage === '選考辞退') return STAGE_ADVANCE_KPI_KEYS[nextStage] || [];
   const prevIdx = FORWARD_PIPELINE_STAGES.indexOf(prevStage);
   const nextIdx = FORWARD_PIPELINE_STAGES.indexOf(nextStage);
   if (prevIdx === -1 || nextIdx === -1 || nextIdx <= prevIdx) return [];
@@ -2081,6 +2093,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-22',
     items: [
+      'パイプラインの選考フェーズを「お見送り」「選考辞退」に変更した際も、それぞれ個人実績（お見送り数・選考辞退数）に自動反映されるようにし、歩留まり分析に候補者推薦数に対する比率として表示できるようにした',
       'メールを確認して選考実績を反映する機能は処理時間・精度の懸念から廃止。代わりに、パイプラインの選考フェーズ（打診・書類選考など）を変更すると、対応するKPI実績（書類選考通過数・1次面接通過数・推薦数など）が自動的に反映されるように変更（推薦は同じ候補者が複数社選考中でも1人につき1回のみ反映）',
       'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
       'Googleタスク同期でバッチ処理中に1件失敗すると同じタスクが重複作成されてしまう不具合を修正',
@@ -5417,6 +5430,14 @@ const MEDIA_FUNNEL_STAGE_LABELS: Record<string, string> = {
   effectiveInitialInterviews: '初回有効面談数',
 };
 
+// declined/withdrawn (お見送り数/選考辞退数) are EXIT counts, not sequential downstream steps —
+// appending them after 内定承諾 in the main pass-through funnel would produce a nonsensical
+// "conversion rate" comparing an exit count against placements. Excluded from FUNNEL_STAGES;
+// shown as their own breakdown instead (see FunnelAnalysisSection's 見送り・選考辞退 section,
+// rated against 候補者推薦数 — "of everyone recommended, how many were ultimately lost" is the
+// meaningful denominator here, not whatever the previous funnel row happens to be).
+const FUNNEL_EXCLUDED_GENERAL_KPI_KEYS: (keyof typeof GENERAL_KPIS)[] = ['declined', 'withdrawn'];
+
 // Covers every item entered in the daily entry form: the media-scoped sourcing-side steps
 // (aggregated across all media via getTotalFromLump, in the same order as the daily entry
 // table's columns) come first, since they happen before a candidate is ever submitted to a
@@ -5427,11 +5448,13 @@ const FUNNEL_STAGES: FunnelStageDef[] = [
     label: MEDIA_FUNNEL_STAGE_LABELS[suffix],
     getValue: (totals: KpiTotals, allMedia: MediaEntry[]) => getTotalFromLump(totals, `_${suffix}`, allMedia),
   })),
-  ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => ({
-    key: key as string,
-    label: GENERAL_KPIS[key].label,
-    getValue: (totals: KpiTotals) => totals[key] || 0,
-  })),
+  ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>)
+    .filter(key => !FUNNEL_EXCLUDED_GENERAL_KPI_KEYS.includes(key))
+    .map(key => ({
+      key: key as string,
+      label: GENERAL_KPIS[key].label,
+      getValue: (totals: KpiTotals) => totals[key] || 0,
+    })),
 ];
 
 // The media-scoped subset of FUNNEL_STAGES — used when viewing a single media's own funnel,
@@ -5501,6 +5524,26 @@ const FunnelAnalysisSection: React.FC<{
   const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
   const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
 
+  // 見送り・選考辞退 breakdown — kept out of the main sequential funnel (see
+  // FUNNEL_EXCLUDED_GENERAL_KPI_KEYS) but still summed here so they can be shown against 候補者
+  // 推薦数 as their own rate. Not media-scoped (GENERAL_KPIS entries aren't tagged by sourcing
+  // media), so this only makes sense in the 全媒体合計 view — same restriction the funnel table
+  // already applies to every other GENERAL_KPIS row.
+  const { declinedTotal, withdrawnTotal, recommendedTotal } = useMemo(() => {
+    let declined = 0, withdrawn = 0, recommended = 0;
+    users.forEach(email => {
+      const data = allUsersData[email];
+      if (!data) return;
+      const periodTotals = periodOverride
+        ? calculateTotalsForRange(data.entries || [], allMedia, periodOverride.start, periodOverride.end)
+        : calculateMonthlyTotals(data.entries || [], allMedia);
+      declined += periodTotals.declined || 0;
+      withdrawn += periodTotals.withdrawn || 0;
+      recommended += periodTotals.candidatesSubmitted || 0;
+    });
+    return { declinedTotal: declined, withdrawnTotal: withdrawn, recommendedTotal: recommended };
+  }, [users, allUsersData, allMedia, periodOverride]);
+
   // A separate, always-monthly-bucketed trend series (independent of periodOverride, which is
   // just a single snapshot window) — this is what lets the AI compare "this month vs last
   // month" or extrapolate a simple trend, neither of which is possible from one totals object.
@@ -5537,6 +5580,12 @@ const FunnelAnalysisSection: React.FC<{
         const rate = totalConversionRates[i];
         lines.push(`${stage.label}: ${totalStageValues[i]}件${rate !== null ? `（前段階からの歩留まり: ${rate.toFixed(1)}%）` : ''}`);
       });
+      if (selectedMediaId === 'all') {
+        lines.push(
+          `${GENERAL_KPIS.declined.label}: ${declinedTotal}件${recommendedTotal > 0 ? `（推薦数対比: ${(declinedTotal / recommendedTotal * 100).toFixed(1)}%）` : ''}`,
+          `${GENERAL_KPIS.withdrawn.label}: ${withdrawnTotal}件${recommendedTotal > 0 ? `（推薦数対比: ${(withdrawnTotal / recommendedTotal * 100).toFixed(1)}%）` : ''}`
+        );
+      }
       lines.push('', `【ユーザー別ファネル実績（${periodLabel}・${mediaLabel}）】`);
       users.forEach(email => {
         const data = allUsersData[email];
@@ -5661,6 +5710,31 @@ const FunnelAnalysisSection: React.FC<{
             </tbody>
           </table>
         </div>
+
+        {selectedMediaId === 'all' && (
+          <>
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>見送り・選考辞退（全ユーザー合計・{periodLabel}）</h3>
+            <div className="all-users-table-container">
+              <table className="all-users-table">
+                <thead>
+                  <tr><th>指標</th><th>件数</th><th>候補者推薦数に対する比率</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>{GENERAL_KPIS.declined.label}</td>
+                    <td>{declinedTotal}</td>
+                    <td>{recommendedTotal > 0 ? `${(declinedTotal / recommendedTotal * 100).toFixed(1)}%` : '—'}</td>
+                  </tr>
+                  <tr>
+                    <td>{GENERAL_KPIS.withdrawn.label}</td>
+                    <td>{withdrawnTotal}</td>
+                    <td>{recommendedTotal > 0 ? `${(withdrawnTotal / recommendedTotal * 100).toFixed(1)}%` : '—'}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
 
         <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}・{mediaLabel}）</h3>
         <div className="all-users-table-container">
