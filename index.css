@@ -1024,6 +1024,52 @@ section {
 .all-users-table th, .history-table th, .weekly-summary-table th { font-weight: 500; }
 .all-users-table tbody tr:hover, .weekly-summary-table tbody tr:hover { background-color: #f1f3f5; }
 
+/* ユーザー別ファネル比較: many stage columns, each with a long label plus a "（歩留まり %）"
+   suffix — packed into one line this wrapped mid-phrase at an arbitrary character and was hard
+   to scan. Splitting the label and the count/rate indicator onto their own controlled lines
+   (instead of one long concatenated string) and shrinking the header font keeps every column
+   readable without needing to widen the table. */
+.funnel-comparison-table {
+  /* Left to auto-layout, the browser squeezes every column to fit the viewport, which is what
+     forced each label to wrap character-by-character in the first place. Fixed layout instead
+     sizes columns from the (now nowrap) header content and lets the table itself grow wider
+     than its container — .all-users-table-container's overflow-x: auto turns that into a
+     horizontal scroll, which reads far better than a wall of broken-up labels. */
+  width: auto;
+  table-layout: auto;
+}
+.funnel-comparison-table th {
+  font-size: 0.78rem;
+  line-height: 1.3;
+  padding: 0.6rem 0.65rem;
+  text-align: center;
+  vertical-align: bottom;
+}
+.funnel-comparison-table th:first-child {
+  text-align: left;
+  white-space: nowrap;
+}
+.funnel-comparison-table td {
+  text-align: center;
+  white-space: nowrap;
+}
+.funnel-comparison-table td:first-child {
+  text-align: left;
+}
+.funnel-th-label {
+  display: block;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.funnel-th-sub {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--text-muted-color);
+  white-space: nowrap;
+}
+
 .progress-cell {
     min-width: 150px;
 }

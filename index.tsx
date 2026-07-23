@@ -2190,6 +2190,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '歩留まり分析「ユーザー別ファネル比較」表の項目タイトルが長くて読みにくかったのを改善（項目名と「件数」「歩留まり %」を別の行に分け、はみ出す場合は表を横スクロールできるように変更）',
       '歩留まり分析に「見送り・選考辞退の発生フェーズ」の集計を追加。各応募がお見送り・選考辞退になる直前まで進んでいたフェーズ（書類選考・1次面接など）別の件数を表示できるようにした（1候補者が複数社で異なるフェーズで見送り・辞退になった場合はそれぞれカウント）',
       '「チーム管理」の権限管理・所属部署・ミドル権限の各セクションを開閉できるようにした',
       '「ミドル」による実績代理入力を、専用モーダルではなく実績カレンダーからの操作に変更。個人実績タブの実績カレンダーの上に対象メンバーを選ぶドロップダウンを設置し、選択するとそのメンバーの実績カレンダーに切り替わり、いつもと同じカレンダーの日付クリックから実績入力できる（入力内容はそのメンバー本人のその日の実績として上書き保存される）',
@@ -5992,12 +5993,17 @@ const FunnelAnalysisSection: React.FC<{
 
         <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別ファネル比較（{periodLabel}・{mediaLabel}）</h3>
         <div className="all-users-table-container">
-          <table className="all-users-table">
+          <table className="all-users-table funnel-comparison-table">
             <thead>
               <tr>
                 <th>ユーザー</th>
-                <th>{visibleStages[0].label}（件数）</th>
-                {visibleStages.slice(1).map(stage => <th key={stage.key}>{stage.label}（歩留まり %）</th>)}
+                <th><span className="funnel-th-label">{visibleStages[0].label}</span><span className="funnel-th-sub">件数</span></th>
+                {visibleStages.slice(1).map(stage => (
+                  <th key={stage.key}>
+                    <span className="funnel-th-label">{stage.label}</span>
+                    <span className="funnel-th-sub">歩留まり %</span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
