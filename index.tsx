@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -550,6 +550,11 @@ interface TeamsConfig {
   teams: Team[];
   authorizedEditorEmails?: string[];
   memberDepartments?: Record<string, Department>;
+  // Users assigned the ミドル role: they can proxy-enter KPI actuals (overwriting that day's
+  // entry, same as the member's own daily-entry form) for every member of any Team they
+  // themselves belong to. Scope of authority is derived from Team membership, not stored here —
+  // this list only says WHO holds the role, not which members they manage.
+  middleEmails?: string[];
 }
 
 const getStartOfWeek = (date: Date): Date => {
@@ -1465,6 +1470,97 @@ const MediaKpiCard: React.FC<{
     );
 };
 
+// Shared with MiddleEntryModal (ミドルによる代理入力) so both forms render exactly the same set
+// of actual-value fields and never drift apart.
+const GeneralKpiFieldsFieldset: React.FC<{
+  values: { [key in KpiKey]?: number };
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  idPrefix: string;
+}> = ({ values, onChange, idPrefix }) => (
+  <fieldset className="general-kpi-fieldset">
+    <legend className="sr-only">全体実績</legend>
+    {(Object.keys(GENERAL_KPIS) as (keyof typeof GENERAL_KPIS)[]).map(key => (
+      <div key={key} className="form-group">
+        <label htmlFor={`${idPrefix}-${key}`}>{GENERAL_KPIS[key].label}</label>
+        <input
+          type="number"
+          id={`${idPrefix}-${key}`}
+          name={key}
+          value={values[key] ?? ''}
+          onChange={onChange}
+          min="0"
+          placeholder="0"
+          aria-label={`${GENERAL_KPIS[key].label}の数値を入力`}
+        />
+      </div>
+    ))}
+  </fieldset>
+);
+
+const MediaKpiFieldsTable: React.FC<{
+  activeMedia: MediaEntry[];
+  values: { [key in KpiKey]?: number };
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  idPrefix: string;
+}> = ({ activeMedia, values, onChange, idPrefix }) => (
+  <div className="daily-entry-table-container">
+    <table className="daily-entry-table">
+      <thead>
+        <tr>
+          <th>媒体</th>
+          <th>スカウト数</th>
+          <th>返信数</th>
+          <th>有効返信数</th>
+          <th>書類回収数</th>
+          <th>有効書類回収数</th>
+          <th>初回面談数</th>
+          <th>初回有効面談数</th>
+        </tr>
+      </thead>
+      <tbody>
+        {activeMedia.map(source => {
+          const sourceKey = source.id;
+          const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
+          const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
+          const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
+          const documentsCollectedKey = `${sourceKey}_documentsCollected` as KpiKey;
+          const effectiveDocumentsCollectedKey = `${sourceKey}_effectiveDocumentsCollected` as KpiKey;
+          const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
+          const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
+          const rowFields: { key: KpiKey; label: string }[] = [
+            { key: scoutsKey, label: 'スカウト数' },
+            { key: repliesKey, label: 'スカウト返信数' },
+            { key: effectiveRepliesKey, label: '有効返信数' },
+            { key: documentsCollectedKey, label: '書類回収数' },
+            { key: effectiveDocumentsCollectedKey, label: '有効書類回収数' },
+            { key: interviewsKey, label: '初回面談数' },
+            { key: effectiveInterviewsKey, label: '初回有効面談数' },
+          ];
+          return (
+            <tr key={source.id}>
+              <th scope="row">{source.name}</th>
+              {rowFields.map(field => (
+                <td key={field.key}>
+                  <input
+                    type="number"
+                    id={`${idPrefix}-${field.key}`}
+                    name={field.key}
+                    value={values[field.key] ?? ''}
+                    onChange={onChange}
+                    min="0"
+                    placeholder="0"
+                    aria-label={`${source.name} ${field.label}を入力`}
+                  />
+                </td>
+              ))}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+);
+
 const DateEntryModal: React.FC<{
   date: string;
   initialValues: KpiTotals | null;
@@ -1605,24 +1701,7 @@ const DateEntryModal: React.FC<{
           <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
         </div>
         <form id="date-entry-form" className="modal-body" onSubmit={handleSubmit}>
-          <fieldset className="general-kpi-fieldset">
-            <legend className="sr-only">全体実績</legend>
-            {(Object.keys(GENERAL_KPIS) as (keyof typeof GENERAL_KPIS)[]).map(key => (
-              <div key={key} className="form-group">
-                <label htmlFor={`modal-${key}`}>{GENERAL_KPIS[key].label}</label>
-                <input
-                  type="number"
-                  id={`modal-${key}`}
-                  name={key}
-                  value={entryValues[key] ?? ''}
-                  onChange={handleInputChange}
-                  min="0"
-                  placeholder="0"
-                  aria-label={`${GENERAL_KPIS[key].label}の数値を入力`}
-                />
-              </div>
-            ))}
-          </fieldset>
+          <GeneralKpiFieldsFieldset values={entryValues} onChange={handleInputChange} idPrefix="modal" />
 
           <div className="media-kpi-section">
             <h3 className="sub-section-title">媒体別実績</h3>
@@ -1642,68 +1721,132 @@ const DateEntryModal: React.FC<{
             {/* One compact row per media instead of a tall stacked fieldset per media —
                 the same 7 fields laid out vertically per source was the main source of the
                 excessive scrolling in this modal. */}
-            <div className="daily-entry-table-container">
-              <table className="daily-entry-table">
-                <thead>
-                  <tr>
-                    <th>媒体</th>
-                    <th>スカウト数</th>
-                    <th>返信数</th>
-                    <th>有効返信数</th>
-                    <th>書類回収数</th>
-                    <th>有効書類回収数</th>
-                    <th>初回面談数</th>
-                    <th>初回有効面談数</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {activeMedia.map(source => {
-                    const sourceKey = source.id;
-                    const scoutsKey = `${sourceKey}_scoutsSent` as KpiKey;
-                    const repliesKey = `${sourceKey}_scoutReplies` as KpiKey;
-                    const effectiveRepliesKey = `${sourceKey}_effectiveReplies` as KpiKey;
-                    const documentsCollectedKey = `${sourceKey}_documentsCollected` as KpiKey;
-                    const effectiveDocumentsCollectedKey = `${sourceKey}_effectiveDocumentsCollected` as KpiKey;
-                    const interviewsKey = `${sourceKey}_initialInterviews` as KpiKey;
-                    const effectiveInterviewsKey = `${sourceKey}_effectiveInitialInterviews` as KpiKey;
-                    const rowFields: { key: KpiKey; label: string }[] = [
-                      { key: scoutsKey, label: 'スカウト数' },
-                      { key: repliesKey, label: 'スカウト返信数' },
-                      { key: effectiveRepliesKey, label: '有効返信数' },
-                      { key: documentsCollectedKey, label: '書類回収数' },
-                      { key: effectiveDocumentsCollectedKey, label: '有効書類回収数' },
-                      { key: interviewsKey, label: '初回面談数' },
-                      { key: effectiveInterviewsKey, label: '初回有効面談数' },
-                    ];
-                    return (
-                      <tr key={source.id}>
-                        <th scope="row">{source.name}</th>
-                        {rowFields.map(field => (
-                          <td key={field.key}>
-                            <input
-                              type="number"
-                              id={`modal-${field.key}`}
-                              name={field.key}
-                              value={entryValues[field.key] ?? ''}
-                              onChange={handleInputChange}
-                              min="0"
-                              placeholder="0"
-                              aria-label={`${source.name} ${field.label}を入力`}
-                            />
-                          </td>
-                        ))}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <MediaKpiFieldsTable activeMedia={activeMedia} values={entryValues} onChange={handleInputChange} idPrefix="modal" />
           </div>
         </form>
         <div className="modal-footer">
           {canClear && <button type="button" onClick={handleClear} className="reset-button" style={{ marginRight: 'auto' }}>実績をクリア</button>}
           <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
           <button type="submit" form="date-entry-form" className="submit-button" disabled={isSaveDisabled}>実績を保存</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ミドルによる代理入力: same field set/semantics as DateEntryModal's own-entry form (full
+// overwrite of that day's entry, see GeneralKpiFieldsFieldset/MediaKpiFieldsTable above), but
+// scoped to a chosen team member + date instead of the signed-in user's own data. Stays open
+// after a successful save (rather than closing like DateEntryModal) so a ミドル can work through
+// several members/dates in one sitting.
+const MiddleEntryModal: React.FC<{
+  targetOptions: { email: string; label: string }[];
+  allUsersData: Record<string, UserData>;
+  activeMedia: MediaEntry[];
+  onSave: (targetEmail: string, date: string, values: KpiTotals) => Promise<void>;
+  onClose: () => void;
+}> = ({ targetOptions, allUsersData, activeMedia, onSave, onClose }) => {
+  const toDateInputValue = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [selectedEmail, setSelectedEmail] = useState('');
+  const [selectedDate, setSelectedDate] = useState(toDateInputValue(new Date()));
+  const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>({});
+  const [status, setStatus] = useState<'idle' | 'saving' | 'error' | 'saved'>('idle');
+  const [message, setMessage] = useState('');
+
+  const existingValues = useMemo((): KpiTotals | null => {
+    if (!selectedEmail) return null;
+    const entry = allUsersData[selectedEmail]?.entries.find(e => e.date === selectedDate);
+    return entry ? entry.values : null;
+  }, [allUsersData, selectedEmail, selectedDate]);
+
+  useEffect(() => {
+    setEntryValues(existingValues || {});
+    setStatus('idle');
+    setMessage('');
+  }, [selectedEmail, selectedDate]);
+
+  const buildEditableKeys = (): KpiKey[] => [
+    ...Object.keys(GENERAL_KPIS),
+    ...activeMedia.flatMap(media => MEDIA_KPI_SUFFIXES.map(suffix => `${media.id}_${suffix}`)),
+  ];
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target as { name: KpiKey; value: string };
+    setEntryValues(prev => ({ ...prev, [name]: value === '' ? undefined : Number(value) }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedEmail) {
+      setStatus('error');
+      setMessage('メンバーを選択してください。');
+      return;
+    }
+    const valuesWithDefaults: KpiTotals = { ...(existingValues || {}) };
+    buildEditableKeys().forEach(key => { valuesWithDefaults[key] = entryValues[key] || 0; });
+    setStatus('saving');
+    setMessage('');
+    try {
+      await onSave(selectedEmail, selectedDate, valuesWithDefaults);
+      setStatus('saved');
+      setMessage('保存しました。');
+    } catch (err) {
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : '保存に失敗しました。');
+    }
+  };
+
+  const selectedLabel = targetOptions.find(o => o.email === selectedEmail)?.label;
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="middle-entry-modal-title">
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="middle-entry-modal-title">メンバー実績入力（代理入力）</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <form id="middle-entry-form" className="modal-body" onSubmit={handleSubmit}>
+          <p className="modal-description">
+            選択したメンバーのその日の実績として上書き保存されます。既に本人が入力済みの値はここに表示され、編集すると置き換わります。
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+            <div className="form-group">
+              <label htmlFor="middle-entry-target">メンバー</label>
+              <select id="middle-entry-target" value={selectedEmail} onChange={(e) => setSelectedEmail(e.target.value)}>
+                <option value="">選択してください</option>
+                {targetOptions.map(o => <option key={o.email} value={o.email}>{o.label}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="middle-entry-date">日付</label>
+              <input
+                id="middle-entry-date"
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {selectedEmail && (
+            <>
+              <GeneralKpiFieldsFieldset values={entryValues} onChange={handleInputChange} idPrefix="middle-entry" />
+              <div className="media-kpi-section">
+                <h3 className="sub-section-title">媒体別実績</h3>
+                <MediaKpiFieldsTable activeMedia={activeMedia} values={entryValues} onChange={handleInputChange} idPrefix="middle-entry" />
+              </div>
+            </>
+          )}
+
+          {message && (
+            <span className={`gmail-scout-message ${status === 'error' ? 'is-error' : ''}`} role="status">{message}</span>
+          )}
+        </form>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">閉じる</button>
+          <button type="submit" form="middle-entry-form" className="submit-button" disabled={!selectedEmail || status === 'saving'}>
+            {status === 'saving' ? '保存中...' : `${selectedLabel ? selectedLabel + 'の' : ''}実績を保存`}
+          </button>
         </div>
       </div>
     </div>
@@ -2138,6 +2281,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-23',
+    items: [
+      '登録ユーザーに「ミドル」役職をアサインできるようにし、ミドルに指定された人は自分が所属するチームのメンバー全員の実績を代理入力できる「メンバー実績入力」機能を追加（入力内容はそのメンバー本人のその日の実績として上書き保存される）。ミドルの割り当ては「チーム管理」から行う',
+    ],
+  },
+  {
     date: '2026-07-22',
     items: [
       'お見送り・選考辞退の実績は1候補者につき合計1件のみ反映されるように変更（複数社で不採用・辞退になっても1回のみ、両方混在する場合は選考辞退を優先）。候補者が他社でまだ選考中の場合は反映を待ち、全ての応募先が決着した時点で反映（新規に登録した候補者・応募がそのまま辞退・お見送りになった場合も反映対象に含む）',
@@ -2290,6 +2439,7 @@ const TeamsModal: React.FC<{
     authorizedEditorEmails: string[];
     userOptions: { email: string; label: string }[];
     memberDepartments: Record<string, Department>;
+    middleEmails: string[];
     onClose: () => void;
     onCreateTeam: (name: string) => void;
     onRenameTeam: (teamId: string, name: string) => void;
@@ -2299,7 +2449,8 @@ const TeamsModal: React.FC<{
     onGrantEditor: (email: string) => void;
     onRevokeEditor: (email: string) => void;
     onSetMemberDepartment: (email: string, department: Department | null) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment }) => {
+    onToggleMiddle: (email: string, isMiddle: boolean) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -2419,6 +2570,37 @@ const TeamsModal: React.FC<{
                                                 <option value="F+">Firm+</option>
                                                 <option value="AC">AssetCareer</option>
                                             </select>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                            <hr style={{ margin: '1rem 0' }} />
+                        </div>
+                    )}
+                    {isEditable && (
+                        <div className="teams-permission-section">
+                            <h4 className="sub-section-title">ミドル権限の管理</h4>
+                            <p className="modal-description">
+                                「ミドル」に指定した人は、自分が所属するチームのメンバー全員の実績を代理入力できるようになります（ヘッダーの「メンバー実績入力」から。入力した内容はそのメンバー本人のその日の実績として上書き保存されます）。
+                            </p>
+                            {userOptions.length === 0 ? (
+                                <p className="no-data-message">まだユーザーデータがありません。</p>
+                            ) : (
+                                <ul className="user-management-list">
+                                    {userOptions.map(u => (
+                                        <li key={u.email} className="user-management-item">
+                                            <span className="user-management-name">
+                                                {u.label}
+                                                {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
+                                            </span>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.9rem' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={middleEmails.includes(u.email)}
+                                                    onChange={(e) => onToggleMiddle(u.email, e.target.checked)}
+                                                />
+                                                ミドル
+                                            </label>
                                         </li>
                                     ))}
                                 </ul>
@@ -6556,7 +6738,17 @@ const App: React.FC = () => {
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
   const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
   const [memberDepartments, setMemberDepartments] = useState<Record<string, Department>>({});
+  const [middleEmails, setMiddleEmails] = useState<string[]>([]);
+  // Guards the individual-Drive-permission reconciliation effect (see driveFileIdByEmail below)
+  // from running against an empty middleEmails/teams before loadTeamsConfig has actually
+  // finished even once — without this, "no teams yet" and "teams config still loading" would be
+  // indistinguishable, and the effect could incorrectly revoke real grants on first paint.
+  const [teamsConfigLoaded, setTeamsConfigLoaded] = useState(false);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
+  const [isMiddleEntryModalOpen, setIsMiddleEntryModalOpen] = useState(false);
+  // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
+  // write directly into a specific teammate's own Drive file.
+  const [driveFileIdByEmail, setDriveFileIdByEmail] = useState<Record<string, string>>({});
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
@@ -6847,7 +7039,8 @@ const App: React.FC = () => {
     try {
       const teammates = await loadAllTeammatesData<UserData>();
       const merged: Record<string, UserData> = {};
-      teammates.forEach(({ email, data }) => {
+      const fileIds: Record<string, string> = {};
+      teammates.forEach(({ email, data, driveFileId: teammateFileId }) => {
         merged[email] = {
           entries: data.entries || [],
           candidates: data.candidates || [],
@@ -6856,8 +7049,10 @@ const App: React.FC = () => {
           dailyKpiTargets: { ...defaultKpiTargets, ...(data.dailyKpiTargets || {}) },
           displayName: data.displayName,
         };
+        fileIds[email] = teammateFileId;
       });
       setAllUsersData(merged);
+      setDriveFileIdByEmail(fileIds);
       setUsers(Object.keys(merged));
     } catch (error) {
       console.error("Failed to load teammates' data from Drive", error);
@@ -6868,12 +7063,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const needsAggregateData =
-      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen;
+      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen || isMiddleEntryModalOpen;
     if (!needsAggregateData || !isInitialized || !currentIdentity) return;
     if (hasFetchedAllUsersRef.current) return;
     hasFetchedAllUsersRef.current = true;
     fetchAllUsersData();
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isMiddleEntryModalOpen]);
 
   // Loads unconditionally after sign-in (like the media config below), not gated by
   // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
@@ -6893,8 +7088,11 @@ const App: React.FC = () => {
         setTeamsOwnerEmail(result.ownerEmail);
         setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
         setMemberDepartments(result.data?.memberDepartments || {});
+        setMiddleEmails(result.data?.middleEmails || []);
       } catch (error) {
         console.error('Failed to load teams config from Drive', error);
+      } finally {
+        if (!cancelled) setTeamsConfigLoaded(true);
       }
     })();
     return () => { cancelled = true; };
@@ -7138,11 +7336,13 @@ const App: React.FC = () => {
   const persistTeamsConfig = (
     updatedTeams: Team[],
     updatedAuthorizedEditors: string[],
-    updatedDepartments: Record<string, Department>
+    updatedDepartments: Record<string, Department>,
+    updatedMiddleEmails: string[]
   ) => {
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
     setMemberDepartments(updatedDepartments);
+    setMiddleEmails(updatedMiddleEmails);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
@@ -7152,6 +7352,7 @@ const App: React.FC = () => {
           teams: updatedTeams,
           authorizedEditorEmails: updatedAuthorizedEditors,
           memberDepartments: updatedDepartments,
+          middleEmails: updatedMiddleEmails,
         };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
@@ -7164,22 +7365,28 @@ const App: React.FC = () => {
     });
   };
 
-  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors, memberDepartments);
+  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors, memberDepartments, middleEmails);
 
   const handleGrantTeamsEditor = (email: string) => {
     if (teamsAuthorizedEditors.includes(email)) return;
-    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email], memberDepartments);
+    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email], memberDepartments, middleEmails);
   };
 
   const handleRevokeTeamsEditor = (email: string) => {
-    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email), memberDepartments);
+    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email), memberDepartments, middleEmails);
   };
 
   // Team editors (admin + authorized) can set anyone's department from チーム管理.
   const handleSetMemberDepartment = (email: string, department: Department | null) => {
     const updated = { ...memberDepartments };
     if (department) updated[email] = department; else delete updated[email];
-    persistTeamsConfig(teams, teamsAuthorizedEditors, updated);
+    persistTeamsConfig(teams, teamsAuthorizedEditors, updated, middleEmails);
+  };
+
+  // Team editors (admin + authorized) can assign/revoke the ミドル role from チーム管理.
+  const handleToggleMiddle = (email: string, isMiddle: boolean) => {
+    const updated = isMiddle ? [...middleEmails, email] : middleEmails.filter(e => e !== email);
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, updated);
   };
 
   // Anyone signed in can set their OWN department, regardless of team-editor permission — this
@@ -7376,6 +7583,23 @@ const App: React.FC = () => {
     if (currentIdentity) {
       forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
     }
+  };
+
+  // ミドルによる代理入力: writes directly into the target teammate's own Drive file (requires
+  // the individual 'writer' permission granted by syncIndividualWriterPermissions — see the
+  // reconciliation effect above; that grant is set up by the TARGET's own client, so it only
+  // takes effect once their browser has been open at least once since being added to a shared
+  // team with this ミドル). Re-fetches the target's latest data as part of the write (see
+  // overwriteTeammateEntry) so a stale locally-cached copy can never clobber changes the member
+  // made elsewhere in the meantime.
+  const handleSaveMiddleEntry = async (targetEmail: string, date: string, values: KpiTotals) => {
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) throw new Error('対象メンバーのデータファイルが見つかりませんでした。');
+    const updated = await overwriteTeammateEntry<UserData>(targetFileId, date, values);
+    setAllUsersData(prev => ({
+      ...prev,
+      [targetEmail]: { ...(prev[targetEmail] || updated), entries: updated.entries },
+    }));
   };
 
   // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
@@ -7678,6 +7902,39 @@ const App: React.FC = () => {
     const divisionScopedUserOptions = useMemo(() => {
       return pipelineUserOptions.filter(u => isEmailInSelectedDivision(u.email));
     }, [pipelineUserOptions, isEmailInSelectedDivision]);
+
+    // Team members whose KPI actuals the signed-in account, if they hold the ミドル role, is
+    // allowed to proxy-enter — every member of every Team they themselves belong to (never
+    // themselves).
+    const isCurrentUserMiddle = !!currentIdentity && middleEmails.includes(currentIdentity.email);
+    const middleManagedMemberEmails = useMemo(() => {
+      if (!currentIdentity || !isCurrentUserMiddle) return [];
+      const set = new Set<string>();
+      teams.forEach(team => {
+        if (team.memberEmails.includes(currentIdentity.email)) {
+          team.memberEmails.forEach(email => { if (email !== currentIdentity.email) set.add(email); });
+        }
+      });
+      return Array.from(set);
+    }, [teams, currentIdentity, isCurrentUserMiddle]);
+
+    // Grants/revokes direct Drive write access to MY OWN data file for exactly the ミドル
+    // accounts currently eligible to proxy-enter my KPI actuals (share a Team with me and hold
+    // the ミドル role) — re-reconciled whenever team/ミドル assignments change (not just once per
+    // session), so a newly-assigned ミドル doesn't need anyone to reload the app first. The ref
+    // dedupes against the last-applied desired set so this doesn't re-hit the Drive API on every
+    // unrelated re-render.
+    const lastSyncedMiddlePermsKeyRef = useRef<string>('');
+    useEffect(() => {
+      if (!currentIdentity || !driveFileId || !teamsConfigLoaded) return;
+      const desired = middleEmails
+        .filter(email => email !== currentIdentity.email)
+        .filter(email => teams.some(team => team.memberEmails.includes(email) && team.memberEmails.includes(currentIdentity.email)));
+      const key = `${driveFileId}:${desired.slice().sort().join(',')}`;
+      if (lastSyncedMiddlePermsKeyRef.current === key) return;
+      lastSyncedMiddlePermsKeyRef.current = key;
+      syncIndividualWriterPermissions(driveFileId, desired).catch(err => console.error('Failed to sync ミドル Drive permissions', err));
+    }, [currentIdentity, driveFileId, teams, middleEmails, teamsConfigLoaded]);
 
     // 比較するユーザーの選択肢をチーム単位でグルーピング — メンバーが増えるほどフラットな
     // 一覧の表示面積が広がっていくのを防ぐため、チーム→メンバーの2階層で折りたたんで表示する。
@@ -7996,6 +8253,7 @@ const App: React.FC = () => {
           authorizedEditorEmails={teamsAuthorizedEditors}
           userOptions={pipelineUserOptions}
           memberDepartments={memberDepartments}
+          middleEmails={middleEmails}
           onClose={() => setIsTeamsModalOpen(false)}
           onCreateTeam={handleCreateTeam}
           onRenameTeam={handleRenameTeam}
@@ -8005,6 +8263,7 @@ const App: React.FC = () => {
           onGrantEditor={handleGrantTeamsEditor}
           onRevokeEditor={handleRevokeTeamsEditor}
           onSetMemberDepartment={handleSetMemberDepartment}
+          onToggleMiddle={handleToggleMiddle}
         />
       )}
       {isChangelogModalOpen && (
@@ -8031,6 +8290,15 @@ const App: React.FC = () => {
           onSave={handleSaveEntry}
           onNavigate={handleNavigateEntryDate}
           onClose={() => setSelectedDate(null)}
+        />
+      )}
+      {isMiddleEntryModalOpen && (
+        <MiddleEntryModal
+          targetOptions={pipelineUserOptions.filter(o => middleManagedMemberEmails.includes(o.email))}
+          allUsersData={allUsersData}
+          activeMedia={activeMedia}
+          onSave={handleSaveMiddleEntry}
+          onClose={() => setIsMiddleEntryModalOpen(false)}
         />
       )}
       {isBulkGmailModalOpen && (
@@ -8132,6 +8400,9 @@ const App: React.FC = () => {
                 <option value="F+">Firm+</option>
                 <option value="AC">AssetCareer</option>
               </select>
+            )}
+            {isCurrentUserMiddle && middleManagedMemberEmails.length > 0 && (
+              <button onClick={() => setIsMiddleEntryModalOpen(true)}>メンバー実績入力</button>
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>

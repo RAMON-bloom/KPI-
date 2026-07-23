@@ -158,6 +158,44 @@ export async function readFileContent<T = any>(fileId: string): Promise<T> {
   return res.json();
 }
 
+export interface DrivePermissionRef {
+  id: string;
+  type: string;
+  role: string;
+  emailAddress?: string;
+}
+
+export async function listPermissions(fileId: string): Promise<DrivePermissionRef[]> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=permissions(id,type,role,emailAddress)`);
+  if (!res.ok) throw new Error('Driveファイルの権限一覧の取得に失敗しました。');
+  const data = await res.json();
+  return data.permissions ?? [];
+}
+
+/**
+ * Grants a specific individual (not the whole domain) direct access to a file — used for
+ * ミドル proxy-entry write access to a specific teammate's own data file, which must stay
+ * scoped to just the designated ミドル account(s), not domain-wide like the reader grant every
+ * personal data file already gets. sendNotificationEmail is turned off since this fires
+ * automatically as team/ミドル assignments change, not as a deliberate "share this file with
+ * someone" action — nobody should get an unexpected Drive sharing email about a hidden JSON file.
+ */
+export async function grantIndividualPermission(fileId: string, email: string, role: 'reader' | 'writer'): Promise<void> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?sendNotificationEmail=false`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role, type: 'user', emailAddress: email }),
+  });
+  if (!res.ok) throw new Error(`Driveファイルへの個別権限付与に失敗しました: ${email}`);
+}
+
+export async function revokePermission(fileId: string, permissionId: string): Promise<void> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${permissionId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Driveファイルの権限削除に失敗しました。');
+}
+
 async function createJsonFile(name: string, appProperties: Record<string, string>, properties: Record<string, string>, content: unknown): Promise<string> {
   const metadata = { name, mimeType: 'application/json', appProperties, properties };
   const boundary = `kpi_boundary_${Math.random().toString(16).slice(2)}`;

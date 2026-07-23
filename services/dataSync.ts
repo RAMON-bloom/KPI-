@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -327,6 +327,7 @@ export async function retryPendingSyncIfNeeded(
 export interface TeammateData<T> {
   email: string;
   data: T;
+  driveFileId: string;
 }
 
 /** Fetches every teammate's domain-shared data file (used by the cross-user / team views). */
@@ -336,7 +337,7 @@ export async function loadAllTeammatesData<T = any>(): Promise<TeammateData<T>[]
     files.map(async (file) => {
       try {
         const content = await readFileContent<T>(file.id);
-        return { email: file.ownerEmail || file.name, data: content };
+        return { email: file.ownerEmail || file.name, data: content, driveFileId: file.id };
       } catch (err) {
         console.error(`Failed to read teammate file ${file.id}`, err);
         return null;
@@ -344,6 +345,47 @@ export async function loadAllTeammatesData<T = any>(): Promise<TeammateData<T>[]
     })
   );
   return results.filter((r) => r !== null) as TeammateData<T>[];
+}
+
+/**
+ * Reconciles who (beyond the file's owner) has direct WRITE access to a personal data file, down
+ * to an exact desired set of individual accounts — used to grant ミドル proxy-entry write access
+ * to exactly the teammates who are currently eligible (share a team with this file's owner and
+ * hold the ミドル role), and to revoke it again the moment that's no longer true. Only ever
+ * touches `type: 'user'` permissions — the file's pre-existing domain-wide reader grant (`type:
+ * 'domain'`, used for the 全ユーザー/チーム別 read-only aggregation) is untouched.
+ */
+export async function syncIndividualWriterPermissions(fileId: string, desiredEmails: string[]): Promise<void> {
+  const permissions = await listPermissions(fileId);
+  const currentWriterEmails = permissions.filter(p => p.type === 'user' && p.role === 'writer' && p.emailAddress);
+  const toRevoke = currentWriterEmails.filter(p => !desiredEmails.includes(p.emailAddress!));
+  const toGrant = desiredEmails.filter(email => !currentWriterEmails.some(p => p.emailAddress === email));
+  await Promise.all([
+    ...toRevoke.map(p => revokePermission(fileId, p.id).catch(err => console.error(`Failed to revoke Drive permission for ${p.emailAddress}`, err))),
+    ...toGrant.map(email => grantIndividualPermission(fileId, email, 'writer').catch(err => console.error(`Failed to grant Drive permission to ${email}`, err))),
+  ]);
+}
+
+/**
+ * ミドルによる代理入力: fetches the target teammate's LATEST data (not whatever stale copy may
+ * be cached in memory — someone else may have saved in the meantime), replaces just that one
+ * date's entry with the given values (same full-replace semantics as the teammate's own
+ * DateEntryModal save), and writes the merged result back. Requires this fileId to already have
+ * been granted direct 'writer' access to the signed-in account (see
+ * syncIndividualWriterPermissions) — otherwise the underlying Drive write fails with 403.
+ */
+export async function overwriteTeammateEntry<T extends { entries: any[] } = any>(
+  driveFileId: string,
+  date: string,
+  values: unknown
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const otherEntries = (latest.entries || []).filter((e: any) => e.date !== date);
+  const newEntry = { id: Date.now(), date, values };
+  const updatedEntries = [...otherEntries, newEntry].sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const updated = { ...latest, entries: updatedEntries };
+  await updateFileContent(driveFileId, updated);
+  return updated;
 }
 
 export interface TeamsConfigResult<T> {
