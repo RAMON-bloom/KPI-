@@ -382,6 +382,14 @@ interface CompanyApplication {
   // the same 期間 (this month / custom range) as the rest of 歩留まり分析, the same way KPI
   // actuals are dated per day.
   exitedAt?: string;
+  // Every stage this application has actually been at, in order, with the date it was recorded
+  // — powers the visual 選考トラック in the candidate detail view ("いつ応募していつ選考通過
+  // したか"). Seeded with one entry at creation time (see addApplication/ApplicationModal), then
+  // appended to on every genuine stage change (see computeStageAdvanceUpdate). `date` is
+  // missing only on a synthesized origin entry backfilled for an application that already
+  // existed before this feature shipped — there's no real record of when it first entered that
+  // stage, so it's shown as "記録開始前" rather than a fabricated date.
+  stageHistory?: { stage: PipelineStage; date?: string }[];
 }
 
 interface Candidate {
@@ -416,6 +424,13 @@ interface Candidate {
   // `salary` (their stated desired salary) — used with each application's feeRate to project
   // gross profit.
   expectedAnnualSalary?: number;
+  // Manually-set forecast for when this candidate is expected to close (see the 今月見込み/
+  // 来月見込み filter buttons), for use when there's no CompanyApplication to derive a real
+  // expectedDecisionDate from — e.g. no company currently in selection yet, or between
+  // applications. getNearestExpectedDecisionDate falls back to this when it has no
+  // application-derived date to offer; when both exist, either one matching the selected filter
+  // is enough.
+  expectedDecisionTiming?: 'thisMonth' | 'nextMonth';
   // Only set when viewing the all-users/team-aggregated pipeline (never persisted) —
   // identifies whose data this candidate belongs to, for display and edit-permission checks.
   ownerEmail?: string;
@@ -480,6 +495,15 @@ function computeStageAdvanceUpdate(
     if (EXIT_PIPELINE_STAGES.includes(app.stage) && !EXIT_PIPELINE_STAGES.includes(prevApp.stage)) {
       base = { ...base, exitedFromStage: prevApp.stage, exitedAt: todayStr };
     }
+
+    // Records this transition on the 選考トラック (see CompanyApplication.stageHistory). An
+    // application saved before this feature existed has no history yet — backfill one entry for
+    // the stage it was already at (date unknown, shown as "記録開始前") before appending today's
+    // real transition, so the track always has a sensible starting point.
+    const priorHistory = base.stageHistory && base.stageHistory.length > 0
+      ? base.stageHistory
+      : [{ stage: prevApp.stage }];
+    base = { ...base, stageHistory: [...priorHistory, { stage: app.stage, date: todayStr }] };
 
     const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn' && k !== 'acceptanceWithdrawn');
     if (keys.length === 0) return base;
@@ -2240,6 +2264,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '候補者の詳細に「選考トラック」を追加。各応募がいつどのフェーズに進んだかを日付付きで視覚的に表示できるようにした',
+      '候補者に「今月・来月見込み」項目を追加。選考中の企業がまだ無い候補者でも、パイプラインの「今月見込み/来月見込み」絞り込みに表示できるようにした',
       '候補者に「面談メモ（手動）」項目を追加。面談要約(AI)とは別に、面談で聞いた内容などを自由に記入できるようにした（音声ファイルの再アップロードなどでAI要約が更新されても消えない）。パイプラインの詳細表示にも表示される',
       '見送り・選考辞退・内定承諾後辞退の歩留まり分析をメンバーごとに確認できるようにした。「ユーザー別 見送り・選考辞退・内定承諾後辞退」表を追加し、発生フェーズの表は対象メンバーを選んで絞り込めるようにした（未選択時は全ユーザー合計）',
       '歩留まり分析「ユーザー別ファネル比較」表の項目タイトルが長くて読みにくかったのを改善（項目名と「件数」「歩留まり %」を別の行に分け、はみ出す場合は表を横スクロールできるように変更）',
@@ -3066,7 +3092,10 @@ const CandidateModal: React.FC<{
     };
 
     const addApplication = () => {
-        const newApp: CompanyApplication = { id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '' };
+        const newApp: CompanyApplication = {
+            id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '',
+            stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
+        };
         setCandidate(prev => ({ ...prev, applications: [...prev.applications, newApp] }));
     };
 
@@ -3581,6 +3610,20 @@ const CandidateModal: React.FC<{
                     <input type="number" id="expectedAnnualSalary" name="expectedAnnualSalary" value={candidate.expectedAnnualSalary || ''} onChange={handleChange} placeholder="例: 600" />
                 </div>
                 <div className="form-group">
+                    <label htmlFor="expectedDecisionTiming">今月・来月見込み</label>
+                    <select
+                        id="expectedDecisionTiming"
+                        name="expectedDecisionTiming"
+                        value={candidate.expectedDecisionTiming || ''}
+                        onChange={(e) => setCandidate(prev => ({ ...prev, expectedDecisionTiming: (e.target.value || undefined) as Candidate['expectedDecisionTiming'] }))}
+                    >
+                        <option value="">未設定</option>
+                        <option value="thisMonth">今月見込み</option>
+                        <option value="nextMonth">来月見込み</option>
+                    </select>
+                    <p className="form-helper-text">選考中の企業がまだ無い場合でも、パイプラインの「今月見込み/来月見込み」絞り込みで表示させたいときに設定してください。</p>
+                </div>
+                <div className="form-group">
                     <label htmlFor="source">集客媒体</label>
                     <select id="source" name="source" value={candidate.source} onChange={handleChange}>
                         <option value="">選択してください</option>
@@ -3813,7 +3856,8 @@ const ApplicationModal: React.FC<{
                     stage: '打診',
                     nextAction: '',
                     scheduledDate: '',
-                    memo: ''
+                    memo: '',
+                    stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
                 });
             }
         }
@@ -4859,7 +4903,10 @@ const CandidatePipelineView: React.FC<{
         if (!isOwn(candidate) || !scheduleModalDate) return;
         const prefilled: CompanyApplication = application
             ? { ...application, scheduledDate: scheduleModalDate }
-            : { id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '', scheduledDate: scheduleModalDate, memo: '' };
+            : {
+                id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '', scheduledDate: scheduleModalDate, memo: '',
+                stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
+              };
         setScheduleModalDate(null);
         setApplicationModalData({ candidate, application: prefilled });
         setIsApplicationModalOpen(true);
@@ -5091,6 +5138,7 @@ const CandidatePipelineView: React.FC<{
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
             const matchesDecisionTiming = selectedDecisionTimingFilters.length === 0 || (() => {
+                if (c.expectedDecisionTiming && selectedDecisionTimingFilters.includes(c.expectedDecisionTiming)) return true;
                 const nearest = getNearestExpectedDecisionDate(c);
                 if (!nearest) return false;
                 return selectedDecisionTimingFilters.some(key => isDateInRelativeMonth(nearest, key === 'thisMonth' ? 0 : 1));
@@ -5605,6 +5653,24 @@ const CandidatePipelineView: React.FC<{
                                                                   {app.stage}
                                                               </span>
                                                           </div>
+                                                          {app.stageHistory && app.stageHistory.length > 0 && (
+                                                              <div className="detail-card-item detail-card-item-track">
+                                                                  <span>選考トラック:</span>
+                                                                  <div className="stage-track">
+                                                                      {app.stageHistory.map((h, i) => (
+                                                                          <React.Fragment key={i}>
+                                                                              {i > 0 && <span className="stage-track-arrow">→</span>}
+                                                                              <span className="stage-track-step" style={{'--badge-color': STAGE_COLOR_MAP[h.stage]} as React.CSSProperties}>
+                                                                                  <span className="stage-track-stage">{h.stage}</span>
+                                                                                  <span className="stage-track-date">
+                                                                                      {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
+                                                                                  </span>
+                                                                              </span>
+                                                                          </React.Fragment>
+                                                                      ))}
+                                                                  </div>
+                                                              </div>
+                                                          )}
                                                           <div className="detail-card-item">
                                                               <span>次アクション:</span>
                                                               <span>{app.nextAction || '未設定'}</span>
