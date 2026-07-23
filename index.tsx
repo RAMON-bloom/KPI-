@@ -399,6 +399,11 @@ interface Candidate {
   resumeFiles?: { name: string; }[];
   interviewAudioFile?: { name: string; } | null;
   interviewSummary?: string;
+  // Free-form, manually-typed interview notes — deliberately separate from interviewSummary
+  // (AI-generated from audio/Meet transcripts, and cleared whenever a new audio file is
+  // uploaded — see handleAudioFileChange/handleRemoveAudioFile) so a recruiter's own written
+  // notes are never silently wiped out by that AI flow.
+  interviewMemo?: string;
   createdAt: string; // ISO string
   isHidden?: boolean;
   // 掘り起しリスト: presence means this candidate is parked for future re-engagement rather
@@ -2235,6 +2240,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '候補者に「面談メモ（手動）」項目を追加。面談要約(AI)とは別に、面談で聞いた内容などを自由に記入できるようにした（音声ファイルの再アップロードなどでAI要約が更新されても消えない）。パイプラインの詳細表示にも表示される',
       '見送り・選考辞退・内定承諾後辞退の歩留まり分析をメンバーごとに確認できるようにした。「ユーザー別 見送り・選考辞退・内定承諾後辞退」表を追加し、発生フェーズの表は対象メンバーを選んで絞り込めるようにした（未選択時は全ユーザー合計）',
       '歩留まり分析「ユーザー別ファネル比較」表の項目タイトルが長くて読みにくかったのを改善（項目名と「件数」「歩留まり %」を別の行に分け、はみ出す場合は表を横スクロールできるように変更）',
       'パイプラインの選考フェーズに「内定承諾後辞退」を追加し、内定承諾後に入社しなかったケースを個人実績（内定承諾後辞退数）と歩留まり分析に反映できるようにした',
@@ -3007,6 +3013,7 @@ const CandidateModal: React.FC<{
         resumeFiles: [],
         interviewAudioFile: null,
         interviewSummary: '',
+        interviewMemo: '',
         isHidden: false,
         createdAt: initialData?.createdAt || new Date().toISOString(),
     };
@@ -3027,6 +3034,7 @@ const CandidateModal: React.FC<{
             resumeFiles: resumeFiles,
             interviewAudioFile: initial.interviewAudioFile || null,
             interviewSummary: initial.interviewSummary || '',
+            interviewMemo: initial.interviewMemo || '',
         };
     });
     
@@ -3627,6 +3635,17 @@ const CandidateModal: React.FC<{
                         />
                         {isGeneratingInterviewSummary && <div className="spinner"></div>}
                     </div>
+                 </div>
+                 <div className="form-group form-group-span-3">
+                    <label htmlFor="interviewMemo">面談メモ（手動）</label>
+                    <textarea
+                        id="interviewMemo"
+                        name="interviewMemo"
+                        value={candidate.interviewMemo || ''}
+                        onChange={handleChange}
+                        rows={5}
+                        placeholder="面談で聞いた内容や気になった点などを自由に記入してください。上の面談要約(AI)とは別に保持され、音声ファイルの再アップロードなどで消えることはありません。"
+                    />
                  </div>
               </div>
 
@@ -5534,6 +5553,10 @@ const CandidatePipelineView: React.FC<{
                                       <div className="candidate-info-item summary-item">
                                           <span className="info-label">面談要約 (AI)</span>
                                           <p className="info-value summary-text">{c.interviewSummary || '面談要約はありません。'}</p>
+                                      </div>
+                                      <div className="candidate-info-item summary-item">
+                                          <span className="info-label">面談メモ（手動）</span>
+                                          <p className="info-value summary-text">{c.interviewMemo || '面談メモはありません。'}</p>
                                       </div>
                                     </div>
                                     
