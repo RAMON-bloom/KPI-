@@ -4669,11 +4669,11 @@ const SourceEffectivenessReport: React.FC<{ candidates: Candidate[]; allMedia: M
             const total = sourceCandidates.length;
 
             const reachedInterview = sourceCandidates.filter(c =>
-                c.applications.some(app => !app.isHidden && PIPELINE_STAGES.indexOf(app.stage) >= PIPELINE_STAGES.indexOf('1次面接'))
+                c.applications.some(app => !app.isHidden && FORWARD_PIPELINE_STAGES.includes(app.stage) && FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('1次面接'))
             ).length;
 
             const receivedOffer = sourceCandidates.filter(c =>
-                c.applications.some(app => !app.isHidden && PIPELINE_STAGES.indexOf(app.stage) >= PIPELINE_STAGES.indexOf('内定'))
+                c.applications.some(app => !app.isHidden && FORWARD_PIPELINE_STAGES.includes(app.stage) && FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('内定'))
             ).length;
 
             const placements = sourceCandidates.filter(c =>
