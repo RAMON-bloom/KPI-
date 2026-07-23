@@ -2235,6 +2235,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '見送り・選考辞退・内定承諾後辞退の歩留まり分析をメンバーごとに確認できるようにした。「ユーザー別 見送り・選考辞退・内定承諾後辞退」表を追加し、発生フェーズの表は対象メンバーを選んで絞り込めるようにした（未選択時は全ユーザー合計）',
       '歩留まり分析「ユーザー別ファネル比較」表の項目タイトルが長くて読みにくかったのを改善（項目名と「件数」「歩留まり %」を別の行に分け、はみ出す場合は表を横スクロールできるように変更）',
       'パイプラインの選考フェーズに「内定承諾後辞退」を追加し、内定承諾後に入社しなかったケースを個人実績（内定承諾後辞退数）と歩留まり分析に反映できるようにした',
       '歩留まり分析の「見送り・選考辞退の発生フェーズ」集計を、1候補者につき1件のみ計上する方式に変更（候補者推薦数に対する見送り数・選考辞退数・内定承諾後辞退数と合計が一致するように）。応募単位ではなく、候補者の選考企業が全てなくなった時点でその候補者が直前まで進んでいたフェーズ別に集計する',
@@ -5740,6 +5741,9 @@ const FunnelAnalysisSection: React.FC<{
   // just that media's own numbers, using MEDIA_FUNNEL_STAGES only since GENERAL_KPIS isn't
   // per-media data.
   const [selectedMediaId, setSelectedMediaId] = useState<string>('all');
+  // '' = 全ユーザー合計 (existing behavior); a specific email scopes the 見送り・選考辞退・
+  // 内定承諾後辞退 発生フェーズ table to just that one member's own candidates.
+  const [exitMemberFilter, setExitMemberFilter] = useState<string>('');
 
   const visibleStages = selectedMediaId === 'all' ? FUNNEL_STAGES : MEDIA_FUNNEL_STAGES;
   const mediaScope = useMemo(
@@ -5772,20 +5776,26 @@ const FunnelAnalysisSection: React.FC<{
   // 推薦数 as their own rate. Not media-scoped (GENERAL_KPIS entries aren't tagged by sourcing
   // media), so this only makes sense in the 全媒体合計 view — same restriction the funnel table
   // already applies to every other GENERAL_KPIS row.
-  const { declinedTotal, withdrawnTotal, acceptanceWithdrawnTotal, recommendedTotal } = useMemo(() => {
+  const { declinedTotal, withdrawnTotal, acceptanceWithdrawnTotal, recommendedTotal, perUserExitTotals } = useMemo(() => {
     let declined = 0, withdrawn = 0, acceptanceWithdrawn = 0, recommended = 0;
+    const perUser: Record<string, { declined: number; withdrawn: number; acceptanceWithdrawn: number; recommended: number }> = {};
     users.forEach(email => {
       const data = allUsersData[email];
       if (!data) return;
       const periodTotals = periodOverride
         ? calculateTotalsForRange(data.entries || [], allMedia, periodOverride.start, periodOverride.end)
         : calculateMonthlyTotals(data.entries || [], allMedia);
-      declined += periodTotals.declined || 0;
-      withdrawn += periodTotals.withdrawn || 0;
-      acceptanceWithdrawn += periodTotals.acceptanceWithdrawn || 0;
-      recommended += periodTotals.candidatesSubmitted || 0;
+      const userDeclined = periodTotals.declined || 0;
+      const userWithdrawn = periodTotals.withdrawn || 0;
+      const userAcceptanceWithdrawn = periodTotals.acceptanceWithdrawn || 0;
+      const userRecommended = periodTotals.candidatesSubmitted || 0;
+      declined += userDeclined;
+      withdrawn += userWithdrawn;
+      acceptanceWithdrawn += userAcceptanceWithdrawn;
+      recommended += userRecommended;
+      perUser[email] = { declined: userDeclined, withdrawn: userWithdrawn, acceptanceWithdrawn: userAcceptanceWithdrawn, recommended: userRecommended };
     });
-    return { declinedTotal: declined, withdrawnTotal: withdrawn, acceptanceWithdrawnTotal: acceptanceWithdrawn, recommendedTotal: recommended };
+    return { declinedTotal: declined, withdrawnTotal: withdrawn, acceptanceWithdrawnTotal: acceptanceWithdrawn, recommendedTotal: recommended, perUserExitTotals: perUser };
   }, [users, allUsersData, allMedia, periodOverride]);
 
   // どのフェーズで見送り・選考辞退・内定承諾後辞退になったか — read directly from each
@@ -5793,10 +5803,12 @@ const FunnelAnalysisSection: React.FC<{
   // from a live per-application scan. This is deliberately ONE data point per candidate,
   // credited at the exact same moment and under the exact same "no company still in selection"
   // dedup as declinedTotal/withdrawnTotal/acceptanceWithdrawnTotal above — so this breakdown's
-  // totals always sum to exactly those same totals, never more.
+  // totals always sum to exactly those same totals, never more. Scoped to exitMemberFilter (a
+  // single member) when set, otherwise every user in scope.
   const exitBreakdownByStage = useMemo(() => {
     const breakdown = new Map<PipelineStage, { declined: number; withdrawn: number; acceptanceWithdrawn: number }>();
-    users.forEach(email => {
+    const scopedUsers = exitMemberFilter ? users.filter(email => email === exitMemberFilter) : users;
+    scopedUsers.forEach(email => {
       const data = allUsersData[email];
       if (!data) return;
       (data.candidates || []).forEach(candidate => {
@@ -5808,7 +5820,7 @@ const FunnelAnalysisSection: React.FC<{
       });
     });
     return breakdown;
-  }, [users, allUsersData, periodOverride]);
+  }, [users, allUsersData, periodOverride, exitMemberFilter]);
 
   // A separate, always-monthly-bucketed trend series (independent of periodOverride, which is
   // just a single snapshot window) — this is what lets the AI compare "this month vs last
@@ -5872,6 +5884,17 @@ const FunnelAnalysisSection: React.FC<{
         );
         lines.push(`${label}: ${parts.join(', ')}`);
       });
+
+      if (selectedMediaId === 'all') {
+        lines.push('', `【ユーザー別 見送り・選考辞退・内定承諾後辞退（${periodLabel}）】`);
+        users.forEach(email => {
+          const data = allUsersData[email];
+          if (!data) return;
+          const label = data.displayName || email;
+          const stats = perUserExitTotals[email] || { declined: 0, withdrawn: 0, acceptanceWithdrawn: 0, recommended: 0 };
+          lines.push(`${label}: 見送り${stats.declined}件・辞退${stats.withdrawn}件・承諾後辞退${stats.acceptanceWithdrawn}件`);
+        });
+      }
 
       if (perUserProgressStats && perUserProgressStats.length > 0) {
         lines.push('', `【ユーザー別 書類回収・面談・その他KPI実績（${periodLabel}）】`);
@@ -6013,10 +6036,54 @@ const FunnelAnalysisSection: React.FC<{
               </table>
             </div>
 
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>ユーザー別 見送り・選考辞退・内定承諾後辞退（{periodLabel}）</h3>
+            <div className="all-users-table-container">
+              <table className="all-users-table">
+                <thead>
+                  <tr>
+                    <th>ユーザー</th>
+                    <th>{GENERAL_KPIS.declined.label}</th>
+                    <th>{GENERAL_KPIS.withdrawn.label}</th>
+                    <th>{GENERAL_KPIS.acceptanceWithdrawn.label}</th>
+                    <th>候補者推薦数に対する比率（合計）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map(email => {
+                    const data = allUsersData[email];
+                    if (!data) return null;
+                    const label = data.displayName || email;
+                    const stats = perUserExitTotals[email] || { declined: 0, withdrawn: 0, acceptanceWithdrawn: 0, recommended: 0 };
+                    const totalExits = stats.declined + stats.withdrawn + stats.acceptanceWithdrawn;
+                    return (
+                      <tr key={email}>
+                        <td>{label}</td>
+                        <td>{stats.declined}</td>
+                        <td>{stats.withdrawn}</td>
+                        <td>{stats.acceptanceWithdrawn}</td>
+                        <td>{stats.recommended > 0 ? `${(totalExits / stats.recommended * 100).toFixed(1)}%` : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
             <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>見送り・選考辞退・内定承諾後辞退の発生フェーズ（{periodLabel}）</h3>
             <p className="modal-description">
-              各候補者がお見送り・選考辞退・内定承諾後辞退になる直前まで進んでいたフェーズ別の件数です。1候補者につき1件のみ計上され（複数社で選考中の場合は全ての応募先が決着した時点でまとめて反映）、上記の候補者推薦数に対する見送り数・選考辞退数・内定承諾後辞退数と合計が一致します。
+              {exitMemberFilter ? `${allUsersData[exitMemberFilter]?.displayName || exitMemberFilter}が` : '各候補者が'}お見送り・選考辞退・内定承諾後辞退になる直前まで進んでいたフェーズ別の件数です。1候補者につき1件のみ計上され（複数社で選考中の場合は全ての応募先が決着した時点でまとめて反映）、{exitMemberFilter ? 'そのメンバーの' : '上記の'}候補者推薦数に対する見送り数・選考辞退数・内定承諾後辞退数と合計が一致します。
             </p>
+            <div className="form-group" style={{ maxWidth: '20rem' }}>
+              <label htmlFor="exit-member-filter">対象メンバー</label>
+              <select id="exit-member-filter" value={exitMemberFilter} onChange={(e) => setExitMemberFilter(e.target.value)}>
+                <option value="">全ユーザー合計</option>
+                {users.map(email => {
+                  const data = allUsersData[email];
+                  if (!data) return null;
+                  return <option key={email} value={email}>{data.displayName || email}</option>;
+                })}
+              </select>
+            </div>
             <div className="all-users-table-container">
               <table className="all-users-table">
                 <thead>
