@@ -2264,6 +2264,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '候補者のレジュメ登録がPDFアップロードだけでなく、テキストの貼り付けでもできるようにした。貼り付けた内容から氏名・現職・学歴・概要を自動入力する（PDFアップロードと同じ抽出処理）',
       '候補者の詳細に「選考トラック」を追加。各応募がいつどのフェーズに進んだかを日付付きで視覚的に表示できるようにした',
       '候補者に「今月・来月見込み」項目を追加。選考中の企業がまだ無い候補者でも、パイプラインの「今月見込み/来月見込み」絞り込みに表示できるようにした',
       '候補者に「面談メモ（手動）」項目を追加。面談要約(AI)とは別に、面談で聞いた内容などを自由に記入できるようにした（音声ファイルの再アップロードなどでAI要約が更新されても消えない）。パイプラインの詳細表示にも表示される',
@@ -3122,6 +3123,58 @@ const CandidateModal: React.FC<{
         });
     };
 
+    // Shared by both the PDF-upload flow and the text-paste flow below — only the `contentParts`
+    // (file data vs. plain pasted text) differ; the extraction prompt, schema, and how the
+    // result gets merged into the candidate are identical either way.
+    const extractResumeInfoFromParts = async (contentParts: ({ inlineData: { mimeType: string; data: string } } | { text: string })[]) => {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+
+      const instructionPart = {
+          text: 'これらの履歴書から候補者の氏名、現在の勤務先企業名、最終学歴、そして学歴、職歴、スキルを重視した概要を抽出してください。複数の情報源がある場合は、情報を集約し、最も包括的な内容にしてください。',
+      };
+
+      const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: { parts: [...contentParts, instructionPart] },
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    name: {
+                        type: Type.STRING,
+                        description: '候補者の氏名',
+                    },
+                    currentCompany: {
+                        type: Type.STRING,
+                        description: '候補者の現在の勤務先企業名。見つからない場合は空文字を返す。',
+                    },
+                    education: {
+                        type: Type.STRING,
+                        description: '候補者の最終学歴。見つからない場合は空文字を返す。',
+                    },
+                    summary: {
+                        type: Type.STRING,
+                        description: '候補者の学歴、職歴、スキル、職務概要に焦点を当てた簡潔な要約。採用担当者が候補者の全体像を素早く把握できるように記述する。',
+                    },
+                },
+                required: ["name", "summary", "currentCompany", "education"],
+            },
+          }
+      });
+
+      const jsonStr = response.text.trim();
+      const parsedData = JSON.parse(jsonStr);
+
+      setCandidate(prev => ({
+          ...prev,
+          name: parsedData.name?.trim() || prev.name,
+          currentCompany: parsedData.currentCompany?.trim() || prev.currentCompany,
+          education: parsedData.education?.trim() || prev.education,
+          summary: parsedData.summary?.trim() || prev.summary,
+      }));
+    };
+
     const handleResumeFile = async (files: FileList) => {
       if (!files || files.length === 0) return;
 
@@ -3138,12 +3191,10 @@ const CandidateModal: React.FC<{
         alert('アップロードしようとしたファイルは既に追加されています。');
         return;
       }
-      
+
       setCandidate(prev => ({ ...prev, resumeFiles: [...(prev.resumeFiles || []), ...newFiles.map(f => ({ name: f.name }))] }));
       setIsGenerating(true);
       try {
-          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-          
           const fileParts = await Promise.all(newFiles.map(async (file) => {
               const base64Data = await fileToBase64(file);
               return {
@@ -3153,54 +3204,29 @@ const CandidateModal: React.FC<{
                   },
               };
           }));
-
-          const textPart = {
-              text: 'これらの履歴書から候補者の氏名、現在の勤務先企業名、最終学歴、そして学歴、職歴、スキルを重視した概要を抽出してください。複数のファイルがある場合は、情報を集約し、最も包括的な内容にしてください。',
-          };
-
-          const response = await ai.models.generateContent({
-              model: 'gemini-2.5-flash',
-              contents: { parts: [...fileParts, textPart] },
-              config: {
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                        name: {
-                            type: Type.STRING,
-                            description: '候補者の氏名',
-                        },
-                        currentCompany: {
-                            type: Type.STRING,
-                            description: '候補者の現在の勤務先企業名。見つからない場合は空文字を返す。',
-                        },
-                        education: {
-                            type: Type.STRING,
-                            description: '候補者の最終学歴。見つからない場合は空文字を返す。',
-                        },
-                        summary: {
-                            type: Type.STRING,
-                            description: '候補者の学歴、職歴、スキル、職務概要に焦点を当てた簡潔な要約。採用担当者が候補者の全体像を素早く把握できるように記述する。',
-                        },
-                    },
-                    required: ["name", "summary", "currentCompany", "education"],
-                },
-              }
-          });
-          
-          const jsonStr = response.text.trim();
-          const parsedData = JSON.parse(jsonStr);
-
-          setCandidate(prev => ({
-              ...prev,
-              name: parsedData.name?.trim() || prev.name,
-              currentCompany: parsedData.currentCompany?.trim() || prev.currentCompany,
-              education: parsedData.education?.trim() || prev.education,
-              summary: parsedData.summary?.trim() || prev.summary,
-          }));
-
+          await extractResumeInfoFromParts(fileParts);
       } catch (error) {
           console.error("Error generating summary:", error);
+          alert('AIによる要約の生成中にエラーが発生しました。');
+      } finally {
+          setIsGenerating(false);
+      }
+    };
+
+    // 貼り付けたレジュメのテキストから、PDFアップロードと同じ抽出処理を行う — PDFに変換する
+    // 手間をかけずに、メールやATSからコピーしたテキストをそのまま使えるようにするため。
+    const [resumeTextInput, setResumeTextInput] = useState('');
+    const handleResumeTextSubmit = async () => {
+      const text = resumeTextInput.trim();
+      if (!text) return;
+      const label = `テキスト貼り付け（${new Date().toLocaleDateString('ja-JP')}）`;
+      setCandidate(prev => ({ ...prev, resumeFiles: [...(prev.resumeFiles || []), { name: label }] }));
+      setIsGenerating(true);
+      try {
+          await extractResumeInfoFromParts([{ text }]);
+          setResumeTextInput('');
+      } catch (error) {
+          console.error("Error generating summary from pasted text:", error);
           alert('AIによる要約の生成中にエラーが発生しました。');
       } finally {
           setIsGenerating(false);
@@ -3475,8 +3501,8 @@ const CandidateModal: React.FC<{
             <form id="candidate-form" className="modal-body" onSubmit={handleSubmit}>
               <div className="form-group-grid">
                   <div className="form-group form-group-span-3">
-                      <label>レジュメ (PDF) - 複数可</label>
-                      <p className="form-helper-text">PDFをアップロードすると、氏名、現職、学歴、概要が自動入力されます。複数ファイルを追加すると情報は統合されます。</p>
+                      <label>レジュメ - 複数可</label>
+                      <p className="form-helper-text">PDFをアップロード（複数ファイルを追加すると情報は統合されます）、またはテキストを貼り付けると、氏名、現職、学歴、概要が自動入力されます。</p>
                        <div 
                           id="resume-drop-zone" 
                           className={`drop-zone ${resumeDragActive ? 'drag-active' : ''}`} 
@@ -3499,6 +3525,26 @@ const CandidateModal: React.FC<{
                               <p onClick={onResumeButtonClick}>ここにPDFファイルをドラッグ＆ドロップ、またはクリックして選択</p>
                           )}
                       </div>
+                      <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
+                          PDFが無い場合は、レジュメの本文をそのまま貼り付けても同じように自動入力できます。
+                      </p>
+                      <textarea
+                          value={resumeTextInput}
+                          onChange={(e) => setResumeTextInput(e.target.value)}
+                          rows={4}
+                          placeholder="ここにレジュメのテキストを貼り付けてください（メールやATSからのコピー等）"
+                          disabled={isGenerating}
+                          aria-label="レジュメのテキストを貼り付け"
+                      />
+                      <button
+                          type="button"
+                          onClick={handleResumeTextSubmit}
+                          disabled={isGenerating || !resumeTextInput.trim()}
+                          className="secondary-action-button"
+                          style={{ marginTop: '0.5rem' }}
+                      >
+                          {isGenerating ? '解析中...' : 'このテキストから自動入力'}
+                      </button>
                   </div>
                   <div className="form-group form-group-span-3">
                     <label>面談音声ファイル</label>
