@@ -896,6 +896,10 @@ section {
     min-height: 80px;
     resize: vertical;
 }
+.middle-entry-target-picker select {
+  width: auto;
+  min-width: 16rem;
+}
 .form-helper-text {
   font-size: 0.85rem;
   color: var(--text-muted-color);

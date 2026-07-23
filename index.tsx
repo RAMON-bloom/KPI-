@@ -1470,8 +1470,8 @@ const MediaKpiCard: React.FC<{
     );
 };
 
-// Shared with MiddleEntryModal (ミドルによる代理入力) so both forms render exactly the same set
-// of actual-value fields and never drift apart.
+// Extracted so DateEntryModal renders the same fields whether it's the signed-in user editing
+// their own day or a ミドル proxy-editing a teammate's (see middleEntryTargetEmail in App).
 const GeneralKpiFieldsFieldset: React.FC<{
   values: { [key in KpiKey]?: number };
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -1565,10 +1565,13 @@ const DateEntryModal: React.FC<{
   date: string;
   initialValues: KpiTotals | null;
   activeMedia: MediaEntry[];
+  // Set when a ミドル is proxy-entering a teammate's actuals instead of their own — shown in the
+  // header so it's always clear whose day is being overwritten.
+  subjectLabel?: string;
   onSave: (date: string, values: KpiTotals) => void;
   onNavigate: (currentDate: string, currentValues: KpiTotals, offsetDays: number) => void;
   onClose: () => void;
-}> = ({ date, initialValues, activeMedia, onSave, onNavigate, onClose }) => {
+}> = ({ date, initialValues, activeMedia, subjectLabel, onSave, onNavigate, onClose }) => {
   const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>(
     initialValues || {}
   );
@@ -1694,7 +1697,7 @@ const DateEntryModal: React.FC<{
           <button type="button" onClick={() => handleNavigate(-1)} className="secondary-action-button date-entry-nav-button" aria-label="前日の実績入力へ">
             &lt; 前日
           </button>
-          <h3 id="modal-title">{formattedDate} の実績入力</h3>
+          <h3 id="modal-title">{formattedDate} の実績入力{subjectLabel ? `（${subjectLabel}）` : ''}</h3>
           <button type="button" onClick={() => handleNavigate(1)} className="secondary-action-button date-entry-nav-button" aria-label="次日の実績入力へ">
             次日 &gt;
           </button>
@@ -1728,125 +1731,6 @@ const DateEntryModal: React.FC<{
           {canClear && <button type="button" onClick={handleClear} className="reset-button" style={{ marginRight: 'auto' }}>実績をクリア</button>}
           <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
           <button type="submit" form="date-entry-form" className="submit-button" disabled={isSaveDisabled}>実績を保存</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ミドルによる代理入力: same field set/semantics as DateEntryModal's own-entry form (full
-// overwrite of that day's entry, see GeneralKpiFieldsFieldset/MediaKpiFieldsTable above), but
-// scoped to a chosen team member + date instead of the signed-in user's own data. Stays open
-// after a successful save (rather than closing like DateEntryModal) so a ミドル can work through
-// several members/dates in one sitting.
-const MiddleEntryModal: React.FC<{
-  targetOptions: { email: string; label: string }[];
-  allUsersData: Record<string, UserData>;
-  activeMedia: MediaEntry[];
-  onSave: (targetEmail: string, date: string, values: KpiTotals) => Promise<void>;
-  onClose: () => void;
-}> = ({ targetOptions, allUsersData, activeMedia, onSave, onClose }) => {
-  const toDateInputValue = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const [selectedEmail, setSelectedEmail] = useState('');
-  const [selectedDate, setSelectedDate] = useState(toDateInputValue(new Date()));
-  const [entryValues, setEntryValues] = useState<{ [key in KpiKey]?: number }>({});
-  const [status, setStatus] = useState<'idle' | 'saving' | 'error' | 'saved'>('idle');
-  const [message, setMessage] = useState('');
-
-  const existingValues = useMemo((): KpiTotals | null => {
-    if (!selectedEmail) return null;
-    const entry = allUsersData[selectedEmail]?.entries.find(e => e.date === selectedDate);
-    return entry ? entry.values : null;
-  }, [allUsersData, selectedEmail, selectedDate]);
-
-  useEffect(() => {
-    setEntryValues(existingValues || {});
-    setStatus('idle');
-    setMessage('');
-  }, [selectedEmail, selectedDate]);
-
-  const buildEditableKeys = (): KpiKey[] => [
-    ...Object.keys(GENERAL_KPIS),
-    ...activeMedia.flatMap(media => MEDIA_KPI_SUFFIXES.map(suffix => `${media.id}_${suffix}`)),
-  ];
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target as { name: KpiKey; value: string };
-    setEntryValues(prev => ({ ...prev, [name]: value === '' ? undefined : Number(value) }));
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedEmail) {
-      setStatus('error');
-      setMessage('メンバーを選択してください。');
-      return;
-    }
-    const valuesWithDefaults: KpiTotals = { ...(existingValues || {}) };
-    buildEditableKeys().forEach(key => { valuesWithDefaults[key] = entryValues[key] || 0; });
-    setStatus('saving');
-    setMessage('');
-    try {
-      await onSave(selectedEmail, selectedDate, valuesWithDefaults);
-      setStatus('saved');
-      setMessage('保存しました。');
-    } catch (err) {
-      setStatus('error');
-      setMessage(err instanceof Error ? err.message : '保存に失敗しました。');
-    }
-  };
-
-  const selectedLabel = targetOptions.find(o => o.email === selectedEmail)?.label;
-
-  return (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="middle-entry-modal-title">
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3 id="middle-entry-modal-title">メンバー実績入力（代理入力）</h3>
-          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
-        </div>
-        <form id="middle-entry-form" className="modal-body" onSubmit={handleSubmit}>
-          <p className="modal-description">
-            選択したメンバーのその日の実績として上書き保存されます。既に本人が入力済みの値はここに表示され、編集すると置き換わります。
-          </p>
-          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-            <div className="form-group">
-              <label htmlFor="middle-entry-target">メンバー</label>
-              <select id="middle-entry-target" value={selectedEmail} onChange={(e) => setSelectedEmail(e.target.value)}>
-                <option value="">選択してください</option>
-                {targetOptions.map(o => <option key={o.email} value={o.email}>{o.label}</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label htmlFor="middle-entry-date">日付</label>
-              <input
-                id="middle-entry-date"
-                type="date"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
-              />
-            </div>
-          </div>
-
-          {selectedEmail && (
-            <>
-              <GeneralKpiFieldsFieldset values={entryValues} onChange={handleInputChange} idPrefix="middle-entry" />
-              <div className="media-kpi-section">
-                <h3 className="sub-section-title">媒体別実績</h3>
-                <MediaKpiFieldsTable activeMedia={activeMedia} values={entryValues} onChange={handleInputChange} idPrefix="middle-entry" />
-              </div>
-            </>
-          )}
-
-          {message && (
-            <span className={`gmail-scout-message ${status === 'error' ? 'is-error' : ''}`} role="status">{message}</span>
-          )}
-        </form>
-        <div className="modal-footer">
-          <button type="button" onClick={onClose} className="cancel-button">閉じる</button>
-          <button type="submit" form="middle-entry-form" className="submit-button" disabled={!selectedEmail || status === 'saving'}>
-            {status === 'saving' ? '保存中...' : `${selectedLabel ? selectedLabel + 'の' : ''}実績を保存`}
-          </button>
         </div>
       </div>
     </div>
@@ -2283,7 +2167,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
-      '登録ユーザーに「ミドル」役職をアサインできるようにし、ミドルに指定された人は自分が所属するチームのメンバー全員の実績を代理入力できる「メンバー実績入力」機能を追加（入力内容はそのメンバー本人のその日の実績として上書き保存される）。ミドルの割り当ては「チーム管理」から行う',
+      '「ミドル」による実績代理入力を、専用モーダルではなく実績カレンダーからの操作に変更。個人実績タブの実績カレンダーの上に対象メンバーを選ぶドロップダウンを設置し、選択するとそのメンバーの実績カレンダーに切り替わり、いつもと同じカレンダーの日付クリックから実績入力できる（入力内容はそのメンバー本人のその日の実績として上書き保存される）',
+      '登録ユーザーに「ミドル」役職をアサインできるようにし、ミドルに指定された人は自分が所属するチームのメンバー全員の実績を代理入力できるようにした。ミドルの割り当ては「チーム管理」から行う',
     ],
   },
   {
@@ -6745,10 +6630,13 @@ const App: React.FC = () => {
   // indistinguishable, and the effect could incorrectly revoke real grants on first paint.
   const [teamsConfigLoaded, setTeamsConfigLoaded] = useState(false);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
-  const [isMiddleEntryModalOpen, setIsMiddleEntryModalOpen] = useState(false);
   // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
   // write directly into a specific teammate's own Drive file.
   const [driveFileIdByEmail, setDriveFileIdByEmail] = useState<Record<string, string>>({});
+  // '' = editing/viewing one's own 実績カレンダー (the normal case); otherwise the email of a
+  // teammate the signed-in ミドル is currently proxy-entering actuals for — selected via the
+  // dropdown above 実績カレンダー (personal_kpi tab only).
+  const [middleEntryTargetEmail, setMiddleEntryTargetEmail] = useState('');
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
@@ -7062,13 +6950,20 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    // The 個人実績 tab also needs this when the signed-in account holds the ミドル role and
+    // belongs to at least one Team — that's what feeds the member-selector dropdown above the
+    // 実績カレンダー (computed inline here, not via the memoized isCurrentUserMiddle/
+    // middleManagedMemberEmails below, since those are declared later in this component and
+    // aren't in scope yet at this point in the function body).
+    const currentUserIsMiddleWithTeam = !!currentIdentity && middleEmails.includes(currentIdentity.email) && teams.some(t => t.memberEmails.includes(currentIdentity.email));
     const needsAggregateData =
-      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen || isMiddleEntryModalOpen;
+      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen ||
+      (view === 'personal_kpi' && currentUserIsMiddleWithTeam);
     if (!needsAggregateData || !isInitialized || !currentIdentity) return;
     if (hasFetchedAllUsersRef.current) return;
     hasFetchedAllUsersRef.current = true;
     fetchAllUsersData();
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isMiddleEntryModalOpen]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, middleEmails, teams]);
 
   // Loads unconditionally after sign-in (like the media config below), not gated by
   // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
@@ -7585,21 +7480,45 @@ const App: React.FC = () => {
     }
   };
 
-  // ミドルによる代理入力: writes directly into the target teammate's own Drive file (requires
-  // the individual 'writer' permission granted by syncIndividualWriterPermissions — see the
-  // reconciliation effect above; that grant is set up by the TARGET's own client, so it only
+  // ミドルによる代理入力: same shape as persistEntry above (optimistic local update, then a
+  // fire-and-forget Drive write — the modal doesn't wait for the network round-trip), but writes
+  // directly into the TARGET teammate's own Drive file instead of the signed-in user's. Requires
+  // the individual 'writer' permission granted by syncIndividualWriterPermissions (see the
+  // reconciliation effect above) — that grant is set up by the TARGET's own client, so it only
   // takes effect once their browser has been open at least once since being added to a shared
-  // team with this ミドル). Re-fetches the target's latest data as part of the write (see
-  // overwriteTeammateEntry) so a stale locally-cached copy can never clobber changes the member
-  // made elsewhere in the meantime.
-  const handleSaveMiddleEntry = async (targetEmail: string, date: string, values: KpiTotals) => {
+  // team with this ミドル. The actual Drive write (overwriteTeammateEntry) re-fetches the
+  // target's latest data before merging in this one date, so a stale locally-cached copy here
+  // can never clobber changes the member made elsewhere in the meantime.
+  const persistMiddleEntry = (targetEmail: string, date: string, newValues: KpiTotals) => {
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      const otherEntries = target.entries.filter(entry => entry.date !== date);
+      const updatedEntries = [...otherEntries, { id: Date.now(), date, values: newValues }].sort((a, b) => a.date.localeCompare(b.date));
+      return { ...prev, [targetEmail]: { ...target, entries: updatedEntries } };
+    });
     const targetFileId = driveFileIdByEmail[targetEmail];
-    if (!targetFileId) throw new Error('対象メンバーのデータファイルが見つかりませんでした。');
-    const updated = await overwriteTeammateEntry<UserData>(targetFileId, date, values);
-    setAllUsersData(prev => ({
-      ...prev,
-      [targetEmail]: { ...(prev[targetEmail] || updated), entries: updated.entries },
-    }));
+    if (!targetFileId) {
+      alert('対象メンバーのデータファイルが見つかりませんでした。');
+      return;
+    }
+    overwriteTeammateEntry<UserData>(targetFileId, date, newValues).catch(err => {
+      console.error('Failed to save proxy entry to teammate Drive file', err);
+      alert(`実績の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
+  const handleSaveMiddleEntry = (targetEmail: string, date: string, newValues: KpiTotals) => {
+    persistMiddleEntry(targetEmail, date, newValues);
+    setSelectedDate(null);
+  };
+
+  const handleNavigateMiddleEntryDate = (targetEmail: string) => (currentDate: string, currentValues: KpiTotals, offsetDays: number) => {
+    persistMiddleEntry(targetEmail, currentDate, currentValues);
+    const newDate = new Date(currentDate + 'T00:00:00');
+    newDate.setDate(newDate.getDate() + offsetDays);
+    const newDateStr = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}-${String(newDate.getDate()).padStart(2, '0')}`;
+    setSelectedDate(newDateStr);
   };
 
   // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
@@ -8167,6 +8086,14 @@ const App: React.FC = () => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
   }, [entries]);
 
+  // When a ミドル has selected a teammate above 実績カレンダー, the calendar (and the entry
+  // modal it opens) switches to that teammate's own entries instead of the signed-in user's.
+  const calendarEntriesByDate = useMemo(() => {
+    if (!middleEntryTargetEmail) return entriesByDate;
+    const targetEntries = allUsersData[middleEntryTargetEmail]?.entries || [];
+    return new Map(targetEntries.map(entry => [entry.date, entry.values]));
+  }, [middleEntryTargetEmail, allUsersData, entriesByDate]);
+
   if (!isInitialized) {
       return <div className="loading-container">読み込み中...</div>;
   }
@@ -8285,20 +8212,12 @@ const App: React.FC = () => {
       {selectedDate && (
         <DateEntryModal
           date={selectedDate}
-          initialValues={entriesByDate.get(selectedDate) || null}
+          initialValues={calendarEntriesByDate.get(selectedDate) || null}
           activeMedia={activeMedia}
-          onSave={handleSaveEntry}
-          onNavigate={handleNavigateEntryDate}
+          subjectLabel={middleEntryTargetEmail ? (pipelineUserOptions.find(o => o.email === middleEntryTargetEmail)?.label || middleEntryTargetEmail) : undefined}
+          onSave={middleEntryTargetEmail ? (date, values) => handleSaveMiddleEntry(middleEntryTargetEmail, date, values) : handleSaveEntry}
+          onNavigate={middleEntryTargetEmail ? handleNavigateMiddleEntryDate(middleEntryTargetEmail) : handleNavigateEntryDate}
           onClose={() => setSelectedDate(null)}
-        />
-      )}
-      {isMiddleEntryModalOpen && (
-        <MiddleEntryModal
-          targetOptions={pipelineUserOptions.filter(o => middleManagedMemberEmails.includes(o.email))}
-          allUsersData={allUsersData}
-          activeMedia={activeMedia}
-          onSave={handleSaveMiddleEntry}
-          onClose={() => setIsMiddleEntryModalOpen(false)}
         />
       )}
       {isBulkGmailModalOpen && (
@@ -8401,9 +8320,6 @@ const App: React.FC = () => {
                 <option value="AC">AssetCareer</option>
               </select>
             )}
-            {isCurrentUserMiddle && middleManagedMemberEmails.length > 0 && (
-              <button onClick={() => setIsMiddleEntryModalOpen(true)}>メンバー実績入力</button>
-            )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
             <button onClick={() => setIsChangelogModalOpen(true)}>更新履歴</button>
@@ -8463,9 +8379,29 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.calendar ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="calendar-content" className={`collapsible-content ${sectionVisibility.calendar ? 'open' : ''}`}>
+                {isCurrentUserMiddle && middleManagedMemberEmails.length > 0 && (
+                  <div className="form-group middle-entry-target-picker">
+                    <label htmlFor="middle-entry-target-select">実績を代理入力するメンバー</label>
+                    <select
+                      id="middle-entry-target-select"
+                      value={middleEntryTargetEmail}
+                      onChange={(e) => setMiddleEntryTargetEmail(e.target.value)}
+                    >
+                      <option value="">自分の実績カレンダー</option>
+                      {pipelineUserOptions
+                        .filter(o => middleManagedMemberEmails.includes(o.email))
+                        .map(o => <option key={o.email} value={o.email}>{o.label}</option>)}
+                    </select>
+                    {middleEntryTargetEmail && (
+                      <p className="modal-description" style={{ marginTop: '0.25rem' }}>
+                        {pipelineUserOptions.find(o => o.email === middleEntryTargetEmail)?.label || middleEntryTargetEmail}さんのカレンダーを表示しています。日付をクリックすると、その日の実績を代理入力できます（本人のその日の実績として上書き保存されます）。
+                      </p>
+                    )}
+                  </div>
+                )}
                 <CalendarView
                   viewDate={viewDate}
-                  entriesByDate={entriesByDate}
+                  entriesByDate={calendarEntriesByDate}
                   allMedia={allMedia}
                   onDayClick={setSelectedDate}
                   onPrevMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
