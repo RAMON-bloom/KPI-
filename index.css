@@ -292,6 +292,13 @@ button:disabled {
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
 }
+.teams-permission-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
 
 .app-main-header {
   display: flex;

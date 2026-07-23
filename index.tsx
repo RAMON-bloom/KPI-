@@ -2167,6 +2167,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '「チーム管理」の権限管理・所属部署・ミドル権限の各セクションを開閉できるようにした',
       '「ミドル」による実績代理入力を、専用モーダルではなく実績カレンダーからの操作に変更。個人実績タブの実績カレンダーの上に対象メンバーを選ぶドロップダウンを設置し、選択するとそのメンバーの実績カレンダーに切り替わり、いつもと同じカレンダーの日付クリックから実績入力できる（入力内容はそのメンバー本人のその日の実績として上書き保存される）',
       '登録ユーザーに「ミドル」役職をアサインできるようにし、ミドルに指定された人は自分が所属するチームのメンバー全員の実績を代理入力できるようにした。ミドルの割り当ては「チーム管理」から行う',
     ],
@@ -2341,6 +2342,11 @@ const TeamsModal: React.FC<{
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
     const [newEditorEmail, setNewEditorEmail] = useState('');
+    // Open by default (matches this modal's appearance before these became foldable) — a user
+    // with many registered accounts can collapse whichever of these three they don't need right
+    // now instead of scrolling past them every time.
+    const [openSections, setOpenSections] = useState({ permissions: true, departments: true, middle: true });
+    const toggleSection = (key: keyof typeof openSections) => setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
 
     const labelByEmail = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
 
@@ -2399,97 +2405,133 @@ const TeamsModal: React.FC<{
                 <div className="modal-body">
                     {isAdmin && (
                         <div className="teams-permission-section">
-                            <h4 className="sub-section-title">チーム作成・編集権限の管理</h4>
-                            <p className="modal-description">
-                                ここに登録したメールアドレスの人は「チーム管理」からチームの作成・編集ができるようになります。
-                            </p>
-                            {authorizedEditorEmails.length === 0 ? (
-                                <p className="no-data-message">まだ誰にも権限を付与していません。</p>
-                            ) : (
-                                <ul className="user-management-list">
-                                    {authorizedEditorEmails.map(email => (
-                                        <li key={email} className="user-management-item">
-                                            <span className="user-management-name">
-                                                {labelByEmail.get(email) || email}
-                                                {labelByEmail.has(email) && <small style={{ color: 'var(--text-muted-color)' }}> ({email})</small>}
-                                            </span>
-                                            <button onClick={() => onRevokeEditor(email)} className="delete-user-button">削除</button>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                            <form onSubmit={handleGrantEditor} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                                <input
-                                    type="email"
-                                    value={newEditorEmail}
-                                    onChange={(e) => setNewEditorEmail(e.target.value)}
-                                    placeholder="example@bloom-firm.com"
-                                    style={{ flex: 1 }}
-                                />
-                                <button type="submit" className="submit-button" disabled={!newEditorEmail.trim()}>権限を付与</button>
-                            </form>
+                            <h4
+                                className="sub-section-title teams-permission-section-header"
+                                onClick={() => toggleSection('permissions')}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('permissions'); } }}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openSections.permissions}
+                            >
+                                <span>チーム作成・編集権限の管理</span>
+                                <span className={`toggle-icon ${openSections.permissions ? 'open' : ''}`}>▼</span>
+                            </h4>
+                            <div className={`collapsible-content ${openSections.permissions ? 'open' : ''}`}>
+                                <p className="modal-description">
+                                    ここに登録したメールアドレスの人は「チーム管理」からチームの作成・編集ができるようになります。
+                                </p>
+                                {authorizedEditorEmails.length === 0 ? (
+                                    <p className="no-data-message">まだ誰にも権限を付与していません。</p>
+                                ) : (
+                                    <ul className="user-management-list">
+                                        {authorizedEditorEmails.map(email => (
+                                            <li key={email} className="user-management-item">
+                                                <span className="user-management-name">
+                                                    {labelByEmail.get(email) || email}
+                                                    {labelByEmail.has(email) && <small style={{ color: 'var(--text-muted-color)' }}> ({email})</small>}
+                                                </span>
+                                                <button onClick={() => onRevokeEditor(email)} className="delete-user-button">削除</button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                                <form onSubmit={handleGrantEditor} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                    <input
+                                        type="email"
+                                        value={newEditorEmail}
+                                        onChange={(e) => setNewEditorEmail(e.target.value)}
+                                        placeholder="example@bloom-firm.com"
+                                        style={{ flex: 1 }}
+                                    />
+                                    <button type="submit" className="submit-button" disabled={!newEditorEmail.trim()}>権限を付与</button>
+                                </form>
+                            </div>
                             <hr style={{ margin: '1rem 0' }} />
                         </div>
                     )}
                     {isEditable && (
                         <div className="teams-permission-section">
-                            <h4 className="sub-section-title">メンバーの所属部署</h4>
-                            <p className="modal-description">
-                                各メンバーがF+（Firm+）・AC（AssetCareer）のどちらに所属するかを設定します。ヘッダーの事業部切り替えで表示が絞り込まれます。
-                            </p>
-                            {userOptions.length === 0 ? (
-                                <p className="no-data-message">まだユーザーデータがありません。</p>
-                            ) : (
-                                <ul className="user-management-list">
-                                    {userOptions.map(u => (
-                                        <li key={u.email} className="user-management-item">
-                                            <span className="user-management-name">
-                                                {u.label}
-                                                {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
-                                            </span>
-                                            <select
-                                                value={memberDepartments[u.email] || ''}
-                                                onChange={(e) => onSetMemberDepartment(u.email, (e.target.value || null) as Department | null)}
-                                            >
-                                                <option value="">未設定</option>
-                                                <option value="F+">Firm+</option>
-                                                <option value="AC">AssetCareer</option>
-                                            </select>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
+                            <h4
+                                className="sub-section-title teams-permission-section-header"
+                                onClick={() => toggleSection('departments')}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('departments'); } }}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openSections.departments}
+                            >
+                                <span>メンバーの所属部署</span>
+                                <span className={`toggle-icon ${openSections.departments ? 'open' : ''}`}>▼</span>
+                            </h4>
+                            <div className={`collapsible-content ${openSections.departments ? 'open' : ''}`}>
+                                <p className="modal-description">
+                                    各メンバーがF+（Firm+）・AC（AssetCareer）のどちらに所属するかを設定します。ヘッダーの事業部切り替えで表示が絞り込まれます。
+                                </p>
+                                {userOptions.length === 0 ? (
+                                    <p className="no-data-message">まだユーザーデータがありません。</p>
+                                ) : (
+                                    <ul className="user-management-list">
+                                        {userOptions.map(u => (
+                                            <li key={u.email} className="user-management-item">
+                                                <span className="user-management-name">
+                                                    {u.label}
+                                                    {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
+                                                </span>
+                                                <select
+                                                    value={memberDepartments[u.email] || ''}
+                                                    onChange={(e) => onSetMemberDepartment(u.email, (e.target.value || null) as Department | null)}
+                                                >
+                                                    <option value="">未設定</option>
+                                                    <option value="F+">Firm+</option>
+                                                    <option value="AC">AssetCareer</option>
+                                                </select>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
                             <hr style={{ margin: '1rem 0' }} />
                         </div>
                     )}
                     {isEditable && (
                         <div className="teams-permission-section">
-                            <h4 className="sub-section-title">ミドル権限の管理</h4>
-                            <p className="modal-description">
-                                「ミドル」に指定した人は、自分が所属するチームのメンバー全員の実績を代理入力できるようになります（ヘッダーの「メンバー実績入力」から。入力した内容はそのメンバー本人のその日の実績として上書き保存されます）。
-                            </p>
-                            {userOptions.length === 0 ? (
-                                <p className="no-data-message">まだユーザーデータがありません。</p>
-                            ) : (
-                                <ul className="user-management-list">
-                                    {userOptions.map(u => (
-                                        <li key={u.email} className="user-management-item">
-                                            <span className="user-management-name">
-                                                {u.label}
-                                                {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
-                                            </span>
-                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.9rem' }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={middleEmails.includes(u.email)}
-                                                    onChange={(e) => onToggleMiddle(u.email, e.target.checked)}
-                                                />
-                                                ミドル
-                                            </label>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
+                            <h4
+                                className="sub-section-title teams-permission-section-header"
+                                onClick={() => toggleSection('middle')}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('middle'); } }}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openSections.middle}
+                            >
+                                <span>ミドル権限の管理</span>
+                                <span className={`toggle-icon ${openSections.middle ? 'open' : ''}`}>▼</span>
+                            </h4>
+                            <div className={`collapsible-content ${openSections.middle ? 'open' : ''}`}>
+                                <p className="modal-description">
+                                    「ミドル」に指定した人は、自分が所属するチームのメンバー全員の実績を代理入力できるようになります（個人実績タブの実績カレンダー上部から。入力した内容はそのメンバー本人のその日の実績として上書き保存されます）。
+                                </p>
+                                {userOptions.length === 0 ? (
+                                    <p className="no-data-message">まだユーザーデータがありません。</p>
+                                ) : (
+                                    <ul className="user-management-list">
+                                        {userOptions.map(u => (
+                                            <li key={u.email} className="user-management-item">
+                                                <span className="user-management-name">
+                                                    {u.label}
+                                                    {u.label !== u.email && <small style={{ color: 'var(--text-muted-color)' }}> ({u.email})</small>}
+                                                </span>
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.9rem' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={middleEmails.includes(u.email)}
+                                                        onChange={(e) => onToggleMiddle(u.email, e.target.checked)}
+                                                    />
+                                                    ミドル
+                                                </label>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
                             <hr style={{ margin: '1rem 0' }} />
                         </div>
                     )}
