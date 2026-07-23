@@ -363,6 +363,17 @@ interface CompanyApplication {
   // an actual stage change) from double-counting the same event. Does not include
   // candidatesSubmitted — see Candidate.recommendationRecorded for why.
   recordedAchievementKpiKeys?: (keyof typeof GENERAL_KPIS)[];
+  // The forward-progress stage this application was in immediately before moving to お見送り/
+  // 選考辞退 — captured at the moment of that transition (see computeStageAdvanceUpdate), since
+  // `stage` itself gets overwritten to the exit stage and no longer reflects it. Powers the
+  // 歩留まり分析の「どのフェーズで見送り・選考辞退になったか」breakdown. Independent of whether
+  // that transition ended up actually crediting a KPI actual (which is deduped per candidate,
+  // see Candidate.exitRecorded) — this is a per-application fact, not a KPI-counting one.
+  exitedFromStage?: PipelineStage;
+  // Date (yyyy-mm-dd) exitedFromStage was captured — lets the 歩留まり breakdown be scoped to
+  // the same 期間 (this month / custom range) as the rest of 歩留まり分析, the same way KPI
+  // actuals are dated per day.
+  exitedAt?: string;
 }
 
 interface Candidate {
@@ -423,7 +434,8 @@ interface Candidate {
  */
 function computeStageAdvanceUpdate(
   prevCandidate: Candidate | undefined,
-  nextCandidate: Candidate
+  nextCandidate: Candidate,
+  todayStr: string = new Date().toLocaleDateString('sv-SE')
 ): { candidate: Candidate; kpiDeltas: Record<string, number> } {
   const prevAppById = new Map((prevCandidate?.applications || []).map(a => [a.id, a]));
   const kpiDeltas: Record<string, number> = {};
@@ -436,9 +448,20 @@ function computeStageAdvanceUpdate(
   const updatedApplications = nextCandidate.applications.map(app => {
     const prevApp = prevAppById.get(app.id);
     if (!prevApp || prevApp.stage === app.stage) return app;
+
+    // Captures which phase this application exited FROM, independent of whether this transition
+    // ends up crediting a KPI actual (see Pass 2's exitRecorded dedup below) — a per-application
+    // fact for 歩留まり分析's exit breakdown, not a KPI-counting one. Only set on a genuine
+    // transition from an active/forward stage into お見送り/選考辞退 — moving directly between
+    // the two exit stages leaves an earlier real capture untouched.
+    let base = app;
+    if (EXIT_PIPELINE_STAGES.includes(app.stage) && !EXIT_PIPELINE_STAGES.includes(prevApp.stage)) {
+      base = { ...base, exitedFromStage: prevApp.stage, exitedAt: todayStr };
+    }
+
     const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn');
-    if (keys.length === 0) return app;
-    const recorded = new Set(app.recordedAchievementKpiKeys || []);
+    if (keys.length === 0) return base;
+    const recorded = new Set(base.recordedAchievementKpiKeys || []);
     let changed = false;
     keys.forEach(key => {
       if (key === 'candidatesSubmitted') {
@@ -453,7 +476,7 @@ function computeStageAdvanceUpdate(
       changed = true;
       kpiDeltas[key] = (kpiDeltas[key] || 0) + 1;
     });
-    return changed ? { ...app, recordedAchievementKpiKeys: Array.from(recorded) } : app;
+    return changed ? { ...base, recordedAchievementKpiKeys: Array.from(recorded) } : base;
   });
 
   // Pass 2: declined/withdrawn — deduped ONCE PER CANDIDATE TOTAL (exitRecorded), the same
@@ -2167,6 +2190,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      '歩留まり分析に「見送り・選考辞退の発生フェーズ」の集計を追加。各応募がお見送り・選考辞退になる直前まで進んでいたフェーズ（書類選考・1次面接など）別の件数を表示できるようにした（1候補者が複数社で異なるフェーズで見送り・辞退になった場合はそれぞれカウント）',
       '「チーム管理」の権限管理・所属部署・ミドル権限の各セクションを開閉できるようにした',
       '「ミドル」による実績代理入力を、専用モーダルではなく実績カレンダーからの操作に変更。個人実績タブの実績カレンダーの上に対象メンバーを選ぶドロップダウンを設置し、選択するとそのメンバーの実績カレンダーに切り替わり、いつもと同じカレンダーの日付クリックから実績入力できる（入力内容はそのメンバー本人のその日の実績として上書き保存される）',
       '登録ユーザーに「ミドル」役職をアサインできるようにし、ミドルに指定された人は自分が所属するチームのメンバー全員の実績を代理入力できるようにした。ミドルの割り当ては「チーム管理」から行う',
@@ -5620,6 +5644,20 @@ const FUNNEL_STAGES: FunnelStageDef[] = [
 // misleading in a per-media view.
 const MEDIA_FUNNEL_STAGES = FUNNEL_STAGES.filter(s => (MEDIA_KPI_SUFFIXES as readonly string[]).includes(s.key));
 
+// Same "this month, unless a periodOverride is given" rule calculateMonthlyTotals/
+// calculateTotalsForRange apply to KpiEntry dates — mirrored here for CompanyApplication.
+// exitedAt so the 見送り・選考辞退 phase breakdown stays scoped to the same 期間 as the rest of
+// 歩留まり分析.
+const isDateInFunnelPeriod = (dateStr: string, periodOverride: { start: Date; end: Date } | null): boolean => {
+  if (periodOverride) {
+    const time = new Date(dateStr).getTime();
+    return time >= periodOverride.start.getTime() && time <= periodOverride.end.getTime();
+  }
+  const d = new Date(dateStr);
+  const now = new Date();
+  return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+};
+
 /** Rate at index i is "stage[i] / stage[i-1]"; index 0 has no previous stage, so it's null. */
 const computeConversionRates = (values: number[]): (number | null)[] =>
   values.map((v, i) => (i === 0 ? null : (values[i - 1] > 0 ? (v / values[i - 1]) * 100 : null)));
@@ -5701,6 +5739,31 @@ const FunnelAnalysisSection: React.FC<{
     return { declinedTotal: declined, withdrawnTotal: withdrawn, recommendedTotal: recommended };
   }, [users, allUsersData, allMedia, periodOverride]);
 
+  // どのフェーズで見送り・選考辞退になったか — read directly from each application's
+  // exitedFromStage/exitedAt (see computeStageAdvanceUpdate), not from the KPI actual counters
+  // above. This is deliberately per-APPLICATION, not deduped to one per candidate like
+  // declinedTotal/withdrawnTotal are — a candidate who was rejected by two companies at two
+  // different phases is exactly the kind of case this breakdown exists to surface, so its totals
+  // can run higher than declinedTotal/withdrawnTotal when that happens.
+  const exitBreakdownByStage = useMemo(() => {
+    const breakdown = new Map<PipelineStage, { declined: number; withdrawn: number }>();
+    users.forEach(email => {
+      const data = allUsersData[email];
+      if (!data) return;
+      (data.candidates || []).forEach(candidate => {
+        candidate.applications.forEach(app => {
+          if (!app.exitedFromStage || !app.exitedAt) return;
+          if (!EXIT_PIPELINE_STAGES.includes(app.stage)) return;
+          if (!isDateInFunnelPeriod(app.exitedAt, periodOverride)) return;
+          const entry = breakdown.get(app.exitedFromStage) || { declined: 0, withdrawn: 0 };
+          if (app.stage === '選考辞退') entry.withdrawn += 1; else entry.declined += 1;
+          breakdown.set(app.exitedFromStage, entry);
+        });
+      });
+    });
+    return breakdown;
+  }, [users, allUsersData, periodOverride]);
+
   // A separate, always-monthly-bucketed trend series (independent of periodOverride, which is
   // just a single snapshot window) — this is what lets the AI compare "this month vs last
   // month" or extrapolate a simple trend, neither of which is possible from one totals object.
@@ -5742,6 +5805,13 @@ const FunnelAnalysisSection: React.FC<{
           `${GENERAL_KPIS.declined.label}: ${declinedTotal}件${recommendedTotal > 0 ? `（推薦数対比: ${(declinedTotal / recommendedTotal * 100).toFixed(1)}%）` : ''}`,
           `${GENERAL_KPIS.withdrawn.label}: ${withdrawnTotal}件${recommendedTotal > 0 ? `（推薦数対比: ${(withdrawnTotal / recommendedTotal * 100).toFixed(1)}%）` : ''}`
         );
+        const exitStageLines = FORWARD_PIPELINE_STAGES
+          .map(stage => ({ stage, entry: exitBreakdownByStage.get(stage) }))
+          .filter(({ entry }) => entry && (entry.declined > 0 || entry.withdrawn > 0))
+          .map(({ stage, entry }) => `${stage}: 見送り${entry!.declined}件・辞退${entry!.withdrawn}件`);
+        if (exitStageLines.length > 0) {
+          lines.push(`見送り・選考辞退の発生フェーズ: ${exitStageLines.join(' / ')}`);
+        }
       }
       lines.push('', `【ユーザー別ファネル実績（${periodLabel}・${mediaLabel}）】`);
       users.forEach(email => {
@@ -5887,6 +5957,33 @@ const FunnelAnalysisSection: React.FC<{
                     <td>{withdrawnTotal}</td>
                     <td>{recommendedTotal > 0 ? `${(withdrawnTotal / recommendedTotal * 100).toFixed(1)}%` : '—'}</td>
                   </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>見送り・選考辞退の発生フェーズ（{periodLabel}）</h3>
+            <p className="modal-description">
+              各応募がお見送り・選考辞退になる直前まで進んでいたフェーズ別の件数です。1候補者が複数社選考中で、それぞれ別のフェーズで見送り・辞退になった場合は両方カウントされるため、合計は上記の候補者推薦数に対する見送り数・選考辞退数（1候補者につき1件のみ）より多くなることがあります。
+            </p>
+            <div className="all-users-table-container">
+              <table className="all-users-table">
+                <thead>
+                  <tr><th>直前のフェーズ</th><th>{GENERAL_KPIS.declined.label}</th><th>{GENERAL_KPIS.withdrawn.label}</th><th>合計</th></tr>
+                </thead>
+                <tbody>
+                  {FORWARD_PIPELINE_STAGES.map(stage => {
+                    const entry = exitBreakdownByStage.get(stage);
+                    const declined = entry?.declined || 0;
+                    const withdrawn = entry?.withdrawn || 0;
+                    return (
+                      <tr key={stage}>
+                        <td>{stage}</td>
+                        <td>{declined}</td>
+                        <td>{withdrawn}</td>
+                        <td>{declined + withdrawn}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -7777,11 +7874,12 @@ const App: React.FC = () => {
     // same-shaped strip above for why.
     const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
     const prevCandidate = currentUserData?.candidates.find(c => c.id === sanitized.id);
+    const todayStr = new Date().toLocaleDateString('sv-SE');
     // Auto-reflects KPI actuals when an application's stage advances (打診→書類選考 etc., see
     // STAGE_ADVANCE_KPI_KEYS) — finalCandidate carries the dedup bookkeeping this produces
-    // (recordedAchievementKpiKeys / recommendationRecorded), kpiDeltas is what to add to
-    // today's entry.
-    const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(prevCandidate, sanitized);
+    // (recordedAchievementKpiKeys / recommendationRecorded / exitedFromStage), kpiDeltas is what
+    // to add to today's entry.
+    const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(prevCandidate, sanitized, todayStr);
     setCurrentUserData(prevData => {
         if (!prevData) return null;
         const existing = prevData.candidates.find(c => c.id === finalCandidate.id);
@@ -7790,7 +7888,6 @@ const App: React.FC = () => {
             : [...prevData.candidates, finalCandidate];
         let updatedEntries = prevData.entries;
         if (Object.keys(kpiDeltas).length > 0) {
-          const todayStr = new Date().toLocaleDateString('sv-SE');
           const entriesByDateMap = new Map<string, KpiEntry>(prevData.entries.map(e => [e.date, e] as [string, KpiEntry]));
           const existingEntry = entriesByDateMap.get(todayStr);
           const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
