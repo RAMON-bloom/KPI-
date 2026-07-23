@@ -212,6 +212,15 @@ type PipelineStage = typeof PIPELINE_STAGES[number];
 // this move" has no meaningful answer for them.
 const FORWARD_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾'];
 
+// A candidate's application counts as still "in selection" at any of these stages — 内定承諾
+// is deliberately excluded (that company's process has concluded, successfully) alongside
+// お見送り/選考辞退 (concluded, unsuccessfully). Used by computeStageAdvanceUpdate to decide
+// whether it's too early to reflect an お見送り/選考辞退 on any ONE application: if the
+// candidate still has another application actively in progress elsewhere, that particular
+// rejection/withdrawal isn't counted into KPI actuals yet.
+const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定'];
+const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退'];
+
 // Maps "an application just advanced INTO this stage" to the GENERAL_KPIS key(s) representing
 // having passed the gate immediately before it. Reaching 内定 fires BOTH finalInterviewPassed
 // (funnel-input metric: how many passed the final interview) and offersExtended (outcome
@@ -413,10 +422,14 @@ function computeStageAdvanceUpdate(
   const prevAppById = new Map(prevCandidate.applications.map(a => [a.id, a]));
   const kpiDeltas: Record<string, number> = {};
   let recommendationJustRecorded = false;
-  const updatedApplications = nextCandidate.applications.map(app => {
+
+  // Pass 1: forward-progress KPIs (candidatesSubmitted through placements) fire immediately,
+  // same as always — real progress at one company counts regardless of what's going on at
+  // others. declined/withdrawn are excluded here; they're handled in Pass 2 below.
+  let updatedApplications = nextCandidate.applications.map(app => {
     const prevApp = prevAppById.get(app.id);
     if (!prevApp || prevApp.stage === app.stage) return app;
-    const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage);
+    const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn');
     if (keys.length === 0) return app;
     const recorded = new Set(app.recordedAchievementKpiKeys || []);
     let changed = false;
@@ -435,6 +448,28 @@ function computeStageAdvanceUpdate(
     });
     return changed ? { ...app, recordedAchievementKpiKeys: Array.from(recorded) } : app;
   });
+
+  // Pass 2: declined/withdrawn only get reflected once the candidate has NO application still
+  // actively in progress elsewhere (see ACTIVE_PIPELINE_STAGES) — while another company is
+  // still live, a rejection/withdrawal at one company is deliberately left un-recorded. This is
+  // re-checked on EVERY save, not just the one that caused a given application to exit — so
+  // once the LAST active application finally resolves (successfully or not), any earlier
+  // not-yet-counted お見送り/選考辞退 on this candidate's OTHER applications get reflected at
+  // that point too, all at once. Brand-new applications (no prevApp) never contribute here
+  // either, even indirectly through this deferred path — same "no credit on creation" rule as
+  // everywhere else.
+  const hasActiveApplication = updatedApplications.some(app => ACTIVE_PIPELINE_STAGES.includes(app.stage));
+  if (!hasActiveApplication) {
+    updatedApplications = updatedApplications.map(app => {
+      if (!EXIT_PIPELINE_STAGES.includes(app.stage) || !prevAppById.has(app.id)) return app;
+      const exitKey: keyof typeof GENERAL_KPIS = app.stage === 'お見送り' ? 'declined' : 'withdrawn';
+      const recorded = new Set(app.recordedAchievementKpiKeys || []);
+      if (recorded.has(exitKey)) return app;
+      recorded.add(exitKey);
+      kpiDeltas[exitKey] = (kpiDeltas[exitKey] || 0) + 1;
+      return { ...app, recordedAchievementKpiKeys: Array.from(recorded) };
+    });
+  }
 
   if (Object.keys(kpiDeltas).length === 0) return { candidate: nextCandidate, kpiDeltas };
   return {
@@ -2093,6 +2128,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-22',
     items: [
+      '候補者が他社でまだ選考中の場合、その候補者のお見送り・選考辞退は実績に反映せず、全ての応募先が決着した時点でまとめて反映するように変更',
       'パイプラインの選考フェーズを「お見送り」「選考辞退」に変更した際も、それぞれ個人実績（お見送り数・選考辞退数）に自動反映されるようにし、歩留まり分析に候補者推薦数に対する比率として表示できるようにした',
       'メールを確認して選考実績を反映する機能は処理時間・精度の懸念から廃止。代わりに、パイプラインの選考フェーズ（打診・書類選考など）を変更すると、対応するKPI実績（書類選考通過数・1次面接通過数・推薦数など）が自動的に反映されるように変更（推薦は同じ候補者が複数社選考中でも1人につき1回のみ反映）',
       'チーム別タブで、選択中の事業部（F+/AC）に所属するメンバーがいないチームを表示しないように変更',
