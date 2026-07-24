@@ -392,6 +392,15 @@ interface CompanyApplication {
   stageHistory?: { stage: PipelineStage; date?: string }[];
 }
 
+// A single titled free-text note on a candidate (see Candidate.memos) — several can coexist per
+// candidate, each independently timestamped.
+interface MemoEntry {
+  id: string;
+  title: string;
+  content: string;
+  updatedAt: string; // ISO timestamp, set automatically whenever this entry is saved
+}
+
 interface Candidate {
   id: string;
   name: string;
@@ -407,11 +416,18 @@ interface Candidate {
   resumeFiles?: { name: string; }[];
   interviewAudioFile?: { name: string; } | null;
   interviewSummary?: string;
-  // Free-form, manually-typed interview notes — deliberately separate from interviewSummary
-  // (AI-generated from audio/Meet transcripts, and cleared whenever a new audio file is
-  // uploaded — see handleAudioFileChange/handleRemoveAudioFile) so a recruiter's own written
-  // notes are never silently wiped out by that AI flow.
+  // Legacy single free-text memo — superseded by `memos` below (a titled, multi-entry list).
+  // Kept only so a candidate's pre-existing note isn't silently lost: displayed as a fallback
+  // single entry until the first time any memo is added/edited, at which point it's folded into
+  // `memos` and this field is cleared (see PipelineCandidateCard's displayMemos/commitMemos).
   interviewMemo?: string;
+  // Free-form, manually-typed notes — deliberately separate from interviewSummary (AI-generated
+  // from audio/Meet transcripts, and cleared whenever a new audio file is uploaded) so a
+  // recruiter's own written notes are never silently wiped out by that AI flow. Each entry has
+  // its own title (so several distinct notes — 面談メモ, 見送り理由, etc. — don't have to share
+  // one big text block) and an updatedAt timestamp set automatically whenever that entry is
+  // edited, never hand-entered.
+  memos?: MemoEntry[];
   createdAt: string; // ISO string
   isHidden?: boolean;
   // 掘り起しリスト: presence means this candidate is parked for future re-engagement rather
@@ -2263,6 +2279,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-24',
     items: [
+      'パイプラインの候補者情報を、「編集」ボタンで別ウィンドウを開かなくても、候補者カードの「詳細を表示」上で直接編集できるようにした（基本情報・選考中の企業ごとの情報の両方が対象。ステージ変更などの実績反映やGoogleタスク同期は従来通り動作する）',
+      '候補者の自由メモを、単一の欄からタイトル付きで複数追加できる形式に変更。各メモの最終更新日時は自動で記録される（以前の面談メモの内容は自動的に引き継がれる）',
       'パイプラインの「今月見込み/来月見込み」フィルターを、特定の月を選択する「見込み月」フィルター（年月選択）に変更。候補者側の見込み設定も同様に、今月・来月の二択ではなく任意の月を選べるようにした',
       'パイプラインの「選考フェーズで絞り込み」を、ボタンの羅列からドロップダウン（複数選択可能なチェックボックス形式）に変更し、選択肢が多くても見やすくした',
       'Googleタスクへの選考予定の重複反映を改善。「今すぐ同期」実行中はボタンを確実に無効化し（従来は候補者ごとに一瞬有効に戻ってしまい、連打すると重複の原因になっていた）、さらに実行前にGoogleタスク側の既存タスク一覧を取得して照合することで、アプリ側の記録が古くなっていた場合でも重複作成せず既存タスクを再利用するようにした',
@@ -4849,6 +4867,573 @@ const SourceEffectivenessReport: React.FC<{ candidates: Candidate[]; allMedia: M
 };
 
 
+// A text input/textarea that buffers keystrokes locally and only calls onCommit on blur (or
+// Escape-free change for non-text inputs elsewhere) — used throughout PipelineCandidateCard so
+// inline editing doesn't fire a full onSave (candidate KPI/Google-Tasks side effects included)
+// on every keystroke. Re-syncs its local draft whenever the committed value actually changes
+// (e.g. a save from elsewhere in the app updates this same field).
+const InlineTextField: React.FC<{
+  value: string;
+  onCommit: (value: string) => void;
+  placeholder?: string;
+  multiline?: boolean;
+  rows?: number;
+  ariaLabel?: string;
+  disabled?: boolean;
+  className?: string;
+}> = ({ value, onCommit, placeholder, multiline, rows, ariaLabel, disabled, className }) => {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const commit = () => { if (draft !== value) onCommit(draft); };
+  if (multiline) {
+    return (
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        placeholder={placeholder}
+        rows={rows}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        className={className}
+      />
+    );
+  }
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      className={className}
+    />
+  );
+};
+
+// Same buffering pattern as InlineTextField, for numeric fields (salary, feeRate, etc.) — commits
+// a number (or undefined when cleared) rather than a raw string.
+const InlineNumberField: React.FC<{
+  value: number | undefined;
+  onCommit: (value: number | undefined) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+  min?: number;
+  step?: number;
+}> = ({ value, onCommit, placeholder, ariaLabel, disabled, min, step }) => {
+  const stringValue = value === undefined || value === 0 ? '' : String(value);
+  const [draft, setDraft] = useState(stringValue);
+  useEffect(() => { setDraft(stringValue); }, [stringValue]);
+  const commit = () => {
+    const parsed = draft === '' ? undefined : Number(draft);
+    if (parsed !== value) onCommit(parsed);
+  };
+  return (
+    <input
+      type="number"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      min={min}
+      step={step}
+    />
+  );
+};
+
+const formatMemoTimestamp = (iso: string): string =>
+  new Date(iso).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/**
+ * One candidate's card in the パイプライン list — every field shown here (candidate basic info,
+ * each application's fields, and the titled memo list) is directly editable in place; there is
+ * no separate "編集" button/modal for any of it. Each commit* helper below builds the full
+ * updated Candidate and calls onSave (== the app's handleSaveCandidate), so stage changes still
+ * correctly run through computeStageAdvanceUpdate (KPI actuals, exitedFromStage/stageHistory,
+ * Google Tasks sync) exactly as they did when only possible via the modal.
+ */
+const PipelineCandidateCard: React.FC<{
+  candidate: Candidate;
+  allMedia: MediaEntry[];
+  candidateIsOwn: boolean;
+  visibilityFilter: 'active' | 'hidden' | 'revival';
+  isExpanded: boolean;
+  showHiddenApps: boolean;
+  onToggleExpand: () => void;
+  onToggleShowHiddenApps: (checked: boolean) => void;
+  onSave: (candidate: Candidate) => void;
+  onToggleVisibility: (candidateId: string) => void;
+  onToggleApplicationVisibility: (candidate: Candidate, applicationId: string) => void;
+  onOpenRevivalModal: (candidate: Candidate) => void;
+  onRemoveFromRevivalList: (candidate: Candidate) => void;
+  onMoveRevivalToHidden: (candidate: Candidate) => void;
+}> = ({
+  candidate: c, allMedia, candidateIsOwn, visibilityFilter, isExpanded, showHiddenApps,
+  onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
+  onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
+}) => {
+  const activeMedia = allMedia.filter(m => !m.isArchived);
+  const visibleApplications = c.applications.filter(app => !app.isHidden);
+
+  const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
+    onSave({ ...c, [field]: value });
+  };
+
+  const commitApplicationField = (appId: string, patch: Partial<CompanyApplication>) => {
+    onSave({ ...c, applications: c.applications.map(a => (a.id === appId ? { ...a, ...patch } : a)) });
+  };
+
+  const addApplication = () => {
+    const newApp: CompanyApplication = {
+      id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '',
+      stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
+    };
+    onSave({ ...c, applications: [...c.applications, newApp] });
+  };
+
+  // メモ: c.memos is the source of truth once anything has been saved to it; before that, a
+  // legacy single-field interviewMemo (if any) is shown as a stand-in single entry. The very
+  // first add/edit/delete folds that legacy value into memos for real and clears interviewMemo.
+  const displayMemos: MemoEntry[] = c.memos && c.memos.length > 0
+    ? c.memos
+    : (c.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: c.interviewMemo, updatedAt: '' }] : []);
+
+  const commitMemos = (memos: MemoEntry[]) => {
+    onSave({ ...c, memos, interviewMemo: undefined });
+  };
+  const updateMemo = (id: string, patch: Partial<Pick<MemoEntry, 'title' | 'content'>>) => {
+    commitMemos(displayMemos.map(m => (m.id === id ? { ...m, ...patch, updatedAt: new Date().toISOString() } : m)));
+  };
+  const addMemo = () => {
+    commitMemos([...displayMemos, { id: `memo_${Date.now()}`, title: '', content: '', updatedAt: new Date().toISOString() }]);
+  };
+  const removeMemo = (id: string) => {
+    commitMemos(displayMemos.filter(m => m.id !== id));
+  };
+
+  return (
+    <div className="candidate-list-item">
+      <div className="candidate-card-main">
+        <div className="candidate-card-header">
+          {candidateIsOwn ? (
+            <InlineTextField
+              value={c.name}
+              onCommit={(v) => commitCandidateField('name', v)}
+              placeholder="候補者名"
+              ariaLabel="候補者名"
+              className="candidate-name-input"
+            />
+          ) : (
+            <h3 title={c.name}>{c.name}</h3>
+          )}
+          {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
+          {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
+          {candidateIsOwn && (
+              <div className="candidate-card-actions">
+                  {visibilityFilter === 'revival' ? (
+                      <>
+                          <button onClick={() => onOpenRevivalModal(c)} className="edit-user-button">編集</button>
+                          <button onClick={() => onRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
+                          <button onClick={() => onMoveRevivalToHidden(c)} className="delete-user-button">非表示に登録</button>
+                      </>
+                  ) : (
+                      <>
+                          <button onClick={addApplication} className="add-selection-button">+ 選考追加</button>
+                          {visibilityFilter === 'active' && (
+                              <button onClick={() => onOpenRevivalModal(c)} className="secondary-action-button">掘り起しリストに追加</button>
+                          )}
+                          <button onClick={() => onToggleVisibility(c.id)} className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}>
+                              {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
+                          </button>
+                      </>
+                  )}
+              </div>
+          )}
+        </div>
+        {visibilityFilter === 'revival' && c.revival && (
+            <div className="revival-info-banner">
+                次アクション: {c.revival.nextAction || '未設定'} / 予定日: {new Date(c.revival.nextActionDate + 'T00:00:00').toLocaleDateString('ja-JP')}
+            </div>
+        )}
+        <div className="candidate-card-body">
+            <div className="candidate-key-info">
+                <div className="key-info-item"><span>現職:</span> {c.currentCompany || 'N/A'}</div>
+                <div className="key-info-item"><span>学歴:</span> {c.education || 'N/A'}</div>
+                <div className="key-info-item"><span>現年収:</span> {c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</div>
+                <div className="key-info-item"><span>媒体:</span> {c.source || 'N/A'}</div>
+            </div>
+             <div className="candidate-application-summary">
+                <span className="summary-label">選考状況 ({visibleApplications.length}件):</span>
+                <div className="summary-badges">
+                    {visibleApplications.length > 0 ? (
+                        visibleApplications.map(app => (
+                            <span
+                                key={app.id}
+                                className="status-badge"
+                                style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
+                                title={`${app.companyName}: ${app.stage}`}
+                            >
+                                {app.companyName}: {app.stage}
+                            </span>
+                        ))
+                    ) : (
+                        <span className="no-status">未登録</span>
+                    )}
+                </div>
+            </div>
+        </div>
+         <div
+            className="candidate-card-footer"
+            onClick={onToggleExpand}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleExpand(); }}}
+            role="button"
+            tabIndex={0}
+            aria-expanded={isExpanded}
+        >
+            <span>{isExpanded ? '詳細を閉じる' : '詳細を表示（編集する）'}</span>
+            <span className={`toggle-icon ${isExpanded ? 'open' : ''}`}>▼</span>
+        </div>
+      </div>
+      <div className={`candidate-detail-content ${isExpanded ? 'open' : ''}`}>
+          <div className="candidate-detail-view">
+              <div className="candidate-info-section">
+                <div className="candidate-info-item">
+                    <span className="info-label">現職企業名</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.currentCompany || ''} onCommit={(v) => commitCandidateField('currentCompany', v)} placeholder="現職企業名" ariaLabel="現職企業名" />
+                    ) : (
+                        <span className="info-value">{c.currentCompany || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">最終学歴</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.education || ''} onCommit={(v) => commitCandidateField('education', v)} placeholder="最終学歴" ariaLabel="最終学歴" />
+                    ) : (
+                        <span className="info-value">{c.education || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">現職年収 (万円)</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} />
+                    ) : (
+                        <span className="info-value">{c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">希望年収 (万円)</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} />
+                    ) : (
+                        <span className="info-value">{c.salary ? `${c.salary}万円` : '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">想定年収 (万円)</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} />
+                    ) : (
+                        <span className="info-value">{c.expectedAnnualSalary ? `${c.expectedAnnualSalary}万円` : '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">集客媒体</span>
+                    {candidateIsOwn ? (
+                        <select value={c.source} onChange={(e) => commitCandidateField('source', e.target.value)} aria-label="集客媒体">
+                            <option value="">選択してください</option>
+                            {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                            {c.source && c.source !== 'Other' && !activeMedia.some(m => m.id === c.source) && (
+                                <option value={c.source}>
+                                    {(allMedia.find(m => m.id === c.source)?.name || c.source) + '（アーカイブ済み）'}
+                                </option>
+                            )}
+                            <option value="Other">その他</option>
+                        </select>
+                    ) : (
+                        <span className="info-value">{c.source || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">見込み月</span>
+                    {candidateIsOwn ? (
+                        <input
+                            type="month"
+                            value={c.expectedDecisionMonth || ''}
+                            onChange={(e) => commitCandidateField('expectedDecisionMonth', e.target.value || undefined)}
+                            aria-label="見込み月"
+                        />
+                    ) : (
+                        <span className="info-value">{c.expectedDecisionMonth || '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">他エージェントの使用状況</span>
+                    {candidateIsOwn ? (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                            <input
+                                type="checkbox"
+                                checked={c.usingOtherAgents}
+                                onChange={(e) => commitCandidateField('usingOtherAgents', e.target.checked)}
+                            />
+                            他エージェントを利用している
+                        </label>
+                    ) : (
+                        <span className="info-value">{c.usingOtherAgents ? '利用中' : 'なし'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">登録日</span>
+                    <span className="info-value">{new Date(c.createdAt).toLocaleDateString('ja-JP')}</span>
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">レジュメ</span>
+                    <span className="info-value">{c.resumeFiles && c.resumeFiles.length > 0 ? c.resumeFiles.map(f => f.name).join(', ') : '未登録'}</span>
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">面談音声ファイル</span>
+                    <span className="info-value">{c.interviewAudioFile ? c.interviewAudioFile.name : '未登録'}</span>
+                </div>
+                <div className="candidate-info-item summary-item">
+                    <span className="info-label">概要 (レジュメより)</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField multiline rows={4} value={c.summary || ''} onCommit={(v) => commitCandidateField('summary', v)} placeholder="候補者の簡単な経歴や特徴" ariaLabel="概要" className="summary-text" />
+                    ) : (
+                        <p className="info-value summary-text">{c.summary || '概要がありません。'}</p>
+                    )}
+                </div>
+                <div className="candidate-info-item summary-item">
+                    <span className="info-label">面談要約 (AI)</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField multiline rows={4} value={c.interviewSummary || ''} onCommit={(v) => commitCandidateField('interviewSummary', v)} placeholder="面談の音声ファイルをアップロードすると自動生成されます" ariaLabel="面談要約" className="summary-text" />
+                    ) : (
+                        <p className="info-value summary-text">{c.interviewSummary || '面談要約はありません。'}</p>
+                    )}
+                </div>
+                <div className="candidate-info-item summary-item memo-list-section">
+                    <span className="info-label">メモ</span>
+                    <div className="memo-list">
+                        {displayMemos.map(memo => (
+                            <div key={memo.id} className="memo-entry">
+                                <div className="memo-entry-header">
+                                    {candidateIsOwn ? (
+                                        <InlineTextField
+                                            value={memo.title}
+                                            onCommit={(v) => updateMemo(memo.id, { title: v })}
+                                            placeholder="メモタイトル（例: 面談メモ、見送り理由）"
+                                            ariaLabel="メモタイトル"
+                                            className="memo-title-input"
+                                        />
+                                    ) : (
+                                        <strong>{memo.title || '（無題のメモ）'}</strong>
+                                    )}
+                                    {memo.updatedAt && <span className="memo-updated-at">最終更新: {formatMemoTimestamp(memo.updatedAt)}</span>}
+                                    {candidateIsOwn && (
+                                        <button type="button" onClick={() => removeMemo(memo.id)} className="remove-file-button" aria-label="このメモを削除">&times;</button>
+                                    )}
+                                </div>
+                                {candidateIsOwn ? (
+                                    <InlineTextField multiline rows={3} value={memo.content} onCommit={(v) => updateMemo(memo.id, { content: v })} placeholder="メモ内容" ariaLabel="メモ内容" />
+                                ) : (
+                                    <p className="info-value summary-text">{memo.content || 'メモはありません。'}</p>
+                                )}
+                            </div>
+                        ))}
+                        {displayMemos.length === 0 && !candidateIsOwn && <p className="no-data-message">メモはありません。</p>}
+                        {candidateIsOwn && (
+                            <button type="button" onClick={addMemo} className="secondary-action-button">+ メモを追加</button>
+                        )}
+                    </div>
+                </div>
+              </div>
+
+              <div className="detail-view-controls">
+                <h5 className="detail-view-subtitle">選考詳細</h5>
+                <div className="single-checkbox">
+                    <input
+                        type="checkbox"
+                        id={`show-hidden-apps-${c.id}`}
+                        checked={showHiddenApps}
+                        onChange={e => onToggleShowHiddenApps(e.target.checked)}
+                    />
+                    <label htmlFor={`show-hidden-apps-${c.id}`}>非表示の選考状況を表示</label>
+                </div>
+              </div>
+
+              {(() => {
+                const applicationsToShow = c.applications.filter(app => showHiddenApps ? true : !app.isHidden);
+                return applicationsToShow.length > 0 ? (
+                    <div className="detail-application-grid">
+                        {applicationsToShow.map(app => (
+                            <div key={app.id} className={`detail-application-card ${app.isHidden ? 'is-hidden' : ''}`}>
+                                <div className="detail-card-header">
+                                    {candidateIsOwn ? (
+                                        <InlineTextField
+                                            value={app.companyName}
+                                            onCommit={(v) => commitApplicationField(app.id, { companyName: v })}
+                                            placeholder="企業名"
+                                            ariaLabel="企業名"
+                                        />
+                                    ) : (
+                                        <strong>{app.companyName}</strong>
+                                    )}
+                                    {candidateIsOwn && (
+                                    <div className="detail-card-actions">
+                                      <button onClick={() => onToggleApplicationVisibility(c, app.id)} className={app.isHidden ? "secondary-action-button" : "delete-user-button"}>
+                                          {app.isHidden ? '再表示' : '非表示'}
+                                      </button>
+                                    </div>
+                                    )}
+                                </div>
+                                <div className="detail-card-body">
+                                    <div className="detail-card-item">
+                                        <span>進捗状況:</span>
+                                        {candidateIsOwn ? (
+                                            <select
+                                                value={app.stage}
+                                                onChange={(e) => commitApplicationField(app.id, { stage: e.target.value as PipelineStage })}
+                                                style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
+                                                className="status-badge-select"
+                                                aria-label="進捗状況"
+                                            >
+                                                {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
+                                            </select>
+                                        ) : (
+                                            <span className="status-badge" style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}>
+                                                {app.stage}
+                                            </span>
+                                        )}
+                                    </div>
+                                    {app.stageHistory && app.stageHistory.length > 0 && (
+                                        <div className="detail-card-item detail-card-item-track">
+                                            <span>選考トラック:</span>
+                                            <div className="stage-track">
+                                                {app.stageHistory.map((h, i) => (
+                                                    <React.Fragment key={i}>
+                                                        {i > 0 && <span className="stage-track-arrow">→</span>}
+                                                        <span className="stage-track-step" style={{'--badge-color': STAGE_COLOR_MAP[h.stage]} as React.CSSProperties}>
+                                                            <span className="stage-track-stage">{h.stage}</span>
+                                                            <span className="stage-track-date">
+                                                                {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
+                                                            </span>
+                                                        </span>
+                                                    </React.Fragment>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="detail-card-item">
+                                        <span>次アクション:</span>
+                                        {candidateIsOwn ? (
+                                            <InlineTextField value={app.nextAction || ''} onCommit={(v) => commitApplicationField(app.id, { nextAction: v })} placeholder="次アクション" ariaLabel="次アクション" />
+                                        ) : (
+                                            <span>{app.nextAction || '未設定'}</span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        <span>選考予定日:</span>
+                                        {candidateIsOwn ? (
+                                            <span className="scheduled-date-time-inputs">
+                                                <input
+                                                    type="date"
+                                                    value={app.scheduledDate || ''}
+                                                    onChange={(e) => commitApplicationField(app.id, { scheduledDate: e.target.value || undefined })}
+                                                    aria-label="選考予定日"
+                                                />
+                                                <input
+                                                    type="time"
+                                                    value={app.scheduledTime || ''}
+                                                    onChange={(e) => commitApplicationField(app.id, { scheduledTime: e.target.value || undefined })}
+                                                    aria-label="開始時刻"
+                                                />
+                                            </span>
+                                        ) : (
+                                            <span>
+                                                {app.scheduledDate
+                                                  ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+                                                  : '未設定'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        <span>意思決定時期:</span>
+                                        {candidateIsOwn ? (
+                                            <input
+                                                type="date"
+                                                value={app.expectedDecisionDate || ''}
+                                                onChange={(e) => commitApplicationField(app.id, { expectedDecisionDate: e.target.value || undefined })}
+                                                aria-label="意思決定時期"
+                                            />
+                                        ) : (
+                                            <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        <span>fee料率 (%):</span>
+                                        {candidateIsOwn ? (
+                                            <InlineNumberField value={app.feeRate} onCommit={(v) => commitApplicationField(app.id, { feeRate: v })} placeholder="例: 35" ariaLabel="fee料率" min={0} step={0.1} />
+                                        ) : (
+                                            <span>{app.feeRate ?? '未設定'}</span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        <span>内定確度 / 入社確度:</span>
+                                        {candidateIsOwn ? (
+                                            <span style={{ display: 'flex', gap: '0.35rem' }}>
+                                                <select
+                                                    value={app.offerConfidence || ''}
+                                                    onChange={(e) => commitApplicationField(app.id, { offerConfidence: (e.target.value || undefined) as ConfidenceGrade | undefined })}
+                                                    aria-label="内定確度"
+                                                >
+                                                    <option value="">未設定</option>
+                                                    {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                                                </select>
+                                                <select
+                                                    value={app.acceptanceConfidence || ''}
+                                                    onChange={(e) => commitApplicationField(app.id, { acceptanceConfidence: (e.target.value || undefined) as ConfidenceGrade | undefined })}
+                                                    aria-label="入社確度"
+                                                >
+                                                    <option value="">未設定</option>
+                                                    {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                                                </select>
+                                            </span>
+                                        ) : (
+                                            <span>{app.offerConfidence || '未設定'} / {app.acceptanceConfidence || '未設定'}</span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item detail-card-item-memo">
+                                        <span>メモ:</span>
+                                        {candidateIsOwn ? (
+                                            <InlineTextField multiline rows={2} value={app.memo || ''} onCommit={(v) => commitApplicationField(app.id, { memo: v })} placeholder="選考状況に関するメモ" ariaLabel="応募メモ" className="detail-card-memo-text" />
+                                        ) : (
+                                            app.memo && <span className="detail-card-memo-text">{app.memo}</span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="no-data-message" style={{padding: '1rem 0'}}>選考中の企業情報はありません。</p>
+                )
+              })()}
+
+              {candidateIsOwn && (
+                  <div className="add-application-trigger">
+                      <button onClick={addApplication} className="add-button">+ 選考を追加</button>
+                  </div>
+              )}
+          </div>
+      </div>
+    </div>
+  );
+};
+
 const CandidatePipelineView: React.FC<{
     candidates: Candidate[];
     allMedia: MediaEntry[];
@@ -4925,12 +5510,6 @@ const CandidatePipelineView: React.FC<{
         setIsModalOpen(true);
     };
     
-    const handleEdit = (candidate: Candidate) => {
-        if (!isOwn(candidate)) return;
-        setEditingCandidate(candidate);
-        setIsModalOpen(true);
-    };
-
     const handleToggleExpand = (candidateId: string) => {
         const isOpeningNew = expandedCandidateId !== candidateId;
         if (isOpeningNew) {
@@ -5531,237 +6110,25 @@ const CandidatePipelineView: React.FC<{
             )}
 
             <div className="candidate-list">
-                {sortedCandidates.length > 0 ? sortedCandidates.map(c => {
-                    const isExpanded = expandedCandidateId === c.id;
-                    const visibleApplications = c.applications.filter(app => !app.isHidden);
-                    const candidateIsOwn = isOwn(c);
-
-                    return (
-                        <div key={c.id} className="candidate-list-item">
-                            <div className="candidate-card-main">
-                                <div className="candidate-card-header">
-                                    <h3
-                                      onClick={() => handleEdit(c)}
-                                      className={candidateIsOwn ? 'candidate-name-clickable' : ''}
-                                      role={candidateIsOwn ? 'button' : undefined}
-                                      tabIndex={candidateIsOwn ? 0 : undefined}
-                                      onKeyDown={(e) => { if (candidateIsOwn && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); handleEdit(c); }}}
-                                      title={candidateIsOwn ? `${c.name}を編集` : c.name}
-                                    >
-                                      {c.name}
-                                    </h3>
-                                    {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
-                                    {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
-                                    {candidateIsOwn && (
-                                        <div className="candidate-card-actions">
-                                            {visibilityFilter === 'revival' ? (
-                                                <>
-                                                    <button onClick={() => handleOpenRevivalModal(c)} className="edit-user-button">編集</button>
-                                                    <button onClick={() => handleRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
-                                                    <button onClick={() => handleMoveRevivalToHidden(c)} className="delete-user-button">非表示に登録</button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <button onClick={() => handleOpenApplicationModal(c, null)} className="add-selection-button">+ 選考追加</button>
-                                                    <button onClick={() => handleEdit(c)} className="edit-user-button">編集</button>
-                                                    {visibilityFilter === 'active' && (
-                                                        <button onClick={() => handleOpenRevivalModal(c)} className="secondary-action-button">掘り起しリストに追加</button>
-                                                    )}
-                                                    <button onClick={() => onToggleVisibility(c.id)} className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}>
-                                                        {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
-                                                    </button>
-                                                </>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                                {visibilityFilter === 'revival' && c.revival && (
-                                    <div className="revival-info-banner">
-                                        次アクション: {c.revival.nextAction || '未設定'} / 予定日: {new Date(c.revival.nextActionDate + 'T00:00:00').toLocaleDateString('ja-JP')}
-                                    </div>
-                                )}
-                                <div className="candidate-card-body">
-                                    <div className="candidate-key-info">
-                                        <div className="key-info-item"><span>現職:</span> {c.currentCompany || 'N/A'}</div>
-                                        <div className="key-info-item"><span>学歴:</span> {c.education || 'N/A'}</div>
-                                        <div className="key-info-item"><span>現年収:</span> {c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</div>
-                                        <div className="key-info-item"><span>媒体:</span> {c.source || 'N/A'}</div>
-                                    </div>
-                                     <div className="candidate-application-summary">
-                                        <span className="summary-label">選考状況 ({visibleApplications.length}件):</span>
-                                        <div className="summary-badges">
-                                            {visibleApplications.length > 0 ? (
-                                                visibleApplications.map(app => (
-                                                    <span
-                                                        key={app.id}
-                                                        className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
-                                                        style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                                        title={candidateIsOwn ? `${app.companyName}: ${app.stage}（クリックして更新）` : `${app.companyName}: ${app.stage}`}
-                                                        onClick={candidateIsOwn ? (e) => { e.stopPropagation(); handleOpenApplicationModal(c, app); } : undefined}
-                                                        role={candidateIsOwn ? 'button' : undefined}
-                                                        tabIndex={candidateIsOwn ? 0 : undefined}
-                                                        onKeyDown={candidateIsOwn ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); handleOpenApplicationModal(c, app); } } : undefined}
-                                                    >
-                                                        {app.companyName}: {app.stage}
-                                                    </span>
-                                                ))
-                                            ) : (
-                                                <span className="no-status">未登録</span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                                 <div 
-                                    className="candidate-card-footer"
-                                    onClick={() => handleToggleExpand(c.id)}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggleExpand(c.id); }}}
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-expanded={isExpanded}
-                                >
-                                    <span>{isExpanded ? '詳細を閉じる' : '詳細を表示'}</span>
-                                    <span className={`toggle-icon ${isExpanded ? 'open' : ''}`}>▼</span>
-                                </div>
-                            </div>
-                            <div className={`candidate-detail-content ${isExpanded ? 'open' : ''}`}>
-                                <div className="candidate-detail-view">
-                                    <div className="candidate-info-section">
-                                      <div className="candidate-info-item">
-                                          <span className="info-label">希望年収</span>
-                                          <span className="info-value">{c.salary ? `${c.salary}万円` : '未設定'}</span>
-                                      </div>
-                                      <div className="candidate-info-item">
-                                          <span className="info-label">登録日</span>
-                                          <span className="info-value">{new Date(c.createdAt).toLocaleDateString('ja-JP')}</span>
-                                      </div>
-                                      <div className="candidate-info-item">
-                                          <span className="info-label">レジュメ</span>
-                                          <span className="info-value">{c.resumeFiles && c.resumeFiles.length > 0 ? c.resumeFiles.map(f => f.name).join(', ') : '未登録'}</span>
-                                      </div>
-                                      <div className="candidate-info-item">
-                                          <span className="info-label">面談音声ファイル</span>
-                                          <span className="info-value">{c.interviewAudioFile ? c.interviewAudioFile.name : '未登録'}</span>
-                                      </div>
-                                      <div className="candidate-info-item summary-item">
-                                          <span className="info-label">概要 (レジュメより)</span>
-                                          <p className="info-value summary-text">{c.summary || '概要がありません。'}</p>
-                                      </div>
-                                      <div className="candidate-info-item summary-item">
-                                          <span className="info-label">面談要約 (AI)</span>
-                                          <p className="info-value summary-text">{c.interviewSummary || '面談要約はありません。'}</p>
-                                      </div>
-                                      <div className="candidate-info-item summary-item">
-                                          <span className="info-label">面談メモ（手動）</span>
-                                          <p className="info-value summary-text">{c.interviewMemo || '面談メモはありません。'}</p>
-                                      </div>
-                                    </div>
-                                    
-                                    <div className="detail-view-controls">
-                                      <h5 className="detail-view-subtitle">選考詳細</h5>
-                                      <div className="single-checkbox">
-                                          <input
-                                              type="checkbox"
-                                              id={`show-hidden-apps-${c.id}`}
-                                              checked={showHiddenApps}
-                                              onChange={e => setShowHiddenApps(e.target.checked)}
-                                          />
-                                          <label htmlFor={`show-hidden-apps-${c.id}`}>非表示の選考状況を表示</label>
-                                      </div>
-                                    </div>
-
-                                    {(() => {
-                                      const applicationsToShow = c.applications.filter(app => showHiddenApps ? true : !app.isHidden);
-                                      return applicationsToShow.length > 0 ? (
-                                          <div className="detail-application-grid">
-                                              {applicationsToShow.map(app => (
-                                                  <div key={app.id} className={`detail-application-card ${app.isHidden ? 'is-hidden' : ''}`}>
-                                                      <div className="detail-card-header">
-                                                          <strong>{app.companyName}</strong>
-                                                          {candidateIsOwn && (
-                                                          <div className="detail-card-actions">
-                                                            <button onClick={() => handleOpenApplicationModal(c, app)} className="edit-user-button">編集</button>
-                                                            <button onClick={() => handleToggleApplicationVisibility(c, app.id)} className={app.isHidden ? "secondary-action-button" : "delete-user-button"}>
-                                                                {app.isHidden ? '再表示' : '非表示'}
-                                                            </button>
-                                                          </div>
-                                                          )}
-                                                      </div>
-                                                      <div className="detail-card-body">
-                                                          <div className="detail-card-item">
-                                                              <span>進捗状況:</span>
-                                                              <span
-                                                                  className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
-                                                                  style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                                                  onClick={candidateIsOwn ? () => handleOpenApplicationModal(c, app) : undefined}
-                                                                  role={candidateIsOwn ? 'button' : undefined}
-                                                                  tabIndex={candidateIsOwn ? 0 : undefined}
-                                                                  title={candidateIsOwn ? 'クリックして選考状況を更新' : undefined}
-                                                                  onKeyDown={candidateIsOwn ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenApplicationModal(c, app); } } : undefined}
-                                                              >
-                                                                  {app.stage}
-                                                              </span>
-                                                          </div>
-                                                          {app.stageHistory && app.stageHistory.length > 0 && (
-                                                              <div className="detail-card-item detail-card-item-track">
-                                                                  <span>選考トラック:</span>
-                                                                  <div className="stage-track">
-                                                                      {app.stageHistory.map((h, i) => (
-                                                                          <React.Fragment key={i}>
-                                                                              {i > 0 && <span className="stage-track-arrow">→</span>}
-                                                                              <span className="stage-track-step" style={{'--badge-color': STAGE_COLOR_MAP[h.stage]} as React.CSSProperties}>
-                                                                                  <span className="stage-track-stage">{h.stage}</span>
-                                                                                  <span className="stage-track-date">
-                                                                                      {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
-                                                                                  </span>
-                                                                              </span>
-                                                                          </React.Fragment>
-                                                                      ))}
-                                                                  </div>
-                                                              </div>
-                                                          )}
-                                                          <div className="detail-card-item">
-                                                              <span>次アクション:</span>
-                                                              <span>{app.nextAction || '未設定'}</span>
-                                                          </div>
-                                                          <div className="detail-card-item">
-                                                              <span>選考予定日:</span>
-                                                              <span>
-                                                                {app.scheduledDate
-                                                                  ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
-                                                                  : '未設定'}
-                                                              </span>
-                                                          </div>
-                                                          <div className="detail-card-item">
-                                                              <span>意思決定時期:</span>
-                                                              <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
-                                                          </div>
-                                                          <div className="detail-card-item">
-                                                              <span>内定確度 / 入社確度:</span>
-                                                              <span>{app.offerConfidence || '未設定'} / {app.acceptanceConfidence || '未設定'}</span>
-                                                          </div>
-                                                          {app.memo && (
-                                                              <div className="detail-card-item detail-card-item-memo">
-                                                                  <span>メモ:</span>
-                                                                  <span className="detail-card-memo-text">{app.memo}</span>
-                                                              </div>
-                                                          )}
-                                                      </div>
-                                                  </div>
-                                              ))}
-                                          </div>
-                                      ) : (
-                                          <p className="no-data-message" style={{padding: '1rem 0'}}>選考中の企業情報はありません。</p>
-                                      )
-                                    })()}
-
-                                    <div className="add-application-trigger">
-                                        <button onClick={() => handleOpenApplicationModal(c, null)} className="add-button">+ 選考を追加</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    )
-                }) : (
+                {sortedCandidates.length > 0 ? sortedCandidates.map(c => (
+                    <PipelineCandidateCard
+                        key={c.id}
+                        candidate={c}
+                        allMedia={allMedia}
+                        candidateIsOwn={isOwn(c)}
+                        visibilityFilter={visibilityFilter}
+                        isExpanded={expandedCandidateId === c.id}
+                        showHiddenApps={showHiddenApps}
+                        onToggleExpand={() => handleToggleExpand(c.id)}
+                        onToggleShowHiddenApps={setShowHiddenApps}
+                        onSave={onSave}
+                        onToggleVisibility={onToggleVisibility}
+                        onToggleApplicationVisibility={handleToggleApplicationVisibility}
+                        onOpenRevivalModal={handleOpenRevivalModal}
+                        onRemoveFromRevivalList={handleRemoveFromRevivalList}
+                        onMoveRevivalToHidden={handleMoveRevivalToHidden}
+                    />
+                )) : (
                     candidates.length === 0 ? (
                         <div className="candidate-list-empty-state">
                             <h3>まだ候補者が登録されていません</h3>
@@ -5779,7 +6146,6 @@ const CandidatePipelineView: React.FC<{
         </section>
     );
 };
-
 
 interface FunnelStageDef {
   key: string;

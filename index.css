@@ -1333,6 +1333,19 @@ section {
 .status-badge-clickable:focus-visible {
   filter: brightness(1.15);
 }
+/* Inline-editable counterpart of .status-badge — a real <select> styled to look like the badge
+   (PipelineCandidateCard's 進捗状況 dropdown), so choosing a new stage still reads as "the same
+   colored pill" rather than a plain form control. */
+.status-badge-select {
+  color: white;
+  background-color: var(--badge-color, var(--secondary-color));
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+}
 .actions-cell {
   display: flex;
   gap: 0.5rem;
@@ -1651,13 +1664,19 @@ section {
   margin: 0;
   font-size: 1.25rem;
 }
-.candidate-card-header h3.candidate-name-clickable {
-  cursor: pointer;
-  transition: color 0.2s;
+.candidate-name-input {
+  flex-grow: 1;
+  font-size: 1.25rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
 }
-.candidate-card-header h3.candidate-name-clickable:hover {
-  color: var(--primary-color);
-  text-decoration: underline;
+.candidate-name-input:hover,
+.candidate-name-input:focus {
+  border-color: var(--border-color);
+  background-color: #fff;
 }
 .other-agent-tag {
   background-color: var(--warning-color);
@@ -1989,6 +2008,66 @@ section {
   max-height: 200px;
   overflow-y: auto;
   margin: 0; /* reset p margin */
+}
+
+/* Inline-editable counterpart of .info-value.summary-text (used by InlineTextField in
+   PipelineCandidateCard) — same look, but a real textarea rather than a read-only <p>. */
+textarea.summary-text {
+  display: block;
+  width: 100%;
+  white-space: pre-wrap;
+  background-color: #ffffff;
+  border: 1px solid var(--border-color);
+  padding: 0.75rem;
+  border-radius: 0.25rem;
+  line-height: 1.6;
+  font-family: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+}
+
+/* --- Candidate memo list (PipelineCandidateCard) --- */
+.memo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.memo-entry {
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.6rem;
+  background-color: #fff;
+}
+.memo-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.memo-title-input {
+  flex-grow: 1;
+  font-weight: 600;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.25rem;
+}
+.memo-title-input:hover,
+.memo-title-input:focus {
+  border-color: var(--border-color);
+}
+.memo-entry-header strong {
+  flex-grow: 1;
+}
+.memo-updated-at {
+  color: var(--text-muted-color);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.memo-entry textarea {
+  width: 100%;
+  font-family: inherit;
+  resize: vertical;
 }
 
 .detail-view-subtitle {
