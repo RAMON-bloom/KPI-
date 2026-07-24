@@ -20,7 +20,7 @@ import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasP
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
-import { createPipelineTask, updatePipelineTask, deletePipelineTask, GoogleTasksPermissionError } from './services/googleTasks';
+import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError } from './services/googleTasks';
 
 ChartJS.register(
   CategoryScale,
@@ -2261,6 +2261,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-07-24',
+    items: [
+      'Googleタスクへの選考予定の重複反映を改善。「今すぐ同期」実行中はボタンを確実に無効化し（従来は候補者ごとに一瞬有効に戻ってしまい、連打すると重複の原因になっていた）、さらに実行前にGoogleタスク側の既存タスク一覧を取得して照合することで、アプリ側の記録が古くなっていた場合でも重複作成せず既存タスクを再利用するようにした',
+    ],
+  },
   {
     date: '2026-07-23',
     items: [
@@ -8001,10 +8007,21 @@ const App: React.FC = () => {
    * deleted) against the already-synced task IDs, and pushes only the create/update/delete
    * calls actually needed. Chained through tasksSyncQueueRef so two rapid edits never race into
    * duplicate task creation for the same application/reminder.
+   *
+   * `opts.silent` suppresses this call's own tasksSyncStatus updates (used by the bulk resync
+   * below, which manages ONE status for the whole batch instead of flipping loading/idle after
+   * every single candidate — that per-candidate flip briefly re-enabled the "今すぐ同期" button
+   * in the middle of a batch, inviting a re-click that queued a second full resync). `opts.
+   * existingTasksLookup`, when given, is checked before ever creating a task — see
+   * handleSyncAllTasksNow for why. Returns the first error encountered (if any), or null.
    */
-  const queueCandidateTasksSync = (prevCandidate: Candidate | undefined, nextCandidate: Candidate | null) => {
+  const queueCandidateTasksSync = (
+    prevCandidate: Candidate | undefined,
+    nextCandidate: Candidate | null,
+    opts?: { silent?: boolean; existingTasksLookup?: Map<string, string> }
+  ): Promise<unknown> => {
     const session = getCurrentSession();
-    if (!session) return;
+    if (!session) return Promise.resolve(null);
     const accessToken = session.accessToken;
     // A hidden candidate (via the plain 非表示 toggle, or via 掘り起しリストへの追加, which also
     // hides) is archived out of active pursuit — treat it the same as a removed candidate here
@@ -8021,8 +8038,9 @@ const App: React.FC = () => {
     const revivalTaskKey = candidateId ? `revival:${candidateId}` : null;
     const prevRevival = prevCandidate?.revival;
     const nextRevival = nextCandidate?.revival;
+    const lookupKey = (content: { title: string; dueDateISO: string }) => `${content.title}|||${content.dueDateISO}`;
 
-    tasksSyncQueueRef.current = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
+    const runPromise: Promise<unknown> = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
       const idMap = { ...googleTaskIdsRef.current };
       let changed = false;
       // A failure partway through this candidate's items (permission lost mid-batch, one flaky
@@ -8033,7 +8051,22 @@ const App: React.FC = () => {
       // runs in its own try/catch, and idMap is persisted once at the end regardless of whether
       // a later item failed.
       let firstError: unknown = null;
-      setTasksSyncStatus('loading');
+      if (!opts?.silent) setTasksSyncStatus('loading');
+      // Reuses an already-existing Google Task recognized by exact title+due-date match (see
+      // opts.existingTasksLookup) instead of blindly creating a new one — the safety net for
+      // when idMap itself has gone stale (e.g. a debounced Drive write from another tab/device
+      // hadn't landed when this session loaded its copy).
+      const createOrReuseTask = async (content: ReturnType<typeof buildPipelineTaskContent>): Promise<string> => {
+        const key = lookupKey(content);
+        const reuseId = opts?.existingTasksLookup?.get(key);
+        if (reuseId) {
+          // Removed once claimed so two different applications that happen to produce the same
+          // title+due can't both latch onto the same pre-existing task.
+          opts!.existingTasksLookup!.delete(key);
+          return reuseId;
+        }
+        return createPipelineTask(accessToken, content);
+      };
       for (const appId of removedAppIds) {
         try {
           const taskId = idMap[appId];
@@ -8071,7 +8104,7 @@ const App: React.FC = () => {
               const taskId = await updatePipelineTask(accessToken, existingTaskId, content);
               if (taskId !== existingTaskId) { idMap[app.id] = taskId; changed = true; }
             } else {
-              idMap[app.id] = await createPipelineTask(accessToken, content);
+              idMap[app.id] = await createOrReuseTask(content);
               changed = true;
             }
           } catch (error) {
@@ -8098,7 +8131,7 @@ const App: React.FC = () => {
                 const taskId = await updatePipelineTask(accessToken, existingRevivalTaskId, content);
                 if (taskId !== existingRevivalTaskId) { idMap[revivalTaskKey] = taskId; changed = true; }
               } else {
-                idMap[revivalTaskKey] = await createPipelineTask(accessToken, content);
+                idMap[revivalTaskKey] = await createOrReuseTask(content);
                 changed = true;
               }
             }
@@ -8111,8 +8144,71 @@ const App: React.FC = () => {
         googleTaskIdsRef.current = idMap;
         setCurrentUserData(prev => (prev ? { ...prev, googleTaskIdsByApplicationId: idMap } : prev));
       }
+      if (firstError) console.error('Failed to sync pipeline entries to Google Tasks', firstError);
+      if (!opts?.silent) {
+        if (firstError) {
+          if (firstError instanceof GoogleTasksPermissionError) {
+            setTasksSyncStatus('needs-reauth');
+            setTasksSyncMessage('Googleタスクの利用権限がまだ許可されていません。下のボタンから許可してください。');
+          } else {
+            setTasksSyncStatus('error');
+            setTasksSyncMessage(firstError instanceof Error ? firstError.message : 'Googleタスクへの同期に失敗しました。');
+          }
+        } else {
+          setTasksSyncStatus('idle');
+          setTasksSyncMessage('');
+        }
+      }
+      return firstError;
+    });
+    tasksSyncQueueRef.current = runPromise.then(() => {});
+    return runPromise;
+  };
+
+  // Guards handleSyncAllTasksNow against a second click firing while a batch is still running.
+  const isSyncingAllTasksRef = useRef(false);
+
+  // Manual backfill/resync — loops every visible candidate, plus every 掘り起しリスト entry
+  // (hidden, but still needs its reminder task), as both "prev" and "next" for the same diff
+  // logic above, so already-synced tasks are left alone (isUnchanged) while anything scheduled
+  // before this feature existed (or before permission was granted) gets created for the first
+  // time. Fetches the live Google Tasks list once up front so any application whose idMap entry
+  // has gone stale reuses its real existing task instead of getting a duplicate (see
+  // queueCandidateTasksSync's existingTasksLookup) — this is precisely the "recover after a gap"
+  // operation where that staleness is most likely. tasksSyncStatus is set to 'loading'
+  // synchronously (disabling the button immediately) and held there for the whole batch, not
+  // flipped per-candidate, so a rapid re-click during a large resync can't queue a second one.
+  const handleSyncAllTasksNow = async () => {
+    if (isSyncingAllTasksRef.current) return;
+    const session = getCurrentSession();
+    if (!session) return;
+    isSyncingAllTasksRef.current = true;
+    setTasksSyncStatus('loading');
+    setTasksSyncMessage('');
+    try {
+      let existingTasksLookup: Map<string, string> | undefined;
+      try {
+        const existingTasks = await listPipelineTasks(session.accessToken);
+        existingTasksLookup = new Map();
+        // Earlier entries win on a duplicate key — if Google's own list already has two tasks
+        // with the same title+due (e.g. from a past occurrence of this very bug), resync settles
+        // on one of them rather than alternating, and the other is left for the user to clean up.
+        existingTasks.forEach(t => {
+          if (!t.dueDateISO) return;
+          const key = `${t.title}|||${t.dueDateISO}`;
+          if (!existingTasksLookup!.has(key)) existingTasksLookup!.set(key, t.id);
+        });
+      } catch (error) {
+        console.error('Failed to list existing Google Tasks before resync', error);
+        // Non-fatal — resync still proceeds using only the locally-cached idMap, same as before
+        // this safety net existed.
+      }
+      const candidatesToSync = (currentUserData?.candidates || []).filter(c => !c.isHidden || c.revival);
+      const results = await Promise.all(
+        candidatesToSync.map(c => queueCandidateTasksSync(c, c, { silent: true, existingTasksLookup }))
+      );
+      const firstError = results.find(e => e != null);
       if (firstError) {
-        console.error('Failed to sync pipeline entries to Google Tasks', firstError);
         if (firstError instanceof GoogleTasksPermissionError) {
           setTasksSyncStatus('needs-reauth');
           setTasksSyncMessage('Googleタスクの利用権限がまだ許可されていません。下のボタンから許可してください。');
@@ -8124,16 +8220,9 @@ const App: React.FC = () => {
         setTasksSyncStatus('idle');
         setTasksSyncMessage('');
       }
-    });
-  };
-
-  // Manual backfill/resync — loops every visible candidate, plus every 掘り起しリスト entry
-  // (hidden, but still needs its reminder task), as both "prev" and "next" for the same diff
-  // logic above, so already-synced tasks are left alone (isUnchanged) while anything scheduled
-  // before this feature existed (or before permission was granted) gets created for the first
-  // time.
-  const handleSyncAllTasksNow = () => {
-    (currentUserData?.candidates || []).filter(c => !c.isHidden || c.revival).forEach(c => queueCandidateTasksSync(c, c));
+    } finally {
+      isSyncingAllTasksRef.current = false;
+    }
   };
 
   const handleReauthorizeTasks = async () => {

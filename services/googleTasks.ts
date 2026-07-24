@@ -67,3 +67,35 @@ export async function updatePipelineTask(accessToken: string, taskId: string, co
 export async function deletePipelineTask(accessToken: string, taskId: string): Promise<void> {
   await tasksFetch(accessToken, `/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
 }
+
+export interface ExistingPipelineTask {
+  id: string;
+  title: string;
+  dueDateISO?: string; // yyyy-mm-dd, derived from the task's `due` field
+}
+
+/**
+ * Lists tasks currently in the user's default list — used only by the manual bulk resync
+ * ("今すぐ同期") to recognize a task that already exists on Google's side even when the app's own
+ * locally-cached id→task mapping has gone stale (e.g. a debounced Drive write from another
+ * tab/device hadn't landed yet before this session's copy was loaded). Without this
+ * cross-check, a stale mapping looks identical to "never created," and a resync would create a
+ * genuine duplicate on top of the still-existing task. Paginates up to a generous cap; a
+ * recruiter's own task list realistically never approaches it.
+ */
+export async function listPipelineTasks(accessToken: string): Promise<ExistingPipelineTask[]> {
+  const results: ExistingPipelineTask[] = [];
+  let pageToken: string | undefined;
+  let pagesFetched = 0;
+  do {
+    const params = new URLSearchParams({ showCompleted: 'false', showHidden: 'true', maxResults: '100' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const data = await tasksFetch(accessToken, `?${params.toString()}`);
+    (data?.items || []).forEach((item: any) => {
+      results.push({ id: item.id, title: item.title || '', dueDateISO: item.due ? item.due.slice(0, 10) : undefined });
+    });
+    pageToken = data?.nextPageToken;
+    pagesFetched++;
+  } while (pageToken && pagesFetched < 10);
+  return results;
+}
