@@ -2279,6 +2279,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-24',
     items: [
+      'パイプラインのCSV出力を、既定で「現在の表示設定（検索・フェーズ・見込み月・メンバー等のフィルターと並び順）に一致する候補者のみ」を出力するように変更（以前は非表示を除く全候補者を出力していた）。出力ボタンの左にパターン選択のドロップダウンを追加し、「現在表示設定中のもの」を最上段のデフォルトとしつつ、「表示中の候補者（フィルター無視）」「掘り起しリストのみ」「非表示のみ」「すべての候補者」から選べるようにした',
       '登録済みの候補者にも、パイプラインの候補者カードから直接、面談の音声ファイルを追加できるようにした（アップロードするとAIが自動で面談要約を生成する。以前は新規登録時にしか音声ファイルを追加できなかった）',
       'パイプラインの候補者情報を、「編集」ボタンで別ウィンドウを開かなくても、候補者カードの「詳細を表示」上で直接編集できるようにした（基本情報・選考中の企業ごとの情報の両方が対象。ステージ変更などの実績反映やGoogleタスク同期は従来通り動作する）',
       '候補者の自由メモを、単一の欄からタイトル付きで複数追加できる形式に変更。各メモの最終更新日時は自動で記録される（以前の面談メモの内容は自動的に引き継がれる）',
@@ -4344,6 +4345,17 @@ function confidenceScore(application: CompanyApplication): number {
 // stored directly, unlike the other sortable fields which are plain Candidate properties.
 type PipelineSortKey = keyof Candidate | 'nearestExpectedDecisionDate';
 
+// CSV出力パターン — 'current' が既定（現在の表示設定＝検索・フェーズ・見込み月・メンバー・
+// 表示対象フィルターと並び順を反映した一覧）で、常にドロップダウンの最上段に表示する。
+type CsvExportPattern = 'current' | 'all' | 'active' | 'revival' | 'hidden';
+const CSV_EXPORT_PATTERN_LABELS: Record<CsvExportPattern, string> = {
+    current: '現在表示設定中のもの',
+    active: '表示中の候補者（フィルター無視）',
+    revival: '掘り起しリストのみ',
+    hidden: '非表示（その他）のみ',
+    all: 'すべての候補者（非表示を含む全員）',
+};
+
 /** Soonest 意思決定時期 among a candidate's visible applications, or null if none is set. */
 function getNearestExpectedDecisionDate(candidate: Candidate): string | null {
     const dates = candidate.applications
@@ -5540,6 +5552,7 @@ const CandidatePipelineView: React.FC<{
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [csvExportPattern, setCsvExportPattern] = useState<CsvExportPattern>('current');
     // 'active' = normal pipeline candidates; 'revival' = 掘り起しリスト entries specifically;
     // 'hidden' = any other hidden (e.g. plainly archived/rejected) candidate.
     const [visibilityFilter, setVisibilityFilter] = useState<'active' | 'hidden' | 'revival'>('active');
@@ -5690,8 +5703,8 @@ const CandidatePipelineView: React.FC<{
     };
 
     const handleExportCSV = () => {
-        const dataToExport = candidates.filter(c => !c.isHidden);
-        
+        const dataToExport = getCsvExportCandidates(csvExportPattern);
+
         if (dataToExport.length === 0) {
             alert('エクスポート対象の候補者がいません。');
             return;
@@ -5891,6 +5904,20 @@ const CandidatePipelineView: React.FC<{
         return sortableItems;
     }, [filteredCandidates, sortConfig]);
 
+    // CSV出力パターン: 'current' (既定) はいま実際に画面に表示されている候補者（検索・フェーズ・
+    // 見込み月・メンバー・表示対象の全フィルターと並び順を反映した sortedCandidates）をそのまま
+    // 出力する。他のパターンは、それらのフィルターに関係なく特定のスコープを出力するための
+    // ショートカット。
+    const getCsvExportCandidates = (pattern: CsvExportPattern): Candidate[] => {
+        switch (pattern) {
+            case 'current': return sortedCandidates;
+            case 'all': return candidates;
+            case 'active': return candidates.filter(c => !c.isHidden);
+            case 'revival': return candidates.filter(c => !!c.revival);
+            case 'hidden': return candidates.filter(c => c.isHidden === true && !c.revival);
+        }
+    };
+
     const requestSort = (key: PipelineSortKey) => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
@@ -5967,6 +5994,16 @@ const CandidatePipelineView: React.FC<{
                         onChange={e => setSearchTerm(e.target.value)}
                         className="search-input"
                     />
+                     <select
+                        value={csvExportPattern}
+                        onChange={(e) => setCsvExportPattern(e.target.value as CsvExportPattern)}
+                        aria-label="CSV出力パターン"
+                        className="csv-export-pattern-select"
+                     >
+                        {(Object.keys(CSV_EXPORT_PATTERN_LABELS) as CsvExportPattern[]).map(pattern => (
+                            <option key={pattern} value={pattern}>{CSV_EXPORT_PATTERN_LABELS[pattern]}</option>
+                        ))}
+                     </select>
                      <button onClick={handleExportCSV} className="export-button">CSV出力</button>
                 </div>
             </div>

@@ -842,6 +842,8 @@ section {
 .export-button {
   background-color: var(--success-color);
   color: white;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .export-button:hover {
   background-color: #218838;
@@ -1304,6 +1306,12 @@ section {
   display: flex;
   gap: 1rem;
   align-items: center;
+}
+.csv-export-pattern-select {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 0.25rem;
+  flex-shrink: 0;
 }
 .search-input {
   padding: 0.5rem 0.75rem;
