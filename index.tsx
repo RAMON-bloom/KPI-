@@ -2264,6 +2264,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-23',
     items: [
+      'チームを選択する項目（チーム別タブ、パイプラインのチームスコープ）を、デフォルトで自分の所属チームが選択された状態にした',
       '候補者のレジュメ登録がPDFアップロードだけでなく、テキストの貼り付けでもできるようにした。貼り付けた内容から氏名・現職・学歴・概要を自動入力する（PDFアップロードと同じ抽出処理）',
       '候補者の詳細に「選考トラック」を追加。各応募がいつどのフェーズに進んだかを日付付きで視覚的に表示できるようにした',
       '候補者に「今月・来月見込み」項目を追加。選考中の企業がまだ無い候補者でも、パイプラインの「今月見込み/来月見込み」絞り込みに表示できるようにした',
@@ -7616,6 +7617,25 @@ const App: React.FC = () => {
       setSelectedTeamId(null);
     }
   }, [selectedTeamId, divisionScopedTeams]);
+
+  // The signed-in user's own team, if they belong to one — the first team (in load order) whose
+  // memberEmails includes them. Used only to pre-select チーム別/パイプラインのチームスコープ
+  // selectors below; a user in several teams just gets the first as a starting point.
+  const myTeamId = useMemo(() => {
+    if (!currentIdentity) return null;
+    return teams.find(t => t.memberEmails.includes(currentIdentity.email))?.id || null;
+  }, [teams, currentIdentity]);
+
+  // Seeds both team-scope selectors (チーム別 tab, パイプラインのチームスコープ) to the
+  // signed-in user's own team the first time it becomes known, so they start pre-filled instead
+  // of empty. Guarded to run only once so it never fights a later manual selection or clear.
+  const hasSeededTeamDefaultsRef = useRef(false);
+  useEffect(() => {
+    if (hasSeededTeamDefaultsRef.current || !myTeamId) return;
+    hasSeededTeamDefaultsRef.current = true;
+    setSelectedTeamId(prev => prev ?? myTeamId);
+    setPipelineSelectedTeamId(prev => prev ?? myTeamId);
+  }, [myTeamId]);
 
   // A ref (not just React state) tracking the teams-config file id, kept in sync with
   // teamsDriveFileId below. persistTeams reads/writes this ref directly rather than the state
