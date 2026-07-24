@@ -2279,6 +2279,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-24',
     items: [
+      '「企業別パイプライン状況」「集客媒体別 決定率分析」の表示位置を、候補者パイプライン画面の最下部（候補者一覧の下）に移動',
       'パイプラインのCSV出力を、既定で「現在の表示設定（検索・フェーズ・見込み月・メンバー等のフィルターと並び順）に一致する候補者のみ」を出力するように変更（以前は非表示を除く全候補者を出力していた）。出力ボタンの左にパターン選択のドロップダウンを追加し、「現在表示設定中のもの」を最上段のデフォルトとしつつ、「表示中の候補者（フィルター無視）」「掘り起しリストのみ」「非表示のみ」「すべての候補者」から選べるようにした',
       '登録済みの候補者にも、パイプラインの候補者カードから直接、面談の音声ファイルを追加できるようにした（アップロードするとAIが自動で面談要約を生成する。以前は新規登録時にしか音声ファイルを追加できなかった）',
       'パイプラインの候補者情報を、「編集」ボタンで別ウィンドウを開かなくても、候補者カードの「詳細を表示」上で直接編集できるようにした（基本情報・選考中の企業ごとの情報の両方が対象。ステージ変更などの実績反映やGoogleタスク同期は従来通り動作する）',
@@ -6092,48 +6093,6 @@ const CandidatePipelineView: React.FC<{
                 </div>
             </div>
 
-            <div className="source-effectiveness-section">
-                <h3
-                    id="company-pipeline-title"
-                    className="section-title collapsible-header"
-                    onClick={() => setIsCompanyPipelineVisible(prev => !prev)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCompanyPipelineVisible(prev => !prev); }}}
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={isCompanyPipelineVisible}
-                    aria-controls="company-pipeline-content"
-                >
-                    <span>企業別パイプライン状況</span>
-                    <span className={`toggle-icon ${isCompanyPipelineVisible ? 'open' : ''}`}>▼</span>
-                </h3>
-                <div id="company-pipeline-content" className={`collapsible-content ${isCompanyPipelineVisible ? 'open' : ''}`}>
-                    <CompanyPipelineView
-                        candidates={candidates}
-                        currentUserEmail={currentUserEmail}
-                        onEditApplication={handleOpenApplicationModal}
-                    />
-                </div>
-            </div>
-
-            <div className="source-effectiveness-section">
-                <h3
-                    id="source-effectiveness-title"
-                    className="section-title collapsible-header"
-                    onClick={() => setIsReportVisible(prev => !prev)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsReportVisible(prev => !prev); }}}
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={isReportVisible}
-                    aria-controls="source-effectiveness-content"
-                >
-                    <span>集客媒体別 決定率分析</span>
-                    <span className={`toggle-icon ${isReportVisible ? 'open' : ''}`}>▼</span>
-                </h3>
-                <div id="source-effectiveness-content" className={`collapsible-content ${isReportVisible ? 'open' : ''}`}>
-                    <SourceEffectivenessReport candidates={candidates} allMedia={allMedia} />
-                </div>
-            </div>
-
             {scope === 'personal' && (
             <div className="add-candidate-action-bar">
                 <button onClick={handleAdd} className="add-candidate-large-button">
@@ -6263,6 +6222,48 @@ const CandidatePipelineView: React.FC<{
                         </div>
                     )
                 )}
+            </div>
+
+            <div className="source-effectiveness-section">
+                <h3
+                    id="company-pipeline-title"
+                    className="section-title collapsible-header"
+                    onClick={() => setIsCompanyPipelineVisible(prev => !prev)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCompanyPipelineVisible(prev => !prev); }}}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isCompanyPipelineVisible}
+                    aria-controls="company-pipeline-content"
+                >
+                    <span>企業別パイプライン状況</span>
+                    <span className={`toggle-icon ${isCompanyPipelineVisible ? 'open' : ''}`}>▼</span>
+                </h3>
+                <div id="company-pipeline-content" className={`collapsible-content ${isCompanyPipelineVisible ? 'open' : ''}`}>
+                    <CompanyPipelineView
+                        candidates={candidates}
+                        currentUserEmail={currentUserEmail}
+                        onEditApplication={handleOpenApplicationModal}
+                    />
+                </div>
+            </div>
+
+            <div className="source-effectiveness-section">
+                <h3
+                    id="source-effectiveness-title"
+                    className="section-title collapsible-header"
+                    onClick={() => setIsReportVisible(prev => !prev)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsReportVisible(prev => !prev); }}}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isReportVisible}
+                    aria-controls="source-effectiveness-content"
+                >
+                    <span>集客媒体別 決定率分析</span>
+                    <span className={`toggle-icon ${isReportVisible ? 'open' : ''}`}>▼</span>
+                </h3>
+                <div id="source-effectiveness-content" className={`collapsible-content ${isReportVisible ? 'open' : ''}`}>
+                    <SourceEffectivenessReport candidates={candidates} allMedia={allMedia} />
+                </div>
             </div>
             </>
             )}
