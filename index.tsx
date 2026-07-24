@@ -424,13 +424,12 @@ interface Candidate {
   // `salary` (their stated desired salary) — used with each application's feeRate to project
   // gross profit.
   expectedAnnualSalary?: number;
-  // Manually-set forecast for when this candidate is expected to close (see the 今月見込み/
-  // 来月見込み filter buttons), for use when there's no CompanyApplication to derive a real
+  // Manually-set forecast month (yyyy-MM, matching <input type="month">) for when this candidate
+  // is expected to close — for use when there's no CompanyApplication to derive a real
   // expectedDecisionDate from — e.g. no company currently in selection yet, or between
-  // applications. getNearestExpectedDecisionDate falls back to this when it has no
-  // application-derived date to offer; when both exist, either one matching the selected filter
-  // is enough.
-  expectedDecisionTiming?: 'thisMonth' | 'nextMonth';
+  // applications. The 見込み月 pipeline filter matches on either this or the nearest
+  // application-derived expectedDecisionDate, whichever is set.
+  expectedDecisionMonth?: string;
   // Only set when viewing the all-users/team-aggregated pipeline (never persisted) —
   // identifies whose data this candidate belongs to, for display and edit-permission checks.
   ownerEmail?: string;
@@ -2264,6 +2263,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-24',
     items: [
+      'パイプラインの「今月見込み/来月見込み」フィルターを、特定の月を選択する「見込み月」フィルター（年月選択）に変更。候補者側の見込み設定も同様に、今月・来月の二択ではなく任意の月を選べるようにした',
+      'パイプラインの「選考フェーズで絞り込み」を、ボタンの羅列からドロップダウン（複数選択可能なチェックボックス形式）に変更し、選択肢が多くても見やすくした',
       'Googleタスクへの選考予定の重複反映を改善。「今すぐ同期」実行中はボタンを確実に無効化し（従来は候補者ごとに一瞬有効に戻ってしまい、連打すると重複の原因になっていた）、さらに実行前にGoogleタスク側の既存タスク一覧を取得して照合することで、アプリ側の記録が古くなっていた場合でも重複作成せず既存タスクを再利用するようにした',
     ],
   },
@@ -3663,18 +3664,15 @@ const CandidateModal: React.FC<{
                     <input type="number" id="expectedAnnualSalary" name="expectedAnnualSalary" value={candidate.expectedAnnualSalary || ''} onChange={handleChange} placeholder="例: 600" />
                 </div>
                 <div className="form-group">
-                    <label htmlFor="expectedDecisionTiming">今月・来月見込み</label>
-                    <select
-                        id="expectedDecisionTiming"
-                        name="expectedDecisionTiming"
-                        value={candidate.expectedDecisionTiming || ''}
-                        onChange={(e) => setCandidate(prev => ({ ...prev, expectedDecisionTiming: (e.target.value || undefined) as Candidate['expectedDecisionTiming'] }))}
-                    >
-                        <option value="">未設定</option>
-                        <option value="thisMonth">今月見込み</option>
-                        <option value="nextMonth">来月見込み</option>
-                    </select>
-                    <p className="form-helper-text">選考中の企業がまだ無い場合でも、パイプラインの「今月見込み/来月見込み」絞り込みで表示させたいときに設定してください。</p>
+                    <label htmlFor="expectedDecisionMonth">見込み月</label>
+                    <input
+                        type="month"
+                        id="expectedDecisionMonth"
+                        name="expectedDecisionMonth"
+                        value={candidate.expectedDecisionMonth || ''}
+                        onChange={(e) => setCandidate(prev => ({ ...prev, expectedDecisionMonth: e.target.value || undefined }))}
+                    />
+                    <p className="form-helper-text">選考中の企業がまだ無い場合でも、パイプラインの「見込み月」絞り込みで表示させたい月を設定してください。</p>
                 </div>
                 <div className="form-group">
                     <label htmlFor="source">集客媒体</label>
@@ -4334,12 +4332,9 @@ function getNearestExpectedDecisionDate(candidate: Candidate): string | null {
     return dates.reduce((min, d) => (d < min ? d : min));
 }
 
-/** True if dateISO falls in the calendar month `monthOffset` months from today (0 = this month, 1 = next month). */
-function isDateInRelativeMonth(dateISO: string, monthOffset: number): boolean {
-    const d = new Date(dateISO + 'T00:00:00');
-    const now = new Date();
-    const target = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
-    return d.getFullYear() === target.getFullYear() && d.getMonth() === target.getMonth();
+/** True if dateISO (yyyy-mm-dd) falls in the given calendar month, e.g. yyyyMM = '2026-08'. */
+function isDateInMonth(dateISO: string, yyyyMM: string): boolean {
+    return dateISO.slice(0, 7) === yyyyMM;
 }
 
 /**
@@ -4877,11 +4872,9 @@ const CandidatePipelineView: React.FC<{
     // 'active' = normal pipeline candidates; 'revival' = 掘り起しリスト entries specifically;
     // 'hidden' = any other hidden (e.g. plainly archived/rejected) candidate.
     const [visibilityFilter, setVisibilityFilter] = useState<'active' | 'hidden' | 'revival'>('active');
-    // Multi-select, like selectedStageFilters below — empty means no filtering by 意思決定時期.
-    const [selectedDecisionTimingFilters, setSelectedDecisionTimingFilters] = useState<('thisMonth' | 'nextMonth')[]>([]);
-    const toggleDecisionTimingFilter = (key: 'thisMonth' | 'nextMonth') => {
-        setSelectedDecisionTimingFilters(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
-    };
+    // A single specific calendar month (yyyy-MM, from <input type="month">) to filter 意思決定
+    // 時期 by — '' means no filtering.
+    const [decisionMonthFilter, setDecisionMonthFilter] = useState('');
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     // Narrows the team scope down to specific members (empty = show every member of the
     // selected team). Reset whenever the selected team changes, since a different team's
@@ -5190,15 +5183,15 @@ const CandidatePipelineView: React.FC<{
             );
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
-            const matchesDecisionTiming = selectedDecisionTimingFilters.length === 0 || (() => {
-                if (c.expectedDecisionTiming && selectedDecisionTimingFilters.includes(c.expectedDecisionTiming)) return true;
+            const matchesDecisionTiming = !decisionMonthFilter || (() => {
+                if (c.expectedDecisionMonth === decisionMonthFilter) return true;
                 const nearest = getNearestExpectedDecisionDate(c);
                 if (!nearest) return false;
-                return selectedDecisionTimingFilters.some(key => isDateInRelativeMonth(nearest, key === 'thisMonth' ? 0 : 1));
+                return isDateInMonth(nearest, decisionMonthFilter);
             })();
             return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesDecisionTiming;
         });
-    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, scope, selectedMemberFilters, selectedDecisionTimingFilters]);
+    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, scope, selectedMemberFilters, decisionMonthFilter]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -5449,21 +5442,29 @@ const CandidatePipelineView: React.FC<{
 
              <div className="pipeline-list-controls">
                 <div className="pipeline-sort-controls">
-                  <span>選考フェーズで絞り込み:</span>
-                  {PIPELINE_STAGES.map(stage => (
-                     <button
-                        key={stage}
-                        onClick={() => toggleStageFilter(stage)}
-                        className={selectedStageFilters.includes(stage) ? 'active' : ''}
-                      >
-                        {stage}
-                      </button>
-                  ))}
-                  {selectedStageFilters.length > 0 && (
-                      <button onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
-                          クリア
-                      </button>
-                  )}
+                  <details className="stage-filter-dropdown">
+                    <summary>
+                      選考フェーズで絞り込み{selectedStageFilters.length > 0 ? `（${selectedStageFilters.length}件選択中）` : ''}
+                      <span className="toggle-icon">▼</span>
+                    </summary>
+                    <div className="stage-filter-dropdown-panel">
+                      {PIPELINE_STAGES.map(stage => (
+                        <label key={stage} className="stage-filter-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={selectedStageFilters.includes(stage)}
+                            onChange={() => toggleStageFilter(stage)}
+                          />
+                          {stage}
+                        </label>
+                      ))}
+                      {selectedStageFilters.length > 0 && (
+                          <button type="button" onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
+                              クリア
+                          </button>
+                      )}
+                    </div>
+                  </details>
                 </div>
                 <div className="pipeline-sort-controls">
                   <span>並び替え:</span>
@@ -5490,21 +5491,15 @@ const CandidatePipelineView: React.FC<{
                   </button>
                 </div>
                 <div className="pipeline-sort-controls">
-                  <span>意思決定時期で絞り込み:</span>
-                  <button
-                    onClick={() => toggleDecisionTimingFilter('thisMonth')}
-                    className={selectedDecisionTimingFilters.includes('thisMonth') ? 'active' : ''}
-                  >
-                    今月見込み
-                  </button>
-                  <button
-                    onClick={() => toggleDecisionTimingFilter('nextMonth')}
-                    className={selectedDecisionTimingFilters.includes('nextMonth') ? 'active' : ''}
-                  >
-                    来月見込み
-                  </button>
-                  {selectedDecisionTimingFilters.length > 0 && (
-                      <button onClick={() => setSelectedDecisionTimingFilters([])} className="secondary-action-button">
+                  <span>見込み月で絞り込み:</span>
+                  <input
+                    type="month"
+                    value={decisionMonthFilter}
+                    onChange={(e) => setDecisionMonthFilter(e.target.value)}
+                    aria-label="見込み月で絞り込み"
+                  />
+                  {decisionMonthFilter && (
+                      <button onClick={() => setDecisionMonthFilter('')} className="secondary-action-button">
                           クリア
                       </button>
                   )}
