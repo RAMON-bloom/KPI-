@@ -2279,6 +2279,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-24',
     items: [
+      '登録済みの候補者にも、パイプラインの候補者カードから直接、面談の音声ファイルを追加できるようにした（アップロードするとAIが自動で面談要約を生成する。以前は新規登録時にしか音声ファイルを追加できなかった）',
       'パイプラインの候補者情報を、「編集」ボタンで別ウィンドウを開かなくても、候補者カードの「詳細を表示」上で直接編集できるようにした（基本情報・選考中の企業ごとの情報の両方が対象。ステージ変更などの実績反映やGoogleタスク同期は従来通り動作する）',
       '候補者の自由メモを、単一の欄からタイトル付きで複数追加できる形式に変更。各メモの最終更新日時は自動で記録される（以前の面談メモの内容は自動的に引き継がれる）',
       'パイプラインの「今月見込み/来月見込み」フィルターを、特定の月を選択する「見込み月」フィルター（年月選択）に変更。候補者側の見込み設定も同様に、今月・来月の二択ではなく任意の月を選べるようにした',
@@ -3044,6 +3045,17 @@ const DailyProgress: React.FC<{
 };
 
 
+// Shared by CandidateModal (resume/audio upload) and PipelineCandidateCard's inline audio
+// upload — module-level since both need it and it has no component-specific state.
+const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.onerror = error => reject(error);
+    });
+};
+
 const CandidateModal: React.FC<{
     onSave: (candidate: Candidate) => void;
     onClose: () => void;
@@ -3138,15 +3150,6 @@ const CandidateModal: React.FC<{
         } else if (e.type === "dragleave") {
             setResumeDragActive(false);
         }
-    };
-    
-    const fileToBase64 = (file: File): Promise<string> => {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.readAsDataURL(file);
-            reader.onload = () => resolve((reader.result as string).split(',')[1]);
-            reader.onerror = error => reject(error);
-        });
     };
 
     // Shared by both the PDF-upload flow and the text-paste flow below — only the `contentParts`
@@ -4996,6 +4999,65 @@ const PipelineCandidateCard: React.FC<{
     onSave({ ...c, applications: [...c.applications, newApp] });
   };
 
+  // 面談音声のアップロード — CandidateModal's own audio-upload flow, adapted so a candidate that
+  // was already registered without a recording (or whose interview happened later) can still
+  // add one directly from the pipeline card, without needing the create-candidate modal.
+  const [isGeneratingInterviewSummary, setIsGeneratingInterviewSummary] = useState(false);
+  const [audioDragActive, setAudioDragActive] = useState(false);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAudioFile = async (files: FileList) => {
+    if (!files || files.length === 0) return;
+    const audioFile = Array.from(files).find(file => file.type.startsWith('audio/'));
+    if (!audioFile) {
+      alert('音声ファイル（MP3, WAV, etc.）のみアップロードできます。');
+      return;
+    }
+    if (c.interviewAudioFile) {
+      if (!window.confirm('既存の音声ファイルを置き換えますか？')) return;
+    }
+    const audioFileInfo = { name: audioFile.name };
+    onSave({ ...c, interviewAudioFile: audioFileInfo, interviewSummary: '' });
+    setIsGeneratingInterviewSummary(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const base64Data = await fileToBase64(audioFile);
+      const audioPart = { inlineData: { mimeType: audioFile.type, data: base64Data } };
+      const textPart = { text: 'この面談の音声データの内容を、シンプルに要約してください。' };
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } });
+      onSave({ ...c, interviewAudioFile: audioFileInfo, interviewSummary: response.text.trim() });
+    } catch (error) {
+      console.error("Error generating interview summary:", error);
+      alert('AIによる面談要約の生成中にエラーが発生しました。');
+      onSave({ ...c, interviewAudioFile: null, interviewSummary: '' });
+    } finally {
+      setIsGeneratingInterviewSummary(false);
+    }
+  };
+
+  const handleAudioDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setAudioDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setAudioDragActive(false);
+    }
+  };
+  const handleAudioDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAudioDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleAudioFile(e.dataTransfer.files);
+  };
+  const handleAudioFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.target.files && e.target.files.length > 0) handleAudioFile(e.target.files);
+  };
+  const handleRemoveAudioFile = () => {
+    onSave({ ...c, interviewAudioFile: null, interviewSummary: '' });
+  };
+
   // メモ: c.memos is the source of truth once anything has been saved to it; before that, a
   // legacy single-field interviewMemo (if any) is shown as a stand-in single entry. The very
   // first add/edit/delete folds that legacy value into memos for real and clears interviewMemo.
@@ -5195,9 +5257,33 @@ const PipelineCandidateCard: React.FC<{
                     <span className="info-label">レジュメ</span>
                     <span className="info-value">{c.resumeFiles && c.resumeFiles.length > 0 ? c.resumeFiles.map(f => f.name).join(', ') : '未登録'}</span>
                 </div>
-                <div className="candidate-info-item">
+                <div className="candidate-info-item summary-item">
                     <span className="info-label">面談音声ファイル</span>
-                    <span className="info-value">{c.interviewAudioFile ? c.interviewAudioFile.name : '未登録'}</span>
+                    {candidateIsOwn ? (
+                        <div
+                            className={`drop-zone ${audioDragActive ? 'drag-active' : ''}`}
+                            onDragEnter={handleAudioDrag}
+                            onDragLeave={handleAudioDrag}
+                            onDragOver={handleAudioDrag}
+                            onDrop={handleAudioDrop}
+                        >
+                            <input ref={audioInputRef} type="file" accept="audio/*" onChange={handleAudioFileChange} style={{ display: 'none' }} />
+                            {c.interviewAudioFile ? (
+                                <div className="file-list">
+                                    <div className="file-item">
+                                        <span>{c.interviewAudioFile.name}</span>
+                                        <button type="button" onClick={handleRemoveAudioFile} className="remove-file-button" aria-label={`${c.interviewAudioFile.name}を削除`}>&times;</button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <p onClick={() => audioInputRef.current?.click()}>
+                                    {isGeneratingInterviewSummary ? 'AIが音声データを解析中です...' : 'ここに面談の音声ファイル（MP3, WAV等）をドラッグ＆ドロップ、またはクリックして選択'}
+                                </p>
+                            )}
+                        </div>
+                    ) : (
+                        <span className="info-value">{c.interviewAudioFile ? c.interviewAudioFile.name : '未登録'}</span>
+                    )}
                 </div>
                 <div className="candidate-info-item summary-item">
                     <span className="info-label">概要 (レジュメより)</span>
