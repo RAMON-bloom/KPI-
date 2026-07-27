@@ -2312,6 +2312,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '電話番号・メールアドレスは個人情報のため既定でマスク表示にし、候補者ごとに「表示」ボタンで表示できるようにした（掘り起しリスト表示中のみ、一括で表示/非表示を切り替えるボタンも追加）',
       '【不具合修正】選考トラックの「打診」フェーズの色を、白文字が読みにくかった灰色からコントラストの高い色に変更し、日時表示の薄さ(半透明)もやめて濃く表示するようにした',
       '【不具合修正】選考企業を新規追加する際に「進捗状況」を打診以外（1次面接など）から選んだ場合、選考トラックに反映されず「打診」のまま表示されてしまう不具合を修正',
+      '候補者詳細のメモ（複数追加できるメモ欄）と、選考企業ごとのメモの近くに拡大表示ボタンを追加。クリックすると、大きさを自由に変更できるポップアップウィンドウでメモを表示・編集できるようにした',
     ],
   },
   {
@@ -5322,6 +5323,64 @@ const MaskedContactField: React.FC<{
   );
 };
 
+// A small "拡大表示" trigger placed next to a memo field — opens the same content in a modal
+// whose window can be freely resized (native browser resize handle, see .memo-expand-modal),
+// for reading/writing long memos without the cramped inline textarea. Edits are buffered locally
+// and only committed on close, mirroring InlineTextField's own draft-then-commit pattern.
+const MemoExpandButton: React.FC<{
+  title: string;
+  content: string;
+  editable: boolean;
+  onCommit?: (value: string) => void;
+  ariaLabel: string;
+}> = ({ title, content, editable, onCommit, ariaLabel }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [draft, setDraft] = useState(content);
+  useEffect(() => { if (isOpen) setDraft(content); }, [isOpen, content]);
+
+  const handleClose = () => {
+    if (editable && onCommit && draft !== content) onCommit(draft);
+    setIsOpen(false);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="memo-expand-button"
+        aria-label={`${ariaLabel}をポップアップで拡大表示`}
+        title="ポップアップで拡大表示（サイズ変更可）"
+      >
+        ⤢
+      </button>
+      {isOpen && (
+        <div className="modal-overlay" onClick={handleClose}>
+          <div className="modal-content memo-expand-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{title}</h3>
+              <button onClick={handleClose} className="close-button" aria-label="閉じる">&times;</button>
+            </div>
+            <div className="modal-body memo-expand-modal-body">
+              {editable ? (
+                <textarea
+                  value={draft}
+                  onChange={e => setDraft(e.target.value)}
+                  className="memo-expand-textarea"
+                  aria-label={ariaLabel}
+                  autoFocus
+                />
+              ) : (
+                <p className="memo-expand-readonly">{content || 'メモはありません。'}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
 /**
  * One candidate's card in the パイプライン list — every field shown here (candidate basic info,
  * each application's fields, and the titled memo list) is directly editable in place; there is
@@ -6110,6 +6169,13 @@ const PipelineCandidateCard: React.FC<{
                                         <strong>{memo.title || '（無題のメモ）'}</strong>
                                     )}
                                     {memo.updatedAt && <span className="memo-updated-at">最終更新: {formatMemoTimestamp(memo.updatedAt)}</span>}
+                                    <MemoExpandButton
+                                        title={memo.title || '（無題のメモ）'}
+                                        content={memo.content}
+                                        editable={candidateIsOwn}
+                                        onCommit={(v) => updateMemo(memo.id, { content: v })}
+                                        ariaLabel="メモ内容"
+                                    />
                                     {candidateIsOwn && (
                                         <button type="button" onClick={() => removeMemo(memo.id)} className="remove-file-button" aria-label="このメモを削除">&times;</button>
                                     )}
@@ -6279,7 +6345,16 @@ const PipelineCandidateCard: React.FC<{
                                         )}
                                     </div>
                                     <div className="detail-card-item detail-card-item-memo">
-                                        <span>メモ:</span>
+                                        <div className="detail-card-item-memo-header">
+                                            <span>メモ:</span>
+                                            <MemoExpandButton
+                                                title={`${app.companyName || '選考'}のメモ`}
+                                                content={app.memo || ''}
+                                                editable={candidateIsOwn}
+                                                onCommit={(v) => commitApplicationField(app.id, { memo: v })}
+                                                ariaLabel="選考状況に関するメモ"
+                                            />
+                                        </div>
                                         {candidateIsOwn ? (
                                             <InlineTextField multiline rows={2} value={app.memo || ''} onCommit={(v) => commitApplicationField(app.id, { memo: v })} placeholder="選考状況に関するメモ" ariaLabel="応募メモ" className="detail-card-memo-text" />
                                         ) : (

@@ -733,6 +733,11 @@ section {
 .detail-card-item-memo {
   align-items: flex-start;
 }
+.detail-card-item-memo-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
 .detail-card-memo-text {
   white-space: pre-wrap;
   text-align: right;
@@ -826,6 +831,34 @@ section {
 .modal-body {
   padding: 1.5rem;
   overflow-y: auto;
+}
+.memo-expand-modal {
+  resize: both;
+  overflow: hidden;
+  width: 600px;
+  height: 450px;
+  min-width: 320px;
+  min-height: 220px;
+}
+.memo-expand-modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.memo-expand-textarea {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.memo-expand-readonly {
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 .modal-footer {
   padding: 1rem 1.5rem;
@@ -2172,6 +2205,20 @@ textarea.memo-content-text {
   width: 100%;
   font-family: inherit;
   resize: vertical;
+}
+.memo-expand-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted-color);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.15rem 0.35rem;
+  flex-shrink: 0;
+}
+.memo-expand-button:hover,
+.memo-expand-button:focus-visible {
+  color: var(--primary-color);
 }
 
 .detail-view-subtitle {
