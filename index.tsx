@@ -2305,6 +2305,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】応募企業や候補者情報の項目数が多いと、候補者カードの詳細表示がfee料率あたりから下が表示されなくなる不具合を修正',
       '【不具合修正】登録済みの候補者について、Googleドライブから面談ログ（Google Meet議事録）を検索・取込みできるようにした（従来は新規登録時にしかこの機能を使えなかった）',
       '候補者情報の編集項目の見た目を刷新。常に入力ボックスとして表示するのをやめ、通常はカードに埋め込まれたテキストとして表示し、クリックした時だけ編集できるようにした（テキスト・数値・プルダウン・日付/年月の各項目が対象）',
+      '候補者カードの「ぱっと見」表示（現職・学歴・現年収・媒体・年齢・確度・職種・他社状況・入社希望・電話番号・メール）を、詳細を表示せずにその場でクリックして編集できるようにした',
     ],
   },
   {
@@ -5514,19 +5515,123 @@ const PipelineCandidateCard: React.FC<{
         )}
         <div className="candidate-card-body">
             <div className="candidate-key-info">
-                <div className="key-info-item"><span>現職:</span> {c.currentCompany || 'N/A'}</div>
-                <div className="key-info-item"><span>学歴:</span> {c.education || 'N/A'}</div>
-                <div className="key-info-item"><span>現年収:</span> {c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</div>
-                <div className="key-info-item"><span>媒体:</span> {c.source || 'N/A'}</div>
-                <div className="key-info-item"><span>年齢:</span> {c.age ? `${c.age}歳` : 'N/A'}</div>
                 <div className="key-info-item">
-                    <span>確度:</span> {bestConfidenceApp ? `${bestConfidenceApp.offerConfidence || '未設定'} / ${bestConfidenceApp.acceptanceConfidence || '未設定'}` : 'N/A'}
+                    <span>現職:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.currentCompany || ''} onCommit={(v) => commitCandidateField('currentCompany', v)} placeholder="現職企業名" ariaLabel="現職企業名" />
+                    ) : (
+                        c.currentCompany || 'N/A'
+                    )}
                 </div>
-                <div className="key-info-item"><span>職種:</span> {c.jobType || 'N/A'}</div>
-                <div className="key-info-item"><span>他社状況:</span> {c.otherCompanyStatus || 'N/A'}</div>
-                <div className="key-info-item"><span>入社希望:</span> {c.desiredJoinTiming || 'N/A'}</div>
-                <div className="key-info-item"><span>電話番号:</span> {c.phoneNumber || 'N/A'}</div>
-                <div className="key-info-item"><span>メール:</span> {c.email || 'N/A'}</div>
+                <div className="key-info-item">
+                    <span>学歴:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.education || ''} onCommit={(v) => commitCandidateField('education', v)} placeholder="最終学歴" ariaLabel="最終学歴" />
+                    ) : (
+                        c.education || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>現年収:</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} unit="万円" />
+                    ) : (
+                        c.currentSalary ? `${c.currentSalary}万円` : 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>媒体:</span>
+                    {candidateIsOwn ? (
+                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={c.source} emptyText="N/A">
+                            <option value="">選択してください</option>
+                            {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                            {c.source && c.source !== 'Other' && !activeMedia.some(m => m.id === c.source) && (
+                                <option value={c.source}>
+                                    {(allMedia.find(m => m.id === c.source)?.name || c.source) + '（アーカイブ済み）'}
+                                </option>
+                            )}
+                            <option value="Other">その他</option>
+                        </InlineSelectField>
+                    ) : (
+                        c.source || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>年齢:</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} unit="歳" />
+                    ) : (
+                        c.age ? `${c.age}歳` : 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>確度:</span>
+                    {candidateIsOwn && bestConfidenceApp ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                            <InlineSelectField
+                                value={bestConfidenceApp.offerConfidence || ''}
+                                onCommit={(v) => commitApplicationField(bestConfidenceApp.id, { offerConfidence: (v || undefined) as ConfidenceGrade | undefined })}
+                                ariaLabel="内定確度"
+                                displayText={bestConfidenceApp.offerConfidence}
+                            >
+                                <option value="">未設定</option>
+                                {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                            </InlineSelectField>
+                            <span>/</span>
+                            <InlineSelectField
+                                value={bestConfidenceApp.acceptanceConfidence || ''}
+                                onCommit={(v) => commitApplicationField(bestConfidenceApp.id, { acceptanceConfidence: (v || undefined) as ConfidenceGrade | undefined })}
+                                ariaLabel="入社確度"
+                                displayText={bestConfidenceApp.acceptanceConfidence}
+                            >
+                                <option value="">未設定</option>
+                                {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+                            </InlineSelectField>
+                        </span>
+                    ) : (
+                        bestConfidenceApp ? `${bestConfidenceApp.offerConfidence || '未設定'} / ${bestConfidenceApp.acceptanceConfidence || '未設定'}` : 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>職種:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.jobType || ''} onCommit={(v) => commitCandidateField('jobType', v)} placeholder="例: エンジニア" ariaLabel="職種" />
+                    ) : (
+                        c.jobType || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>他社状況:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
+                    ) : (
+                        c.otherCompanyStatus || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>入社希望:</span>
+                    {candidateIsOwn ? (
+                        <InlineDateField type="month" value={c.desiredJoinTiming} onCommit={(v) => commitCandidateField('desiredJoinTiming', v)} ariaLabel="入社希望時期" />
+                    ) : (
+                        c.desiredJoinTiming || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>電話番号:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.phoneNumber || ''} onCommit={(v) => commitCandidateField('phoneNumber', v)} placeholder="例: 090-1234-5678" ariaLabel="電話番号" />
+                    ) : (
+                        c.phoneNumber || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>メール:</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.email || ''} onCommit={(v) => commitCandidateField('email', v)} placeholder="例: taro@example.com" ariaLabel="メールアドレス" />
+                    ) : (
+                        c.email || 'N/A'
+                    )}
+                </div>
             </div>
              <div className="candidate-application-summary">
                 <span className="summary-label">選考状況 ({visibleApplications.length}件):</span>
