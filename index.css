@@ -1695,6 +1695,28 @@ section {
   font-weight: 500;
   white-space: nowrap;
 }
+.agent-interview-status-badge {
+  padding: 0.2rem 0.7rem;
+  border-radius: 1rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  white-space: nowrap;
+  border: none;
+  color: #333;
+  background-color: #e2e3e5;
+}
+.agent-interview-status-badge.interviewed {
+  background-color: var(--success-color);
+  color: white;
+}
+button.agent-interview-status-badge {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+button.agent-interview-status-badge:hover,
+button.agent-interview-status-badge:focus-visible {
+  filter: brightness(1.1);
+}
 .candidate-card-actions {
   display: flex;
   gap: 0.5rem;
@@ -2032,6 +2054,14 @@ textarea.summary-text {
   font-family: inherit;
   font-size: 0.95rem;
   resize: vertical;
+}
+/* 面談要約(AI)は詳細フォーマットで出力されるため長文になりやすい — 初期表示から広めに確保
+   しつつ、resize: vertical によりユーザーがさらに縦方向に広げられるようにする。 */
+textarea.interview-summary-text {
+  min-height: 22rem;
+}
+textarea.memo-content-text {
+  min-height: 8rem;
 }
 
 /* --- Candidate memo list (PipelineCandidateCard) --- */

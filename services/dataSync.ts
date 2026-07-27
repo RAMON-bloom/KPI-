@@ -388,6 +388,28 @@ export async function overwriteTeammateEntry<T extends { entries: any[] } = any>
   return updated;
 }
 
+/**
+ * チーム作成・編集権限保持者による代理での候補者「非表示」切り替え: fetches the target
+ * teammate's LATEST data (same re-fetch-before-write pattern as overwriteTeammateEntry, to avoid
+ * clobbering a concurrent save), flips isHidden on just the matching candidate, and writes the
+ * merged result back. Requires this fileId to already have been granted direct 'writer' access to
+ * the signed-in account (see syncIndividualWriterPermissions) — otherwise the underlying Drive
+ * write fails with 403.
+ */
+export async function overwriteTeammateCandidateVisibility<T extends { candidates: any[] } = any>(
+  driveFileId: string,
+  candidateId: string,
+  nextIsHidden: boolean
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updatedCandidates = (latest.candidates || []).map((c: any) =>
+    c.id === candidateId ? { ...c, isHidden: nextIsHidden } : c
+  );
+  const updated = { ...latest, candidates: updatedCandidates };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
 export interface TeamsConfigResult<T> {
   data: T | null;
   driveFileId: string | null;

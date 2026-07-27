@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -472,6 +472,21 @@ interface Candidate {
   exitKpiKey?: 'declined' | 'withdrawn' | 'acceptanceWithdrawn';
   exitPhase?: PipelineStage;
   exitPhaseAt?: string; // yyyy-mm-dd
+  // 年齢・職種・電話番号・メールアドレス・他社選考状況・入社希望時期 — パイプライン一覧の
+  // カードで「ぱっと見」把握できるよう追加した基本情報。候補者単位でインライン編集する。
+  age?: number;
+  jobType?: string;
+  phoneNumber?: string;
+  email?: string;
+  otherCompanyStatus?: string;
+  // 入社希望時期（yyyy-MM、<input type="month">）— expectedDecisionMonth（決定見込み月・営業
+  // 管理用）とは別に、候補者本人の希望として聞き取った時期をそのまま記録する。
+  desiredJoinTiming?: string;
+  // 自社（エージェント）側の初回面談状況 — 企業ごとのPIPELINE_STAGES（打診・書類選考…）とは
+  // 独立した、候補者単位のフラグ。未設定は「未面談」として扱う。
+  agentInterviewStatus?: '未面談' | '面談済み';
+  scoutReplyDate?: string; // yyyy-mm-dd
+  firstInterviewDate?: string; // yyyy-mm-dd — 自社側の初回面談日（agentInterviewStatusと連動）
 }
 
 /**
@@ -2277,6 +2292,19 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-27',
+    items: [
+      '面談の音声・議事録要約プロンプトを、より詳細な項目（返信理由、他エージェント利用状況、キャリアサマリー、転職理由の多角的分析、希望条件、備考、面接可能時間・方法、紹介すべき企業の方向性、次回アクションなど）を整理する形式に統一',
+      '面談要約・メモの表示欄を大きくし、長文でも読みやすくした',
+      '候補者を「確度」（内定確度/入社確度のうち最も良いもの）で並び替えできるようにした',
+      '候補者の検索を、氏名だけでなく現職・職種・メールアドレス・電話番号でも検索できるように拡張',
+      '候補者の基本情報に、年齢・職種・電話番号・メールアドレス・他社状況・入社希望時期・スカウト返信日・初回面談日を追加。パイプラインカードの「ぱっと見」表示と詳細編集の両方に反映し、CSV出力にも追加した',
+      '候補者ごとに、自社（エージェント側）の初回面談状況（未面談/面談済み）を切り替えられるバッジを追加。パイプライン一覧を未面談/面談済みで絞り込めるようにした',
+      '「非表示」の切り替えを、チーム作成・編集権限保持者であれば所属メンバーの候補者に対しても行えるようにした（それ以外の操作は引き続き本人のみ）',
+      '歩留まり分析の全体ファネルに、任意の2地点間（例: スカウト返信数→候補者推薦数）の歩留まりを計算できるセレクトを追加（隣接ステージ間だけでなく、自由に区間を選べるようにした）',
+    ],
+  },
+  {
     date: '2026-07-24',
     items: [
       '「企業別パイプライン状況」「集客媒体別 決定率分析」の表示位置を、候補者パイプライン画面の最下部（候補者一覧の下）に移動',
@@ -3047,6 +3075,63 @@ const DailyProgress: React.FC<{
 };
 
 
+// Shared interview-summary output format, used by every AI summarization entry point (audio
+// upload in CandidateModal/PipelineCandidateCard, and Meet議事録 summarization — both the
+// Drive-search path and the manual file-drop fallback) so a candidate's summary always comes
+// back in the same structured shape regardless of which flow produced it.
+const INTERVIEW_SUMMARY_FORMAT = `# 制約事項
+・事実に基づき、簡潔かつ客観的に記載すること。
+・不明な点は「不明」と記載すること。
+・「転職理由」は単なる箇条書きではなく、候補者の本音や背景を多角的に分析して記載すること。
+・各社の「業務内容」は、担当した業務・役割・成果などができる限り具体的に分かるように整理すること。
+
+---
+
+■返信理由（今回面談に至ったきっかけ）
+
+■他エージェント利用状況
+・利用社数：
+・選考中企業とポジション：
+
+■キャリアサマリー
+・大学：
+　└ 入社理由：
+・1社目（社名/期間）：
+　└ 業務内容：
+　└ 転職理由：
+・2社目（社名/期間）：
+　└ 業務内容：
+　└ 転職理由：
+（3社目以降がある場合も同様に追記）
+
+■転職理由（多角的分析）
+※現状の不満、将来への不安、キャリアアップの方向性など、深層心理を含めて整理
+
+■希望条件
+・現年収：
+・希望年収：
+・入社可能時期：
+・勤務地/働き方：
+・その他：
+
+■備考（個人情報・人柄・特記事項）
+※コミュニケーション能力や、開示されたセンシティブな情報など
+
+■面接可能時間・方法
+
+■紹介すべき企業の方向性
+
+■次回アクション（エージェント側・候補者側）`;
+
+const INTERVIEW_SUMMARY_AUDIO_PROMPT =
+    `あなたはプロの転職エージェントです。この面談の音声データを元に、候補者情報を以下のフォーマットで整理・要約してください。\n\n${INTERVIEW_SUMMARY_FORMAT}`;
+
+const buildInterviewSummaryTranscriptPrompt = (transcriptText: string) =>
+    `あなたはプロの転職エージェントです。以下はGoogle Meetの面談議事録です。この内容を元に、候補者情報を以下のフォーマットで整理・要約してください。\n\n${INTERVIEW_SUMMARY_FORMAT}\n\n---\n${transcriptText}`;
+
+const INTERVIEW_SUMMARY_FILE_INSTRUCTION =
+    `あなたはプロの転職エージェントです。これはGoogle Meetなどの面談議事録のファイルです。この内容を元に、候補者情報を以下のフォーマットで整理・要約してください。\n\n${INTERVIEW_SUMMARY_FORMAT}`;
+
 // Shared by CandidateModal (resume/audio upload) and PipelineCandidateCard's inline audio
 // upload — module-level since both need it and it has no component-specific state.
 const fileToBase64 = (file: File): Promise<string> => {
@@ -3332,7 +3417,7 @@ const CandidateModal: React.FC<{
             };
 
             const textPart = {
-                text: 'この面談の音声データの内容を、シンプルに要約してください。',
+                text: INTERVIEW_SUMMARY_AUDIO_PROMPT,
             };
 
             const response = await ai.models.generateContent({
@@ -3431,7 +3516,7 @@ const CandidateModal: React.FC<{
             const text = await exportGoogleDocAsText(file.id);
             const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
             await summarizeAndAppendInterviewLog(
-                `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
+                buildInterviewSummaryTranscriptPrompt(text),
                 file.name,
                 dateLabel
             );
@@ -3455,7 +3540,7 @@ const CandidateModal: React.FC<{
             if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
                 const text = await file.text();
                 await summarizeAndAppendInterviewLog(
-                    `以下はGoogle Meetの面談議事録です。この内容をシンプルに要約してください。\n\n---\n${text}`,
+                    buildInterviewSummaryTranscriptPrompt(text),
                     file.name,
                     dateLabel
                 );
@@ -3465,7 +3550,7 @@ const CandidateModal: React.FC<{
                     {
                         parts: [
                             { inlineData: { mimeType: file.type, data: base64Data } },
-                            { text: 'これはGoogle Meetなどの面談議事録のファイルです。この内容をシンプルに要約してください。' },
+                            { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION },
                         ],
                     },
                     file.name,
@@ -4341,10 +4426,22 @@ function confidenceScore(application: CompanyApplication): number {
     return offerRank + acceptanceRank;
 }
 
+/**
+ * The single visible application with the best (lowest) confidenceScore for a candidate — used
+ * both to derive a candidate-level "確度" for pipeline sorting/at-a-glance display, and by
+ * pickBestApplicationPerCandidate below for the 企業別パイプライン状況 view. Returns null when
+ * the candidate has no visible application at all (nothing to rate yet).
+ */
+function getBestConfidenceApplication(candidate: Candidate): CompanyApplication | null {
+    const visibleApps = candidate.applications.filter(app => !app.isHidden);
+    if (visibleApps.length === 0) return null;
+    return visibleApps.reduce((a, b) => (confidenceScore(b) < confidenceScore(a) ? b : a));
+}
+
 // 'nearestExpectedDecisionDate' isn't a real Candidate field — it's derived on the fly from
 // applications (a candidate can have several, each with their own 意思決定時期) rather than
 // stored directly, unlike the other sortable fields which are plain Candidate properties.
-type PipelineSortKey = keyof Candidate | 'nearestExpectedDecisionDate';
+type PipelineSortKey = keyof Candidate | 'nearestExpectedDecisionDate' | 'confidence';
 
 // CSV出力パターン — 'current' が既定（現在の表示設定＝検索・フェーズ・見込み月・メンバー・
 // 表示対象フィルターと並び順を反映した一覧）で、常にドロップダウンの最上段に表示する。
@@ -4380,10 +4477,8 @@ function isDateInMonth(dateISO: string, yyyyMM: string): boolean {
 function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipelineEntry[] {
     const result: CompanyPipelineEntry[] = [];
     candidates.filter(c => !c.isHidden).forEach(candidate => {
-        const visibleApps = candidate.applications.filter(app => !app.isHidden);
-        if (visibleApps.length === 0) return;
-        const best = visibleApps.reduce((a, b) => (confidenceScore(b) < confidenceScore(a) ? b : a));
-        result.push({ candidate, application: best });
+        const best = getBestConfidenceApplication(candidate);
+        if (best) result.push({ candidate, application: best });
     });
     return result;
 }
@@ -4988,13 +5083,20 @@ const PipelineCandidateCard: React.FC<{
   onOpenRevivalModal: (candidate: Candidate) => void;
   onRemoveFromRevivalList: (candidate: Candidate) => void;
   onMoveRevivalToHidden: (candidate: Candidate) => void;
+  // チーム作成・編集権限保持者（isTeamsAdmin || teamsAuthorizedEditors）は、所属メンバーの
+  // 候補者について「非表示」の切り替えだけは代理で行える — それ以外の操作（選考追加・掘り起し
+  // リスト登録など）は引き続き本人（candidateIsOwn）専用。
+  isTeamsEditable: boolean;
+  onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
+  isTeamsEditable, onToggleTeammateVisibility,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   const visibleApplications = c.applications.filter(app => !app.isHidden);
+  const bestConfidenceApp = getBestConfidenceApplication(c);
 
   const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
     onSave({ ...c, [field]: value });
@@ -5036,7 +5138,7 @@ const PipelineCandidateCard: React.FC<{
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       const base64Data = await fileToBase64(audioFile);
       const audioPart = { inlineData: { mimeType: audioFile.type, data: base64Data } };
-      const textPart = { text: 'この面談の音声データの内容を、シンプルに要約してください。' };
+      const textPart = { text: INTERVIEW_SUMMARY_AUDIO_PROMPT };
       const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } });
       onSave({ ...c, interviewAudioFile: audioFileInfo, interviewSummary: response.text.trim() });
     } catch (error) {
@@ -5108,6 +5210,26 @@ const PipelineCandidateCard: React.FC<{
           )}
           {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
           {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
+          {candidateIsOwn ? (
+              <button
+                  type="button"
+                  onClick={() => {
+                      const nextStatus = (c.agentInterviewStatus || '未面談') === '面談済み' ? '未面談' : '面談済み';
+                      const patch: Partial<Candidate> = { agentInterviewStatus: nextStatus };
+                      if (nextStatus === '面談済み' && !c.firstInterviewDate) {
+                          patch.firstInterviewDate = new Date().toLocaleDateString('sv-SE');
+                      }
+                      onSave({ ...c, ...patch });
+                  }}
+                  className={`agent-interview-status-badge ${(c.agentInterviewStatus || '未面談') === '面談済み' ? 'interviewed' : 'not-interviewed'}`}
+              >
+                  {c.agentInterviewStatus || '未面談'}
+              </button>
+          ) : (
+              <span className={`agent-interview-status-badge ${(c.agentInterviewStatus || '未面談') === '面談済み' ? 'interviewed' : 'not-interviewed'}`}>
+                  {c.agentInterviewStatus || '未面談'}
+              </span>
+          )}
           {candidateIsOwn && (
               <div className="candidate-card-actions">
                   {visibilityFilter === 'revival' ? (
@@ -5129,6 +5251,16 @@ const PipelineCandidateCard: React.FC<{
                   )}
               </div>
           )}
+          {!candidateIsOwn && isTeamsEditable && visibilityFilter !== 'revival' && (
+              <div className="candidate-card-actions">
+                  <button
+                      onClick={() => onToggleTeammateVisibility(c.ownerEmail!, c.id, !c.isHidden)}
+                      className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}
+                  >
+                      {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
+                  </button>
+              </div>
+          )}
         </div>
         {visibilityFilter === 'revival' && c.revival && (
             <div className="revival-info-banner">
@@ -5141,6 +5273,15 @@ const PipelineCandidateCard: React.FC<{
                 <div className="key-info-item"><span>学歴:</span> {c.education || 'N/A'}</div>
                 <div className="key-info-item"><span>現年収:</span> {c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</div>
                 <div className="key-info-item"><span>媒体:</span> {c.source || 'N/A'}</div>
+                <div className="key-info-item"><span>年齢:</span> {c.age ? `${c.age}歳` : 'N/A'}</div>
+                <div className="key-info-item">
+                    <span>確度:</span> {bestConfidenceApp ? `${bestConfidenceApp.offerConfidence || '未設定'} / ${bestConfidenceApp.acceptanceConfidence || '未設定'}` : 'N/A'}
+                </div>
+                <div className="key-info-item"><span>職種:</span> {c.jobType || 'N/A'}</div>
+                <div className="key-info-item"><span>他社状況:</span> {c.otherCompanyStatus || 'N/A'}</div>
+                <div className="key-info-item"><span>入社希望:</span> {c.desiredJoinTiming || 'N/A'}</div>
+                <div className="key-info-item"><span>電話番号:</span> {c.phoneNumber || 'N/A'}</div>
+                <div className="key-info-item"><span>メール:</span> {c.email || 'N/A'}</div>
             </div>
              <div className="candidate-application-summary">
                 <span className="summary-label">選考状況 ({visibleApplications.length}件):</span>
@@ -5263,6 +5404,85 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="candidate-info-item">
+                    <span className="info-label">年齢</span>
+                    {candidateIsOwn ? (
+                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} />
+                    ) : (
+                        <span className="info-value">{c.age ? `${c.age}歳` : 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">職種</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.jobType || ''} onCommit={(v) => commitCandidateField('jobType', v)} placeholder="例: エンジニア" ariaLabel="職種" />
+                    ) : (
+                        <span className="info-value">{c.jobType || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">電話番号</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.phoneNumber || ''} onCommit={(v) => commitCandidateField('phoneNumber', v)} placeholder="例: 090-1234-5678" ariaLabel="電話番号" />
+                    ) : (
+                        <span className="info-value">{c.phoneNumber || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">メールアドレス</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.email || ''} onCommit={(v) => commitCandidateField('email', v)} placeholder="例: taro@example.com" ariaLabel="メールアドレス" />
+                    ) : (
+                        <span className="info-value">{c.email || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">他社状況</span>
+                    {candidateIsOwn ? (
+                        <InlineTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
+                    ) : (
+                        <span className="info-value">{c.otherCompanyStatus || 'N/A'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">入社希望時期</span>
+                    {candidateIsOwn ? (
+                        <input
+                            type="month"
+                            value={c.desiredJoinTiming || ''}
+                            onChange={(e) => commitCandidateField('desiredJoinTiming', e.target.value || undefined)}
+                            aria-label="入社希望時期"
+                        />
+                    ) : (
+                        <span className="info-value">{c.desiredJoinTiming || '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">スカウト返信日</span>
+                    {candidateIsOwn ? (
+                        <input
+                            type="date"
+                            value={c.scoutReplyDate || ''}
+                            onChange={(e) => commitCandidateField('scoutReplyDate', e.target.value || undefined)}
+                            aria-label="スカウト返信日"
+                        />
+                    ) : (
+                        <span className="info-value">{c.scoutReplyDate ? new Date(c.scoutReplyDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
+                    <span className="info-label">初回面談日</span>
+                    {candidateIsOwn ? (
+                        <input
+                            type="date"
+                            value={c.firstInterviewDate || ''}
+                            onChange={(e) => commitCandidateField('firstInterviewDate', e.target.value || undefined)}
+                            aria-label="初回面談日"
+                        />
+                    ) : (
+                        <span className="info-value">{c.firstInterviewDate ? new Date(c.firstInterviewDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
+                    )}
+                </div>
+                <div className="candidate-info-item">
                     <span className="info-label">登録日</span>
                     <span className="info-value">{new Date(c.createdAt).toLocaleDateString('ja-JP')}</span>
                 </div>
@@ -5309,7 +5529,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item summary-item">
                     <span className="info-label">面談要約 (AI)</span>
                     {candidateIsOwn ? (
-                        <InlineTextField multiline rows={4} value={c.interviewSummary || ''} onCommit={(v) => commitCandidateField('interviewSummary', v)} placeholder="面談の音声ファイルをアップロードすると自動生成されます" ariaLabel="面談要約" className="summary-text" />
+                        <InlineTextField multiline rows={16} value={c.interviewSummary || ''} onCommit={(v) => commitCandidateField('interviewSummary', v)} placeholder="面談の音声ファイルをアップロードすると自動生成されます" ariaLabel="面談要約" className="summary-text interview-summary-text" />
                     ) : (
                         <p className="info-value summary-text">{c.interviewSummary || '面談要約はありません。'}</p>
                     )}
@@ -5337,7 +5557,7 @@ const PipelineCandidateCard: React.FC<{
                                     )}
                                 </div>
                                 {candidateIsOwn ? (
-                                    <InlineTextField multiline rows={3} value={memo.content} onCommit={(v) => updateMemo(memo.id, { content: v })} placeholder="メモ内容" ariaLabel="メモ内容" />
+                                    <InlineTextField multiline rows={6} value={memo.content} onCommit={(v) => updateMemo(memo.id, { content: v })} placeholder="メモ内容" ariaLabel="メモ内容" className="memo-content-text" />
                                 ) : (
                                     <p className="info-value summary-text">{memo.content || 'メモはありません。'}</p>
                                 )}
@@ -5548,7 +5768,13 @@ const CandidatePipelineView: React.FC<{
     selectedUserEmail: string | null;
     onSelectedUserEmailChange: (email: string | null) => void;
     isLoadingAggregate: boolean;
-}> = ({ candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId, onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate }) => {
+    isTeamsEditable: boolean;
+    onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
+}> = ({
+    candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
+    onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
+    isTeamsEditable, onToggleTeammateVisibility,
+}) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
@@ -5561,6 +5787,9 @@ const CandidatePipelineView: React.FC<{
     // 時期 by — '' means no filtering.
     const [decisionMonthFilter, setDecisionMonthFilter] = useState('');
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
+    // 自社（エージェント）側の初回面談状況での絞り込み — 企業ごとのPIPELINE_STAGES用の
+    // selectedStageFiltersとは独立した、別軸のフィルター。
+    const [agentInterviewStatusFilter, setAgentInterviewStatusFilter] = useState<'all' | '未面談' | '面談済み'>('all');
     // Narrows the team scope down to specific members (empty = show every member of the
     // selected team). Reset whenever the selected team changes, since a different team's
     // member list makes any previously-checked emails meaningless.
@@ -5715,7 +5944,8 @@ const CandidatePipelineView: React.FC<{
 
         const headers = [
             '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
-            '集客媒体', '他エージェント使用状況', '登録日', '概要',
+            '集客媒体', '年齢', '職種', '電話番号', 'メールアドレス', '他社状況', '入社希望時期',
+            '自社面談状況', 'スカウト返信日', '初回面談日', '他エージェント使用状況', '登録日', '概要',
             '応募企業名', '進捗状況', '次アクション', '意思決定時期', '内定確度', '入社確度',
             '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
@@ -5741,6 +5971,15 @@ const CandidatePipelineView: React.FC<{
                 escapeCSV(candidate.salary),
                 escapeCSV(candidate.expectedAnnualSalary),
                 escapeCSV(candidate.source),
+                escapeCSV(candidate.age),
+                escapeCSV(candidate.jobType),
+                escapeCSV(candidate.phoneNumber),
+                escapeCSV(candidate.email),
+                escapeCSV(candidate.otherCompanyStatus),
+                escapeCSV(candidate.desiredJoinTiming),
+                escapeCSV(candidate.agentInterviewStatus || '未面談'),
+                escapeCSV(candidate.scoutReplyDate),
+                escapeCSV(candidate.firstInterviewDate),
                 candidate.usingOtherAgents ? 'あり' : 'なし',
                 new Date(candidate.createdAt).toLocaleDateString('ja-JP'),
                 escapeCSV(candidate.summary),
@@ -5851,7 +6090,13 @@ const CandidatePipelineView: React.FC<{
 
     const filteredCandidates = useMemo(() => {
         return candidates.filter(c => {
-            const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase());
+            const normalizedSearch = searchTerm.trim().toLowerCase();
+            const matchesSearch = !normalizedSearch
+                || c.name.toLowerCase().includes(normalizedSearch)
+                || c.currentCompany.toLowerCase().includes(normalizedSearch)
+                || (c.jobType || '').toLowerCase().includes(normalizedSearch)
+                || (c.email || '').toLowerCase().includes(normalizedSearch)
+                || (c.phoneNumber || '').includes(normalizedSearch);
             const matchesVisibility = visibilityFilter === 'revival'
                 ? !!c.revival
                 : visibilityFilter === 'hidden'
@@ -5860,6 +6105,8 @@ const CandidatePipelineView: React.FC<{
             const matchesStage = selectedStageFilters.length === 0 || c.applications.some(
                 app => !app.isHidden && selectedStageFilters.includes(app.stage)
             );
+            const matchesAgentInterviewStatus = agentInterviewStatusFilter === 'all'
+                || (c.agentInterviewStatus || '未面談') === agentInterviewStatusFilter;
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
             const matchesDecisionTiming = !decisionMonthFilter || (() => {
@@ -5868,9 +6115,9 @@ const CandidatePipelineView: React.FC<{
                 if (!nearest) return false;
                 return isDateInMonth(nearest, decisionMonthFilter);
             })();
-            return matchesSearch && matchesVisibility && matchesStage && matchesMember && matchesDecisionTiming;
+            return matchesSearch && matchesVisibility && matchesStage && matchesAgentInterviewStatus && matchesMember && matchesDecisionTiming;
         });
-    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, scope, selectedMemberFilters, decisionMonthFilter]);
+    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, agentInterviewStatusFilter, scope, selectedMemberFilters, decisionMonthFilter]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -5885,6 +6132,20 @@ const CandidatePipelineView: React.FC<{
                     if (!dateA) return 1;
                     if (!dateB) return -1;
                     return sortConfig.direction === 'asc' ? dateA.localeCompare(dateB) : dateB.localeCompare(dateA);
+                }
+
+                if (sortConfig.key === 'confidence') {
+                    // Lower confidenceScore = better (see confidenceScore/CONFIDENCE_RANK) —
+                    // 'asc' surfaces the most confident candidates first. No visible application
+                    // at all always sorts last, regardless of direction (nothing to rate yet).
+                    const bestA = getBestConfidenceApplication(a);
+                    const bestB = getBestConfidenceApplication(b);
+                    if (!bestA && !bestB) return 0;
+                    if (!bestA) return 1;
+                    if (!bestB) return -1;
+                    const scoreA = confidenceScore(bestA);
+                    const scoreB = confidenceScore(bestB);
+                    return sortConfig.direction === 'asc' ? scoreA - scoreB : scoreB - scoreA;
                 }
 
                 const valA = a[sortConfig.key];
@@ -5945,6 +6206,7 @@ const CandidatePipelineView: React.FC<{
       { key: 'currentCompany', label: '現職企業名' },
       { key: 'currentSalary', label: '現職年収' },
       { key: 'nearestExpectedDecisionDate', label: '意思決定時期' },
+      { key: 'confidence', label: '確度' },
     ];
 
     return (
@@ -5990,10 +6252,11 @@ const CandidatePipelineView: React.FC<{
                 <div className="pipeline-controls">
                     <input
                         type="text"
-                        placeholder="候補者名で検索..."
+                        placeholder="名前・現職・職種・メール・電話番号で検索..."
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
                         className="search-input"
+                        aria-label="候補者検索"
                     />
                      <select
                         value={csvExportPattern}
@@ -6128,6 +6391,18 @@ const CandidatePipelineView: React.FC<{
                   </details>
                 </div>
                 <div className="pipeline-sort-controls">
+                  <span>自社面談状況:</span>
+                  <button onClick={() => setAgentInterviewStatusFilter('all')} className={agentInterviewStatusFilter === 'all' ? 'active' : ''}>
+                    すべて
+                  </button>
+                  <button onClick={() => setAgentInterviewStatusFilter('未面談')} className={agentInterviewStatusFilter === '未面談' ? 'active' : ''}>
+                    未面談
+                  </button>
+                  <button onClick={() => setAgentInterviewStatusFilter('面談済み')} className={agentInterviewStatusFilter === '面談済み' ? 'active' : ''}>
+                    面談済み
+                  </button>
+                </div>
+                <div className="pipeline-sort-controls">
                   <span>並び替え:</span>
                   {sortOptions.map(opt => (
                      <button
@@ -6209,6 +6484,8 @@ const CandidatePipelineView: React.FC<{
                         onOpenRevivalModal={handleOpenRevivalModal}
                         onRemoveFromRevivalList={handleRemoveFromRevivalList}
                         onMoveRevivalToHidden={handleMoveRevivalToHidden}
+                        isTeamsEditable={isTeamsEditable}
+                        onToggleTeammateVisibility={onToggleTeammateVisibility}
                     />
                 )) : (
                     candidates.length === 0 ? (
@@ -6371,8 +6648,18 @@ const FunnelAnalysisSection: React.FC<{
   // '' = 全ユーザー合計 (existing behavior); a specific email scopes the 見送り・選考辞退・
   // 内定承諾後辞退 発生フェーズ table to just that one member's own candidates.
   const [exitMemberFilter, setExitMemberFilter] = useState<string>('');
+  // 任意の2地点間の歩留まり（例: スカウト返信数→候補者推薦数）— computeConversionRatesは隣接
+  // ステージ間しか出さないため、全体ファネル（全ユーザー合計）表示に対してだけ別途計算する。
+  const [customFromIdx, setCustomFromIdx] = useState(0);
+  const [customToIdx, setCustomToIdx] = useState(0);
 
   const visibleStages = selectedMediaId === 'all' ? FUNNEL_STAGES : MEDIA_FUNNEL_STAGES;
+  // 媒体選択でvisibleStagesの項目数が変わる（GENERAL_KPIS分だけ短くなる）ので、切り替え時に
+  // 選択中の開始/終了インデックスが範囲外にならないようリセットする。
+  useEffect(() => {
+    setCustomFromIdx(0);
+    setCustomToIdx(Math.max(0, visibleStages.length - 1));
+  }, [visibleStages]);
   const mediaScope = useMemo(
     () => (selectedMediaId === 'all' ? allMedia : allMedia.filter(m => m.id === selectedMediaId)),
     [selectedMediaId, allMedia]
@@ -6397,6 +6684,16 @@ const FunnelAnalysisSection: React.FC<{
 
   const totalConversionRates = useMemo(() => computeConversionRates(totalStageValues), [totalStageValues]);
   const bottleneckIndex = useMemo(() => findBottleneckIndex(totalConversionRates), [totalConversionRates]);
+
+  // 任意区間（customFromIdx→customToIdx）の歩留まり。開始地点の件数が0、または終了地点が
+  // 開始地点以前の場合はnull（計算不能）。
+  const customRangeRate = useMemo(() => {
+    if (customToIdx <= customFromIdx) return null;
+    const fromValue = totalStageValues[customFromIdx];
+    const toValue = totalStageValues[customToIdx];
+    if (!fromValue || fromValue <= 0) return null;
+    return (toValue / fromValue) * 100;
+  }, [totalStageValues, customFromIdx, customToIdx]);
 
   // 見送り・選考辞退・内定承諾後辞退 breakdown — kept out of the main sequential funnel (see
   // FUNNEL_EXCLUDED_GENERAL_KPI_KEYS) but still summed here so they can be shown against 候補者
@@ -6633,6 +6930,29 @@ const FunnelAnalysisSection: React.FC<{
               ))}
             </tbody>
           </table>
+        </div>
+
+        <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>任意区間の歩留まり（全体ファネル・{periodLabel}・{mediaLabel}）</h3>
+        <div className="pipeline-sort-controls" style={{ marginBottom: '1.5rem' }}>
+          <span>開始:</span>
+          <select value={customFromIdx} onChange={(e) => setCustomFromIdx(Number(e.target.value))} aria-label="歩留まり計算の開始地点">
+            {visibleStages.map((stage, i) => (
+              <option key={stage.key} value={i}>{stage.label}</option>
+            ))}
+          </select>
+          <span>→ 終了:</span>
+          <select value={customToIdx} onChange={(e) => setCustomToIdx(Number(e.target.value))} aria-label="歩留まり計算の終了地点">
+            {visibleStages.map((stage, i) => (
+              <option key={stage.key} value={i}>{stage.label}</option>
+            ))}
+          </select>
+          <span className="info-value">
+            {customToIdx <= customFromIdx
+              ? '終了地点は開始地点より後のステージを選んでください'
+              : customRangeRate !== null
+              ? `${totalStageValues[customFromIdx]}件 → ${totalStageValues[customToIdx]}件（${customRangeRate.toFixed(1)}%）`
+              : '開始地点の件数が0のため計算できません'}
+          </span>
         </div>
 
         {selectedMediaId === 'all' && (
@@ -8432,6 +8752,30 @@ const App: React.FC = () => {
     setSelectedDate(newDateStr);
   };
 
+  // チーム作成・編集権限保持者による代理での候補者「非表示」切り替え — same optimistic-local-
+  // update-then-fire-and-forget-Drive-write shape as persistMiddleEntry above, but targets the
+  // candidates array via overwriteTeammateCandidateVisibility instead of entries. Requires the
+  // individual 'writer' permission granted to isTeamsEditable holders by the reconciliation effect
+  // above (set up by the TARGET's own client), which only takes effect once their browser has been
+  // open at least once since the team-editor assignment.
+  const persistTeammateCandidateVisibility = (targetEmail: string, candidateId: string, nextIsHidden: boolean) => {
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      const updatedCandidates = target.candidates.map(c => (c.id === candidateId ? { ...c, isHidden: nextIsHidden } : c));
+      return { ...prev, [targetEmail]: { ...target, candidates: updatedCandidates } };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert('対象メンバーのデータファイルが見つかりませんでした。');
+      return;
+    }
+    overwriteTeammateCandidateVisibility<UserData>(targetFileId, candidateId, nextIsHidden).catch(err => {
+      console.error('Failed to save proxy candidate visibility to teammate Drive file', err);
+      alert(`非表示設定の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
   // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
   // writing both scoutsSent and scoutReplies for that one media per date.
   const handleApplyMediaCsvImport = (mediaId: ScoutCsvMediaId, countsByDate: Record<string, ScoutCsvDayCounts>) => {
@@ -8833,21 +9177,31 @@ const App: React.FC = () => {
 
     // Grants/revokes direct Drive write access to MY OWN data file for exactly the ミドル
     // accounts currently eligible to proxy-enter my KPI actuals (share a Team with me and hold
-    // the ミドル role) — re-reconciled whenever team/ミドル assignments change (not just once per
-    // session), so a newly-assigned ミドル doesn't need anyone to reload the app first. The ref
-    // dedupes against the last-applied desired set so this doesn't re-hit the Drive API on every
-    // unrelated re-render.
+    // the ミドル role), PLUS every チーム作成・編集権限保持者 (isTeamsEditable: TEAMS_ADMIN_EMAIL
+    // and anyone in teamsAuthorizedEditors) whenever I myself belong to at least one team — team
+    // editors administer every team (not just ones they're a member of), so unlike ミドル this
+    // grant isn't restricted to editors who happen to share a team with me. This is what lets
+    // persistTeammateCandidateVisibility below actually write to another member's file. Re-
+    // reconciled whenever team/ミドル/editor assignments change (not just once per session), so a
+    // newly-assigned ミドル or editor doesn't need anyone to reload the app first. The ref dedupes
+    // against the last-applied desired set so this doesn't re-hit the Drive API on every unrelated
+    // re-render.
     const lastSyncedMiddlePermsKeyRef = useRef<string>('');
     useEffect(() => {
       if (!currentIdentity || !driveFileId || !teamsConfigLoaded) return;
-      const desired = middleEmails
+      const middleDesired = middleEmails
         .filter(email => email !== currentIdentity.email)
         .filter(email => teams.some(team => team.memberEmails.includes(email) && team.memberEmails.includes(currentIdentity.email)));
+      const iBelongToATeam = teams.some(team => team.memberEmails.includes(currentIdentity.email));
+      const teamEditorDesired = iBelongToATeam
+        ? Array.from(new Set([TEAMS_ADMIN_EMAIL, ...teamsAuthorizedEditors])).filter(email => email !== currentIdentity.email)
+        : [];
+      const desired = Array.from(new Set([...middleDesired, ...teamEditorDesired]));
       const key = `${driveFileId}:${desired.slice().sort().join(',')}`;
       if (lastSyncedMiddlePermsKeyRef.current === key) return;
       lastSyncedMiddlePermsKeyRef.current = key;
-      syncIndividualWriterPermissions(driveFileId, desired).catch(err => console.error('Failed to sync ミドル Drive permissions', err));
-    }, [currentIdentity, driveFileId, teams, middleEmails, teamsConfigLoaded]);
+      syncIndividualWriterPermissions(driveFileId, desired).catch(err => console.error('Failed to sync ミドル/チーム編集者 Drive permissions', err));
+    }, [currentIdentity, driveFileId, teams, middleEmails, teamsAuthorizedEditors, teamsConfigLoaded]);
 
     // 比較するユーザーの選択肢をチーム単位でグルーピング — メンバーが増えるほどフラットな
     // 一覧の表示面積が広がっていくのを防ぐため、チーム→メンバーの2階層で折りたたんで表示する。
@@ -9995,6 +10349,8 @@ const App: React.FC = () => {
                 selectedUserEmail={pipelineSelectedUserEmail}
                 onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
+                isTeamsEditable={isTeamsEditable}
+                onToggleTeammateVisibility={persistTeammateCandidateVisibility}
             />
           </>
         )}
