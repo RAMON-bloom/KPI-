@@ -2302,6 +2302,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者ごとに、自社（エージェント側）の初回面談状況（未面談/面談済み）を切り替えられるバッジを追加。パイプライン一覧を未面談/面談済みで絞り込めるようにした',
       '「非表示」の切り替えを、チーム作成・編集権限保持者であれば所属メンバーの候補者に対しても行えるようにした（それ以外の操作は引き続き本人のみ）',
       '歩留まり分析の全体ファネルに、任意の2地点間（例: スカウト返信数→候補者推薦数）の歩留まりを計算できるセレクトを追加（隣接ステージ間だけでなく、自由に区間を選べるようにした）',
+      '【不具合修正】応募企業や候補者情報の項目数が多いと、候補者カードの詳細表示がfee料率あたりから下が表示されなくなる不具合を修正',
+      '【不具合修正】登録済みの候補者について、Googleドライブから面談ログ（Google Meet議事録）を検索・取込みできるようにした（従来は新規登録時にしかこの機能を使えなかった）',
     ],
   },
   {
@@ -5173,6 +5175,103 @@ const PipelineCandidateCard: React.FC<{
     onSave({ ...c, interviewAudioFile: null, interviewSummary: '' });
   };
 
+  // 面談ログ（Google Meet議事録）検索・取込み — CandidateModal（新規登録時）専用だった機能を、
+  // 登録済み候補者でも使えるようにここに移植したもの。Driveから自動検索して見つけた議事録を
+  // 使うか、見つからない場合は手動でファイル（txt/PDF/Word）をアップロードする。
+  const [isSearchingInterviewLogs, setIsSearchingInterviewLogs] = useState(false);
+  const [interviewLogResults, setInterviewLogResults] = useState<InterviewLogFile[] | null>(null);
+  const [isSummarizingInterviewLog, setIsSummarizingInterviewLog] = useState(false);
+  const [interviewLogDragActive, setInterviewLogDragActive] = useState(false);
+  const interviewLogInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSearchInterviewLogs = async () => {
+    if (!c.name.trim()) return;
+    setIsSearchingInterviewLogs(true);
+    setInterviewLogResults(null);
+    try {
+      const results = await searchInterviewLogsByName(c.name.trim());
+      setInterviewLogResults(results);
+      if (results.length === 0) {
+        alert('Googleドライブ内に該当する面談ログ（Google Meetの議事録）が見つかりませんでした。');
+      }
+    } catch (error) {
+      console.error('Error searching interview logs:', error);
+      alert('面談ログの検索中にエラーが発生しました。');
+    } finally {
+      setIsSearchingInterviewLogs(false);
+    }
+  };
+
+  const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
+    setIsSummarizingInterviewLog(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents });
+      const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
+      onSave({ ...c, interviewSummary: c.interviewSummary ? `${c.interviewSummary}\n\n${entry}` : entry });
+    } catch (error) {
+      console.error('Error summarizing interview log:', error);
+      alert('面談ログの要約生成中にエラーが発生しました。');
+    } finally {
+      setIsSummarizingInterviewLog(false);
+    }
+  };
+
+  const handleUseInterviewLog = async (file: InterviewLogFile) => {
+    try {
+      const text = await exportGoogleDocAsText(file.id);
+      const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
+      await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+      setInterviewLogResults(null);
+    } catch (error) {
+      console.error('Error fetching interview log from Drive:', error);
+      alert('面談ログの取得中にエラーが発生しました。');
+    }
+  };
+
+  const handleInterviewLogFile = async (files: FileList) => {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
+    try {
+      if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
+        const text = await file.text();
+        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+      } else {
+        const base64Data = await fileToBase64(file);
+        await summarizeAndAppendInterviewLog(
+          { parts: [{ inlineData: { mimeType: file.type, data: base64Data } }, { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION }] },
+          file.name,
+          dateLabel
+        );
+      }
+    } catch (error) {
+      console.error('Error reading dropped interview log file:', error);
+      alert('ファイルの読み込み中にエラーが発生しました。');
+    }
+  };
+
+  const handleInterviewLogDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setInterviewLogDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setInterviewLogDragActive(false);
+    }
+  };
+  const handleInterviewLogDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setInterviewLogDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) handleInterviewLogFile(e.dataTransfer.files);
+  };
+  const handleInterviewLogFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.target.files && e.target.files.length > 0) handleInterviewLogFile(e.target.files);
+    e.target.value = '';
+  };
+
   // メモ: c.memos is the source of truth once anything has been saved to it; before that, a
   // legacy single-field interviewMemo (if any) is shown as a stand-in single entry. The very
   // first add/edit/delete folds that legacy value into memos for real and clears interviewMemo.
@@ -5518,6 +5617,64 @@ const PipelineCandidateCard: React.FC<{
                         <span className="info-value">{c.interviewAudioFile ? c.interviewAudioFile.name : '未登録'}</span>
                     )}
                 </div>
+                {candidateIsOwn && (
+                <div className="candidate-info-item summary-item">
+                    <span className="info-label">面談ログ（Google Meet議事録）</span>
+                    <button
+                        type="button"
+                        onClick={handleSearchInterviewLogs}
+                        disabled={isSearchingInterviewLogs || isSummarizingInterviewLog}
+                        className="secondary-action-button"
+                    >
+                        {isSearchingInterviewLogs ? '検索中...' : '候補者名でGoogleドライブを検索'}
+                    </button>
+                    {interviewLogResults && interviewLogResults.length > 0 && (
+                        <ul className="user-management-list" style={{ marginTop: '0.5rem' }}>
+                            {interviewLogResults.map(file => (
+                                <li key={file.id} className="user-management-item">
+                                    <span className="user-management-name">
+                                        {file.name}
+                                        <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>
+                                            {new Date(file.modifiedTime).toLocaleDateString('ja-JP')}
+                                        </span>
+                                    </span>
+                                    <div className="user-management-actions">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleUseInterviewLog(file)}
+                                            disabled={isSummarizingInterviewLog}
+                                            className="save-user-button"
+                                        >
+                                            {isSummarizingInterviewLog ? '要約中...' : 'この面談ログを使う'}
+                                        </button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
+                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Wordファイル）を直接アップロードしてください。
+                    </p>
+                    <div
+                        className={`drop-zone ${interviewLogDragActive ? 'drag-active' : ''}`}
+                        onDragEnter={handleInterviewLogDrag}
+                        onDragLeave={handleInterviewLogDrag}
+                        onDragOver={handleInterviewLogDrag}
+                        onDrop={handleInterviewLogDrop}
+                    >
+                        <input
+                            ref={interviewLogInputRef}
+                            type="file"
+                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            onChange={handleInterviewLogFileChange}
+                            style={{ display: 'none' }}
+                        />
+                        <p onClick={() => interviewLogInputRef.current?.click()}>
+                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx）をドラッグ＆ドロップ、またはクリックして選択'}
+                        </p>
+                    </div>
+                </div>
+                )}
                 <div className="candidate-info-item summary-item">
                     <span className="info-label">概要 (レジュメより)</span>
                     {candidateIsOwn ? (

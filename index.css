@@ -1977,16 +1977,25 @@ button.agent-interview-status-badge:focus-visible {
   align-items: flex-start;
 }
 
-/* --- Candidate Pipeline Detail View --- */
+/* --- Candidate Pipeline Detail View ---
+   Animates open/close via grid-template-rows (0fr -> 1fr) rather than a fixed max-height cap —
+   a fixed cap (formerly max-height: 2000px) clipped everything past it once a candidate had
+   enough applications/fields to exceed it (e.g. several company entries, or long memos), with no
+   visual indication anything was cut off. grid-template-rows always animates to the content's
+   real height, so nothing is ever hidden regardless of how tall the expanded content gets. */
 .candidate-detail-content {
+  display: grid;
+  grid-template-rows: 0fr;
   background-color: #f8f9fa;
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.5s ease-out, padding 0.5s ease-out;
+  transition: grid-template-rows 0.4s ease-out;
 }
 .candidate-detail-content.open {
-  max-height: 2000px;
-  transition: max-height 1s ease-in;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.4s ease-in;
+}
+.candidate-detail-content > .candidate-detail-view {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .candidate-detail-view {
