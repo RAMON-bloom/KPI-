@@ -2306,6 +2306,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】登録済みの候補者について、Googleドライブから面談ログ（Google Meet議事録）を検索・取込みできるようにした（従来は新規登録時にしかこの機能を使えなかった）',
       '候補者情報の編集項目の見た目を刷新。常に入力ボックスとして表示するのをやめ、通常はカードに埋め込まれたテキストとして表示し、クリックした時だけ編集できるようにした（テキスト・数値・プルダウン・日付/年月の各項目が対象）',
       '候補者カードの「ぱっと見」表示（現職・学歴・現年収・媒体・年齢・確度・職種・他社状況・入社希望・電話番号・メール）を、詳細を表示せずにその場でクリックして編集できるようにした',
+      '候補者カードの「選考状況」バッジも、詳細を表示せずにその場でクリックして進捗状況を更新できるようにした',
     ],
   },
   {
@@ -5205,6 +5206,49 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
+// The 選考状況 badge shown in a candidate card's collapsed "ぱっと見" summary — click-to-edit
+// like the other dashboard fields, but keeps the colored-pill look in both modes (reusing
+// .status-badge-clickable and .status-badge-select, the same classes the 進捗状況 field in the
+// expanded detail view already uses) rather than falling back to the plain-text .editable-value
+// look, since a status badge without its stage color would lose its at-a-glance meaning.
+const ApplicationStageBadge: React.FC<{
+  app: CompanyApplication;
+  onCommitStage: (stage: PipelineStage) => void;
+}> = ({ app, onCommitStage }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const selectRef = useRef<HTMLSelectElement>(null);
+  useEffect(() => { if (isEditing) selectRef.current?.focus(); }, [isEditing]);
+
+  if (isEditing) {
+    return (
+      <select
+        ref={selectRef}
+        value={app.stage}
+        onChange={(e) => { onCommitStage(e.target.value as PipelineStage); setIsEditing(false); }}
+        onBlur={() => setIsEditing(false)}
+        style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
+        className="status-badge-select"
+        aria-label={`${app.companyName}の進捗状況`}
+      >
+        {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
+      </select>
+    );
+  }
+  return (
+    <span
+      className="status-badge status-badge-clickable"
+      style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
+      title={`${app.companyName}: ${app.stage}（クリックして更新）`}
+      role="button"
+      tabIndex={0}
+      onClick={() => setIsEditing(true)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsEditing(true); } }}
+    >
+      {app.companyName}: {app.stage}
+    </span>
+  );
+};
+
 const formatMemoTimestamp = (iso: string): string =>
   new Date(iso).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
@@ -5638,14 +5682,22 @@ const PipelineCandidateCard: React.FC<{
                 <div className="summary-badges">
                     {visibleApplications.length > 0 ? (
                         visibleApplications.map(app => (
-                            <span
-                                key={app.id}
-                                className="status-badge"
-                                style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                title={`${app.companyName}: ${app.stage}`}
-                            >
-                                {app.companyName}: {app.stage}
-                            </span>
+                            candidateIsOwn ? (
+                                <ApplicationStageBadge
+                                    key={app.id}
+                                    app={app}
+                                    onCommitStage={(stage) => commitApplicationField(app.id, { stage })}
+                                />
+                            ) : (
+                                <span
+                                    key={app.id}
+                                    className="status-badge"
+                                    style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
+                                    title={`${app.companyName}: ${app.stage}`}
+                                >
+                                    {app.companyName}: {app.stage}
+                                </span>
+                            )
                         ))
                     ) : (
                         <span className="no-status">未登録</span>
