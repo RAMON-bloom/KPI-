@@ -2347,6 +2347,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ヘッダーの事業部切り替え（BCA/F+/AC）の初期表示を、これまで常に「BCA」だったのを、ログインユーザー自身の所属部署（F+またはAC）があればそれを初期選択するように変更（未所属の場合は従来通りBCA）',
       '【不具合修正】候補者カードの詳細表示を閉じた際、詳細エリアの内側の余白ぶんがわずかに見えてしまっていた不具合を修正',
       'ヘッダーに「お問い合わせ」ボタンを追加。バグ報告・改善要望を誰でも投稿でき、全ユーザーが投稿を閲覧できる（社内掲示板形式）。開発者は返信・ステータス変更（未対応/対応予定/対応済み/対応しない）・投稿の削除ができる',
+      '【不具合修正】全ユーザー/チーム別ダッシュボードの「現在の開閉状態をデフォルトとして保存」が、保存した本人の次回ログイン時に反映されない不具合を修正（保存自体はできていたが、再読み込み時に設定が失われていた）',
+      'チーム別タブにも、任意のメンバーを選択して進捗を絞り込める機能を追加（全ユーザータブの「比較するユーザー」と同様。未選択の場合はチーム全員を表示）',
     ],
   },
   {
@@ -8679,6 +8681,11 @@ const App: React.FC = () => {
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
   // specific users to compare, independent of the formal Team groupings.
   const [comparisonUserEmails, setComparisonUserEmails] = useState<string[]>([]);
+  // Same idea as comparisonUserEmails, but scoped to チーム別 tab's currently selected team —
+  // empty means "show every member of this team". Reset whenever the selected team changes (see
+  // the effect near selectedTeamMemberEmails below) so a stale selection from a previous team
+  // never silently narrows the newly-selected one.
+  const [teamComparisonUserEmails, setTeamComparisonUserEmails] = useState<string[]>([]);
   const [customExportStartDate, setCustomExportStartDate] = useState('');
   const [customExportEndDate, setCustomExportEndDate] = useState('');
   // Reuses the same start/end fields the custom-period CSV export already had: once explicitly
@@ -8883,6 +8890,10 @@ const App: React.FC = () => {
       dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
       displayName: d.displayName || currentIdentity.name,
       feedbackPosts: d.feedbackPosts || [],
+      // 抜けていた不具合修正: このフィールドが無いと「現在の開閉状態をデフォルトとして保存」が
+      // 次回ログイン時に反映されない（保存自体はDriveへ届くが、再読み込み時にnormalize()で
+      // 毎回消えていたため、適用エフェクトが常に「保存済みデフォルトなし」と見えていた）。
+      allUsersSectionDefaults: d.allUsersSectionDefaults,
     });
 
     const cached = readLocalCache<UserData>(email);
@@ -10243,6 +10254,32 @@ const App: React.FC = () => {
     return Array.from(new Set(resolved)).filter(isEmailInSelectedDivision);
   }, [teams, selectedTeamId, displayedAllUsersData, isEmailInSelectedDivision]);
 
+  // A stale per-member selection from a previously-viewed team would otherwise silently narrow
+  // (or entirely empty out, if none of its emails overlap) the newly-selected team's dashboard.
+  useEffect(() => { setTeamComparisonUserEmails([]); }, [selectedTeamId]);
+
+  // Options for the チーム別 tab's member checkboxes — a flat list (unlike 全ユーザー's
+  // comparisonTeamGroups) since every member here already belongs to the one selected team.
+  const teamComparisonUserOptions = useMemo(() => {
+    return selectedTeamMemberEmails
+      .filter(email => displayedAllUsersData[email])
+      .map(email => ({ email, label: displayedAllUsersData[email]?.displayName || email }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+  }, [selectedTeamMemberEmails, displayedAllUsersData]);
+
+  // Empty selection means "show every member of this team" (same convention as comparisonUsers).
+  const teamComparisonUsers = useMemo(() => {
+    const inTeam = teamComparisonUserOptions.map(u => u.email);
+    if (teamComparisonUserEmails.length === 0) return inTeam;
+    return inTeam.filter(email => teamComparisonUserEmails.includes(email));
+  }, [teamComparisonUserOptions, teamComparisonUserEmails]);
+
+  const toggleTeamComparisonUser = (email: string) => {
+    setTeamComparisonUserEmails(prev =>
+      prev.includes(email) ? prev.filter(e => e !== email) : [...prev, email]
+    );
+  };
+
   const dayOfWeekReplyRateData = useMemo(() => {
     const days = ['日', '月', '火', '水', '木', '金', '土'];
     const scoutsByDay = Array(7).fill(0);
@@ -11185,8 +11222,7 @@ const App: React.FC = () => {
                 <button
                   onClick={() => {
                     const teamName = teams.find(t => t.id === selectedTeamId)?.name || 'チーム';
-                    const teamUsers = selectedTeamMemberEmails.filter(email => displayedAllUsersData[email]);
-                    handleExportTeamProgress(teamName, teamUsers);
+                    handleExportTeamProgress(teamName, teamComparisonUsers);
                   }}
                   disabled={!selectedTeamId}
                   className="export-button"
@@ -11196,6 +11232,29 @@ const App: React.FC = () => {
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
             </div>
+            {selectedTeamId && teamComparisonUserOptions.length > 0 && (
+              <div className="comparison-user-selector">
+                <div className="comparison-user-selector-header">
+                  <span>メンバーを選択（未選択の場合は全員を表示）</span>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button onClick={() => setTeamComparisonUserEmails(teamComparisonUserOptions.map(u => u.email))} className="secondary-action-button">全て選択</button>
+                    <button onClick={() => setTeamComparisonUserEmails([])} className="secondary-action-button">選択をクリア</button>
+                  </div>
+                </div>
+                <div className="comparison-user-checkbox-list">
+                  {teamComparisonUserOptions.map(u => (
+                    <label key={u.email} className="comparison-user-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={teamComparisonUserEmails.includes(u.email)}
+                        onChange={() => toggleTeamComparisonUser(u.email)}
+                      />
+                      {u.label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="custom-period-export-bar">
               <span>表示・出力期間（未入力の場合は今月）:</span>
               <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
@@ -11213,7 +11272,7 @@ const App: React.FC = () => {
               <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
             ) : (
               <AllUsersDashboard
-                  users={selectedTeamMemberEmails.filter(email => displayedAllUsersData[email])}
+                  users={teamComparisonUsers}
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
