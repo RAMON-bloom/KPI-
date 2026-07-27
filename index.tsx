@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -639,6 +639,37 @@ interface UserData {
   // sign-in (see the seeding effect near sectionVisibility) so later in-session toggles aren't
   // clobbered by re-applying this same saved value on every unrelated data change.
   allUsersSectionDefaults?: Partial<Record<Extract<SectionVisibilityKeys, `allUsers${string}`>, boolean>>;
+  // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
+  // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
+  // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
+  // overwriteTeammateFeedbackPost（persistTeammateCandidateVisibilityと同じ代理書き込み
+  // パターン）で行う。
+  feedbackPosts?: FeedbackPost[];
+}
+
+// バグ報告・改善要望の種別とステータス。STAGE_COLOR_MAPと同じ考え方で、白文字と組み合わせて
+// 十分なコントラストが出る色のみを選んでいる（打診バッジの視認性修正時の教訓）。
+type FeedbackCategory = 'bug' | 'improvement';
+const FEEDBACK_CATEGORY_LABELS: Record<FeedbackCategory, string> = { bug: 'バグ報告', improvement: '改善要望' };
+const FEEDBACK_CATEGORY_COLOR_MAP: Record<FeedbackCategory, string> = { bug: 'crimson', improvement: '#0d6efd' };
+
+const FEEDBACK_STATUSES = ['未対応', '対応予定', '対応済み', '対応しない'] as const;
+type FeedbackStatus = typeof FEEDBACK_STATUSES[number];
+const FEEDBACK_STATUS_COLOR_MAP: Record<FeedbackStatus, string> = {
+  '未対応': '#495057',
+  '対応予定': '#fd7e14',
+  '対応済み': '#198754',
+  '対応しない': '#6c757d',
+};
+
+interface FeedbackPost {
+  id: string;
+  category: FeedbackCategory;
+  content: string;
+  createdAt: string;
+  status: FeedbackStatus;
+  developerReply?: string;
+  repliedAt?: string;
 }
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
@@ -2315,6 +2346,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者詳細のメモ（複数追加できるメモ欄）と、選考企業ごとのメモの近くに拡大表示ボタンを追加。クリックすると、大きさを自由に変更できるポップアップウィンドウでメモを表示・編集できるようにした',
       'ヘッダーの事業部切り替え（BCA/F+/AC）の初期表示を、これまで常に「BCA」だったのを、ログインユーザー自身の所属部署（F+またはAC）があればそれを初期選択するように変更（未所属の場合は従来通りBCA）',
       '【不具合修正】候補者カードの詳細表示を閉じた際、詳細エリアの内側の余白ぶんがわずかに見えてしまっていた不具合を修正',
+      'ヘッダーに「お問い合わせ」ボタンを追加。バグ報告・改善要望を誰でも投稿でき、全ユーザーが投稿を閲覧できる（社内掲示板形式）。開発者は返信・ステータス変更（未対応/対応予定/対応済み/対応しない）・投稿の削除ができる',
     ],
   },
   {
@@ -2491,6 +2523,119 @@ const ChangelogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
     </div>
   </div>
 );
+
+// お問い合わせ（バグ報告・改善要望）— 社内掲示板形式。全ユーザーが全員の投稿を閲覧でき、
+// 新規投稿は誰でもできる。返信・ステータス変更・削除は isDeveloper（TEAMS_ADMIN_EMAIL）のみ。
+const FeedbackModal: React.FC<{
+  posts: (FeedbackPost & { authorEmail: string; authorLabel: string })[];
+  isDeveloper: boolean;
+  onSubmit: (category: FeedbackCategory, content: string) => void;
+  onReply: (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => void;
+  onSetStatus: (authorEmail: string, postId: string, status: FeedbackStatus) => void;
+  onDelete: (authorEmail: string, postId: string) => void;
+  onClose: () => void;
+}> = ({ posts, isDeveloper, onSubmit, onReply, onSetStatus, onDelete, onClose }) => {
+  const [category, setCategory] = useState<FeedbackCategory>('bug');
+  const [content, setContent] = useState('');
+  // 開発者の返信下書き。postIdごとに保持し、まだ触っていない投稿は既存のdeveloperReplyを
+  // 初期値として表示する。
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!content.trim()) return;
+    onSubmit(category, content.trim());
+    setContent('');
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="feedback-modal-title">
+      <div className="modal-content feedback-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="feedback-modal-title">お問い合わせ（バグ報告・改善要望）</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <form onSubmit={handleSubmit} className="feedback-form">
+            <div className="form-group">
+              <label htmlFor="feedback-category">種別</label>
+              <select id="feedback-category" value={category} onChange={e => setCategory(e.target.value as FeedbackCategory)}>
+                <option value="bug">バグ報告</option>
+                <option value="improvement">改善要望</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="feedback-content">内容</label>
+              <textarea
+                id="feedback-content"
+                value={content}
+                onChange={e => setContent(e.target.value)}
+                rows={4}
+                placeholder="バグの再現手順や、改善してほしい内容を具体的にご記入ください"
+                required
+              />
+            </div>
+            <button type="submit" className="submit-button">投稿する</button>
+          </form>
+          <div className="feedback-list">
+            {posts.length === 0 && <p className="no-data-message">まだ投稿がありません。</p>}
+            {posts.map(post => (
+              <div key={post.id} className="feedback-post">
+                <div className="feedback-post-header">
+                  <span className="status-badge" style={{ '--badge-color': FEEDBACK_CATEGORY_COLOR_MAP[post.category] } as React.CSSProperties}>
+                    {FEEDBACK_CATEGORY_LABELS[post.category]}
+                  </span>
+                  <span className="feedback-post-author">{post.authorLabel}</span>
+                  <span className="feedback-post-date">{new Date(post.createdAt).toLocaleString('ja-JP')}</span>
+                  <span className="status-badge" style={{ '--badge-color': FEEDBACK_STATUS_COLOR_MAP[post.status] } as React.CSSProperties}>
+                    {post.status}
+                  </span>
+                  {isDeveloper && (
+                    <button type="button" onClick={() => onDelete(post.authorEmail, post.id)} className="remove-file-button" aria-label="この投稿を削除">&times;</button>
+                  )}
+                </div>
+                <p className="feedback-post-content">{post.content}</p>
+                {isDeveloper ? (
+                  <div className="feedback-developer-controls">
+                    <select
+                      value={post.status}
+                      onChange={e => onSetStatus(post.authorEmail, post.id, e.target.value as FeedbackStatus)}
+                      aria-label="ステータス"
+                    >
+                      {FEEDBACK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <textarea
+                      value={replyDrafts[post.id] ?? post.developerReply ?? ''}
+                      onChange={e => setReplyDrafts(prev => ({ ...prev, [post.id]: e.target.value }))}
+                      rows={2}
+                      placeholder="返信を入力"
+                      aria-label="返信内容"
+                    />
+                    <button
+                      type="button"
+                      className="secondary-action-button"
+                      onClick={() => onReply(post.authorEmail, post.id, (replyDrafts[post.id] ?? post.developerReply ?? '').trim(), post.status)}
+                    >
+                      返信を保存
+                    </button>
+                  </div>
+                ) : (
+                  post.developerReply && (
+                    <div className="feedback-reply">
+                      <span className="feedback-reply-label">開発者からの返信:</span>
+                      <p>{post.developerReply}</p>
+                      {post.repliedAt && <span className="feedback-post-date">{new Date(post.repliedAt).toLocaleString('ja-JP')}</span>}
+                    </div>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 
 const TeamsModal: React.FC<{
@@ -8529,6 +8674,7 @@ const App: React.FC = () => {
   // dropdown above 実績カレンダー (personal_kpi tab only).
   const [middleEntryTargetEmail, setMiddleEntryTargetEmail] = useState('');
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
+  const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
   // specific users to compare, independent of the formal Team groupings.
@@ -8736,6 +8882,7 @@ const App: React.FC = () => {
       weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
       dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
       displayName: d.displayName || currentIdentity.name,
+      feedbackPosts: d.feedbackPosts || [],
     });
 
     const cached = readLocalCache<UserData>(email);
@@ -8827,6 +8974,7 @@ const App: React.FC = () => {
           weeklyKpiTargets: { ...defaultKpiTargets, ...(data.weeklyKpiTargets || {}) },
           dailyKpiTargets: { ...defaultKpiTargets, ...(data.dailyKpiTargets || {}) },
           displayName: data.displayName,
+          feedbackPosts: data.feedbackPosts || [],
         };
         fileIds[email] = teammateFileId;
       });
@@ -8849,12 +8997,13 @@ const App: React.FC = () => {
     const currentUserIsMiddleWithTeam = !!currentIdentity && middleEmails.includes(currentIdentity.email) && teams.some(t => t.memberEmails.includes(currentIdentity.email));
     const needsAggregateData =
       view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen ||
+      isFeedbackModalOpen ||
       (view === 'personal_kpi' && currentUserIsMiddleWithTeam);
     if (!needsAggregateData || !isInitialized || !currentIdentity) return;
     if (hasFetchedAllUsersRef.current) return;
     hasFetchedAllUsersRef.current = true;
     fetchAllUsersData();
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, middleEmails, teams]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isFeedbackModalOpen, middleEmails, teams]);
 
   // Loads unconditionally after sign-in (like the media config below), not gated by
   // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
@@ -8895,6 +9044,9 @@ const App: React.FC = () => {
   // regardless of who originally created it.
   const isTeamsAdmin = currentIdentity?.email === TEAMS_ADMIN_EMAIL;
   const isTeamsEditable = isTeamsAdmin || (!!currentIdentity && teamsAuthorizedEditors.includes(currentIdentity.email));
+  // 「お問い合わせ」への返信・ステータス変更・削除ができる開発者権限。現状はTEAMS_ADMIN_EMAILと
+  // 同一だが、意味合いが異なるため別名で持たせている。
+  const isDeveloper = currentIdentity?.email === TEAMS_ADMIN_EMAIL;
 
   // Load the shared media list once per sign-in. Unlike Teams, this is required for the KPI
   // forms to render at all, so it loads unconditionally after login (not gated by view/modal).
@@ -9081,6 +9233,74 @@ const App: React.FC = () => {
     if (!currentIdentity || !currentUserData) return allUsersData;
     return { ...allUsersData, [currentIdentity.email]: currentUserData };
   }, [allUsersData, currentIdentity, currentUserData]);
+
+  // お問い合わせ掲示板: displayedAllUsersData の全員分の feedbackPosts をフラット化し、投稿者
+  // 情報を付与して新しい順に並べたもの。誰の投稿も全員が閲覧できる仕様のため、事業部フィルター
+  // は適用しない。
+  const allFeedbackPosts = useMemo(() => {
+    const posts: (FeedbackPost & { authorEmail: string; authorLabel: string })[] = [];
+    Object.entries(displayedAllUsersData).forEach(([email, data]: [string, UserData]) => {
+      (data.feedbackPosts || []).forEach(post => {
+        posts.push({ ...post, authorEmail: email, authorLabel: data.displayName || email });
+      });
+    });
+    return posts.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [displayedAllUsersData]);
+
+  const handleSubmitFeedback = (category: FeedbackCategory, content: string) => {
+    const newPost: FeedbackPost = {
+      id: `feedback_${Date.now()}`,
+      category,
+      content,
+      createdAt: new Date().toISOString(),
+      status: '未対応',
+    };
+    setCurrentUserData(prev => (prev ? { ...prev, feedbackPosts: [...(prev.feedbackPosts || []), newPost] } : prev));
+  };
+
+  // 開発者による他ユーザーの投稿への返信・ステータス変更・削除 — persistTeammateCandidateVisibility
+  // と同じ、楽観的ローカル更新 + fire-and-forgetのDrive書き込みパターン。投稿者本人（＝開発者自身
+  // の投稿）の場合は自分のUserDataを更新するだけでよい。patch=nullは投稿の削除を意味する。
+  const persistFeedbackUpdate = (authorEmail: string, postId: string, patch: Partial<FeedbackPost> | null) => {
+    if (currentIdentity && authorEmail === currentIdentity.email) {
+      setCurrentUserData(prev => {
+        if (!prev) return prev;
+        const posts = prev.feedbackPosts || [];
+        const updated = patch === null ? posts.filter(p => p.id !== postId) : posts.map(p => (p.id === postId ? { ...p, ...patch } : p));
+        return { ...prev, feedbackPosts: updated };
+      });
+      return;
+    }
+    setAllUsersData(prev => {
+      const target = prev[authorEmail];
+      if (!target) return prev;
+      const posts = target.feedbackPosts || [];
+      const updated = patch === null ? posts.filter(p => p.id !== postId) : posts.map(p => (p.id === postId ? { ...p, ...patch } : p));
+      return { ...prev, [authorEmail]: { ...target, feedbackPosts: updated } };
+    });
+    const targetFileId = driveFileIdByEmail[authorEmail];
+    if (!targetFileId) {
+      alert('投稿者のデータファイルが見つかりませんでした。');
+      return;
+    }
+    overwriteTeammateFeedbackPost<UserData>(targetFileId, postId, patch as Record<string, unknown> | null).catch(err => {
+      console.error('Failed to save feedback update to author Drive file', err);
+      alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
+  const handleReplyFeedback = (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => {
+    persistFeedbackUpdate(authorEmail, postId, { developerReply: reply, status, repliedAt: new Date().toISOString() });
+  };
+
+  const handleSetFeedbackStatus = (authorEmail: string, postId: string, status: FeedbackStatus) => {
+    persistFeedbackUpdate(authorEmail, postId, { status });
+  };
+
+  const handleDeleteFeedback = (authorEmail: string, postId: string) => {
+    if (!confirm('この投稿を削除しますか？')) return;
+    persistFeedbackUpdate(authorEmail, postId, null);
+  };
 
   // Division-switcher filter for 全ユーザー/チーム別/パイプライン(全ユーザー) — 'BCA' (the
   // default) shows everyone combined; selecting F+ or AC narrows to only members explicitly
@@ -9865,11 +10085,13 @@ const App: React.FC = () => {
     // and anyone in teamsAuthorizedEditors) whenever I myself belong to at least one team — team
     // editors administer every team (not just ones they're a member of), so unlike ミドル this
     // grant isn't restricted to editors who happen to share a team with me. This is what lets
-    // persistTeammateCandidateVisibility below actually write to another member's file. Re-
-    // reconciled whenever team/ミドル/editor assignments change (not just once per session), so a
-    // newly-assigned ミドル or editor doesn't need anyone to reload the app first. The ref dedupes
-    // against the last-applied desired set so this doesn't re-hit the Drive API on every unrelated
-    // re-render.
+    // persistTeammateCandidateVisibility below actually write to another member's file. PLUS
+    // TEAMS_ADMIN_EMAIL unconditionally (independent of team membership) — 「お問い合わせ」への
+    // 返信・ステータス変更・削除（persistFeedbackUpdate）は誰の投稿にも及ぶため、チームに
+    // 所属していないユーザーの投稿にも開発者が書き込める必要がある。Re-reconciled whenever
+    // team/ミドル/editor assignments change (not just once per session), so a newly-assigned
+    // ミドル or editor doesn't need anyone to reload the app first. The ref dedupes against the
+    // last-applied desired set so this doesn't re-hit the Drive API on every unrelated re-render.
     const lastSyncedMiddlePermsKeyRef = useRef<string>('');
     useEffect(() => {
       if (!currentIdentity || !driveFileId || !teamsConfigLoaded) return;
@@ -9878,13 +10100,14 @@ const App: React.FC = () => {
         .filter(email => teams.some(team => team.memberEmails.includes(email) && team.memberEmails.includes(currentIdentity.email)));
       const iBelongToATeam = teams.some(team => team.memberEmails.includes(currentIdentity.email));
       const teamEditorDesired = iBelongToATeam
-        ? Array.from(new Set([TEAMS_ADMIN_EMAIL, ...teamsAuthorizedEditors])).filter(email => email !== currentIdentity.email)
+        ? teamsAuthorizedEditors.filter(email => email !== currentIdentity.email && email !== TEAMS_ADMIN_EMAIL)
         : [];
-      const desired = Array.from(new Set([...middleDesired, ...teamEditorDesired]));
+      const adminDesired = currentIdentity.email === TEAMS_ADMIN_EMAIL ? [] : [TEAMS_ADMIN_EMAIL];
+      const desired = Array.from(new Set([...middleDesired, ...teamEditorDesired, ...adminDesired]));
       const key = `${driveFileId}:${desired.slice().sort().join(',')}`;
       if (lastSyncedMiddlePermsKeyRef.current === key) return;
       lastSyncedMiddlePermsKeyRef.current = key;
-      syncIndividualWriterPermissions(driveFileId, desired).catch(err => console.error('Failed to sync ミドル/チーム編集者 Drive permissions', err));
+      syncIndividualWriterPermissions(driveFileId, desired).catch(err => console.error('Failed to sync ミドル/チーム編集者/開発者 Drive permissions', err));
     }, [currentIdentity, driveFileId, teams, middleEmails, teamsAuthorizedEditors, teamsConfigLoaded]);
 
     // 比較するユーザーの選択肢をチーム単位でグルーピング — メンバーが増えるほどフラットな
@@ -10228,6 +10451,17 @@ const App: React.FC = () => {
       {isChangelogModalOpen && (
         <ChangelogModal onClose={() => setIsChangelogModalOpen(false)} />
       )}
+      {isFeedbackModalOpen && (
+        <FeedbackModal
+          posts={allFeedbackPosts}
+          isDeveloper={isDeveloper}
+          onSubmit={handleSubmitFeedback}
+          onReply={handleReplyFeedback}
+          onSetStatus={handleSetFeedbackStatus}
+          onDelete={handleDeleteFeedback}
+          onClose={() => setIsFeedbackModalOpen(false)}
+        />
+      )}
       {isMediaModalOpen && (
         <MediaModal
           allMedia={allMedia}
@@ -10355,6 +10589,7 @@ const App: React.FC = () => {
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
             <button onClick={() => setIsChangelogModalOpen(true)}>更新履歴</button>
+            <button onClick={() => setIsFeedbackModalOpen(true)}>お問い合わせ</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>
           </div>
         </div>

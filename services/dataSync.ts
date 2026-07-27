@@ -410,6 +410,30 @@ export async function overwriteTeammateCandidateVisibility<T extends { candidate
   return updated;
 }
 
+/**
+ * 開発者（TEAMS_ADMIN_EMAIL）による、他ユーザーの「お問い合わせ」投稿への返信・ステータス
+ * 変更・削除: fetches the target user's LATEST data (same re-fetch-before-write pattern as
+ * overwriteTeammateEntry/overwriteTeammateCandidateVisibility, to avoid clobbering a concurrent
+ * save), then either merges `patch` into the matching post or, if `patch` is null, removes it.
+ * Requires this fileId to already have been granted direct 'writer' access to the signed-in
+ * account (see syncIndividualWriterPermissions) — otherwise the underlying Drive write fails
+ * with 403.
+ */
+export async function overwriteTeammateFeedbackPost<T extends { feedbackPosts?: any[] } = any>(
+  driveFileId: string,
+  postId: string,
+  patch: Record<string, unknown> | null
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const posts = latest.feedbackPosts || [];
+  const updatedPosts = patch === null
+    ? posts.filter((p: any) => p.id !== postId)
+    : posts.map((p: any) => (p.id === postId ? { ...p, ...patch } : p));
+  const updated = { ...latest, feedbackPosts: updatedPosts };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
 export interface TeamsConfigResult<T> {
   data: T | null;
   driveFileId: string | null;
