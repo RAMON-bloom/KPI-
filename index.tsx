@@ -279,7 +279,7 @@ type ConfidenceGrade = typeof CONFIDENCE_GRADES[number];
 const CONFIDENCE_RANK: Record<ConfidenceGrade, number> = { 'A': 0, 'B+': 1, 'B': 2, 'B-': 3, 'C': 4 };
 
 const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
-    '打診': 'grey',
+    '打診': '#495057',
     '書類選考': 'cadetblue',
     '適性検査': 'mediumpurple',
     'カジュアル面談': 'lightblue',
@@ -2310,6 +2310,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '「選考フェーズで絞り込み」ドロップダウンを、外側をクリックしても閉じられるようにした',
       '候補者カードの「ぱっと見」表示に「見込み月」を追加し、詳細を開かずに編集できるようにした',
       '電話番号・メールアドレスは個人情報のため既定でマスク表示にし、候補者ごとに「表示」ボタンで表示できるようにした（掘り起しリスト表示中のみ、一括で表示/非表示を切り替えるボタンも追加）',
+      '【不具合修正】選考トラックの「打診」フェーズの色を、白文字が読みにくかった灰色からコントラストの高い色に変更し、日時表示の薄さ(半透明)もやめて濃く表示するようにした',
+      '【不具合修正】選考企業を新規追加する際に「進捗状況」を打診以外（1次面接など）から選んだ場合、選考トラックに反映されず「打診」のまま表示されてしまう不具合を修正',
     ],
   },
   {
@@ -3216,12 +3218,26 @@ const CandidateModal: React.FC<{
         setCandidate(prev => ({ ...prev, [name]: numericFields.includes(name) ? Number(value) : value }));
     };
 
+    // Applications that already existed when this modal opened (real stageHistory, possibly
+    // already advanced) — used by handleApplicationChange below to tell them apart from rows
+    // added this session via addApplication, which still only have their single seed entry.
+    const initialApplicationIdsRef = useRef<Set<string>>(new Set((initialData?.applications || []).map(a => a.id)));
+
     const handleApplicationChange = (index: number, field: keyof CompanyApplication, value: string) => {
         const newApplications = [...candidate.applications];
         const parsedValue: string | number | undefined = field === 'feeRate'
             ? (value === '' ? undefined : Number(value))
             : value;
-        newApplications[index] = { ...newApplications[index], [field]: parsedValue };
+        const target = { ...newApplications[index], [field]: parsedValue };
+        if (field === 'stage' && !initialApplicationIdsRef.current.has(target.id)) {
+            // Brand-new application row not yet saved — keep the seed 選考トラック entry in
+            // sync with whatever starting stage is picked here (e.g. skipping straight to
+            // 1次面接), so the track reflects where the application actually began instead of
+            // always showing 打診. Existing applications are left untouched here; their real
+            // transition is recorded by computeStageAdvanceUpdate when the form is saved.
+            target.stageHistory = [{ stage: value as PipelineStage, date: target.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }];
+        }
+        newApplications[index] = target;
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
 
@@ -4036,6 +4052,17 @@ const ApplicationModal: React.FC<{
         const { name, value } = e.target;
         if (name === 'feeRate') {
             setApplication(prev => ({ ...prev, feeRate: value === '' ? undefined : Number(value) }));
+            return;
+        }
+        if (name === 'stage' && !initialData) {
+            // Adding a brand-new application — keep the seed 選考トラック entry in sync with
+            // whatever starting stage is picked here (e.g. skipping straight to 1次面接), so the
+            // track reflects where the application actually began instead of always showing 打診.
+            setApplication(prev => ({
+                ...prev,
+                stage: value as PipelineStage,
+                stageHistory: [{ stage: value as PipelineStage, date: prev.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }],
+            }));
             return;
         }
         setApplication(prev => ({ ...prev, [name]: value }));
