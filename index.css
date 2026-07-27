@@ -2017,12 +2017,15 @@ button.agent-interview-status-badge:focus-visible {
    real height, so nothing is ever hidden regardless of how tall the expanded content gets. */
 .candidate-detail-content {
   display: grid;
-  grid-template-rows: 0fr;
+  /* minmax(0, ...) matters here — a bare "0fr" track still takes its automatic minimum size from
+     the row's content (the padded .candidate-detail-view below), so without this the collapsed
+     card kept a sliver of the detail panel's padding visible along the bottom edge. */
+  grid-template-rows: minmax(0, 0fr);
   background-color: #f8f9fa;
   transition: grid-template-rows 0.4s ease-out;
 }
 .candidate-detail-content.open {
-  grid-template-rows: 1fr;
+  grid-template-rows: minmax(0, 1fr);
   transition: grid-template-rows 0.4s ease-in;
 }
 .candidate-detail-content > .candidate-detail-view {
