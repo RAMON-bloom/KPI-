@@ -2307,6 +2307,9 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者情報の編集項目の見た目を刷新。常に入力ボックスとして表示するのをやめ、通常はカードに埋め込まれたテキストとして表示し、クリックした時だけ編集できるようにした（テキスト・数値・プルダウン・日付/年月の各項目が対象）',
       '候補者カードの「ぱっと見」表示（現職・学歴・現年収・媒体・年齢・確度・職種・他社状況・入社希望・電話番号・メール）を、詳細を表示せずにその場でクリックして編集できるようにした',
       '候補者カードの「選考状況」バッジも、詳細を表示せずにその場でクリックして進捗状況を更新できるようにした',
+      '「選考フェーズで絞り込み」ドロップダウンを、外側をクリックしても閉じられるようにした',
+      '候補者カードの「ぱっと見」表示に「見込み月」を追加し、詳細を開かずに編集できるようにした',
+      '電話番号・メールアドレスは個人情報のため既定でマスク表示にし、候補者ごとに「表示」ボタンで表示できるようにした（掘り起しリスト表示中のみ、一括で表示/非表示を切り替えるボタンも追加）',
     ],
   },
   {
@@ -5252,6 +5255,46 @@ const ApplicationStageBadge: React.FC<{
 const formatMemoTimestamp = (iso: string): string =>
   new Date(iso).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
+// Masks a phone number/email to a fixed-length bullet string — deliberately doesn't preserve any
+// of the original characters (not even a prefix/suffix), since a partial mask can still leak
+// enough to identify someone. Length is clamped so very long emails don't produce an unreasonably
+// long dot string, and very short values still read as "hidden" rather than empty.
+const maskContact = (value: string): string => '•'.repeat(Math.min(Math.max(value.length, 4), 12));
+
+// Phone number / email field — personal info that stays masked by default (見た目のみ; the
+// underlying candidate data is never touched) with a per-candidate 表示/隠す toggle. `revealed`/
+// `onToggleReveal` are lifted to CandidatePipelineView so 掘り起しリスト can offer a bulk-reveal
+// switch across every candidate at once, rather than each card owning its own hidden state.
+const MaskedContactField: React.FC<{
+  value: string | undefined;
+  revealed: boolean;
+  onToggleReveal: () => void;
+  editable: boolean;
+  onCommit: (value: string) => void;
+  placeholder: string;
+  ariaLabel: string;
+}> = ({ value, revealed, onToggleReveal, editable, onCommit, placeholder, ariaLabel }) => {
+  if (!value) {
+    return editable
+      ? <InlineTextField value="" onCommit={onCommit} placeholder={placeholder} ariaLabel={ariaLabel} />
+      : <>N/A</>;
+  }
+  return (
+    <span className="masked-contact">
+      {revealed ? (
+        editable
+          ? <InlineTextField value={value} onCommit={onCommit} placeholder={placeholder} ariaLabel={ariaLabel} />
+          : <span className="info-value">{value}</span>
+      ) : (
+        <span className="masked-contact-value" aria-label={`${ariaLabel}（非表示）`}>{maskContact(value)}</span>
+      )}
+      <button type="button" className="contact-reveal-button" onClick={onToggleReveal}>
+        {revealed ? '隠す' : '表示'}
+      </button>
+    </span>
+  );
+};
+
 /**
  * One candidate's card in the パイプライン list — every field shown here (candidate basic info,
  * each application's fields, and the titled memo list) is directly editable in place; there is
@@ -5280,11 +5323,15 @@ const PipelineCandidateCard: React.FC<{
   // リスト登録など）は引き続き本人（candidateIsOwn）専用。
   isTeamsEditable: boolean;
   onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
+  // 電話番号・メールアドレスのマスク表示の解除状態 — 候補者データではなく表示だけのUI状態と
+  // して親（CandidatePipelineView）側で保持する。掘り起しリスト一括表示のため。
+  isContactRevealed: boolean;
+  onToggleContactReveal: () => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
-  isTeamsEditable, onToggleTeammateVisibility,
+  isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   const visibleApplications = c.applications.filter(app => !app.isHidden);
@@ -5661,20 +5708,36 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>電話番号:</span>
+                    <span>見込み月:</span>
                     {candidateIsOwn ? (
-                        <InlineTextField value={c.phoneNumber || ''} onCommit={(v) => commitCandidateField('phoneNumber', v)} placeholder="例: 090-1234-5678" ariaLabel="電話番号" />
+                        <InlineDateField type="month" value={c.expectedDecisionMonth} onCommit={(v) => commitCandidateField('expectedDecisionMonth', v)} ariaLabel="見込み月" />
                     ) : (
-                        c.phoneNumber || 'N/A'
+                        c.expectedDecisionMonth || 'N/A'
                     )}
                 </div>
                 <div className="key-info-item">
+                    <span>電話番号:</span>
+                    <MaskedContactField
+                        value={c.phoneNumber}
+                        revealed={isContactRevealed}
+                        onToggleReveal={onToggleContactReveal}
+                        editable={candidateIsOwn}
+                        onCommit={(v) => commitCandidateField('phoneNumber', v)}
+                        placeholder="例: 090-1234-5678"
+                        ariaLabel="電話番号"
+                    />
+                </div>
+                <div className="key-info-item">
                     <span>メール:</span>
-                    {candidateIsOwn ? (
-                        <InlineTextField value={c.email || ''} onCommit={(v) => commitCandidateField('email', v)} placeholder="例: taro@example.com" ariaLabel="メールアドレス" />
-                    ) : (
-                        c.email || 'N/A'
-                    )}
+                    <MaskedContactField
+                        value={c.email}
+                        revealed={isContactRevealed}
+                        onToggleReveal={onToggleContactReveal}
+                        editable={candidateIsOwn}
+                        onCommit={(v) => commitCandidateField('email', v)}
+                        placeholder="例: taro@example.com"
+                        ariaLabel="メールアドレス"
+                    />
                 </div>
             </div>
              <div className="candidate-application-summary">
@@ -5823,19 +5886,27 @@ const PipelineCandidateCard: React.FC<{
                 </div>
                 <div className="candidate-info-item">
                     <span className="info-label">電話番号</span>
-                    {candidateIsOwn ? (
-                        <InlineTextField value={c.phoneNumber || ''} onCommit={(v) => commitCandidateField('phoneNumber', v)} placeholder="例: 090-1234-5678" ariaLabel="電話番号" />
-                    ) : (
-                        <span className="info-value">{c.phoneNumber || 'N/A'}</span>
-                    )}
+                    <MaskedContactField
+                        value={c.phoneNumber}
+                        revealed={isContactRevealed}
+                        onToggleReveal={onToggleContactReveal}
+                        editable={candidateIsOwn}
+                        onCommit={(v) => commitCandidateField('phoneNumber', v)}
+                        placeholder="例: 090-1234-5678"
+                        ariaLabel="電話番号"
+                    />
                 </div>
                 <div className="candidate-info-item">
                     <span className="info-label">メールアドレス</span>
-                    {candidateIsOwn ? (
-                        <InlineTextField value={c.email || ''} onCommit={(v) => commitCandidateField('email', v)} placeholder="例: taro@example.com" ariaLabel="メールアドレス" />
-                    ) : (
-                        <span className="info-value">{c.email || 'N/A'}</span>
-                    )}
+                    <MaskedContactField
+                        value={c.email}
+                        revealed={isContactRevealed}
+                        onToggleReveal={onToggleContactReveal}
+                        editable={candidateIsOwn}
+                        onCommit={(v) => commitCandidateField('email', v)}
+                        placeholder="例: taro@example.com"
+                        ariaLabel="メールアドレス"
+                    />
                 </div>
                 <div className="candidate-info-item">
                     <span className="info-label">他社状況</span>
@@ -6245,6 +6316,35 @@ const CandidatePipelineView: React.FC<{
     // 自社（エージェント）側の初回面談状況での絞り込み — 企業ごとのPIPELINE_STAGES用の
     // selectedStageFiltersとは独立した、別軸のフィルター。
     const [agentInterviewStatusFilter, setAgentInterviewStatusFilter] = useState<'all' | '未面談' | '面談済み'>('all');
+    // 選考フェーズで絞り込みドロップダウン（<details>）の開閉状態 — 素のHTML <details> は
+    // ドロップダウン外クリックでは閉じないため、開閉を自前で管理し、documentのクリックを監視して
+    // 外側クリックで閉じられるようにする（下のuseEffect参照）。
+    const [isStageFilterOpen, setIsStageFilterOpen] = useState(false);
+    const stageFilterDetailsRef = useRef<HTMLDetailsElement>(null);
+    useEffect(() => {
+        if (!isStageFilterOpen) return;
+        const handlePointerDown = (e: MouseEvent) => {
+            if (stageFilterDetailsRef.current && !stageFilterDetailsRef.current.contains(e.target as Node)) {
+                setIsStageFilterOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [isStageFilterOpen]);
+    // 電話番号・メールアドレスは個人情報のため既定でマスク表示 — 候補者IDごとに表示/非表示を
+    // 切り替えられる（候補者データ自体は変更しない、表示だけのUI状態）。掘り起しリスト表示中は
+    // bulkRevivalContactsRevealedで全候補者分を一括表示できる。
+    const [revealedContactIds, setRevealedContactIds] = useState<Set<string>>(new Set());
+    const [bulkRevivalContactsRevealed, setBulkRevivalContactsRevealed] = useState(false);
+    const toggleContactReveal = (candidateId: string) => {
+        setRevealedContactIds(prev => {
+            const next = new Set(prev);
+            if (next.has(candidateId)) next.delete(candidateId); else next.add(candidateId);
+            return next;
+        });
+    };
+    const isContactRevealed = (candidateId: string) =>
+        revealedContactIds.has(candidateId) || (visibilityFilter === 'revival' && bulkRevivalContactsRevealed);
     // Narrows the team scope down to specific members (empty = show every member of the
     // selected team). Reset whenever the selected team changes, since a different team's
     // member list makes any previously-checked emails meaningless.
@@ -6821,7 +6921,12 @@ const CandidatePipelineView: React.FC<{
 
              <div className="pipeline-list-controls">
                 <div className="pipeline-sort-controls">
-                  <details className="stage-filter-dropdown">
+                  <details
+                    ref={stageFilterDetailsRef}
+                    className="stage-filter-dropdown"
+                    open={isStageFilterOpen}
+                    onToggle={(e) => setIsStageFilterOpen((e.currentTarget as HTMLDetailsElement).open)}
+                  >
                     <summary>
                       選考フェーズで絞り込み{selectedStageFilters.length > 0 ? `（${selectedStageFilters.length}件選択中）` : ''}
                       <span className="toggle-icon">▼</span>
@@ -6881,6 +6986,16 @@ const CandidatePipelineView: React.FC<{
                     非表示（その他）
                   </button>
                 </div>
+                {visibilityFilter === 'revival' && (
+                <div className="pipeline-sort-controls">
+                  <button
+                    onClick={() => setBulkRevivalContactsRevealed(v => !v)}
+                    className={bulkRevivalContactsRevealed ? 'active' : ''}
+                  >
+                    {bulkRevivalContactsRevealed ? '電話番号・メールを一括で隠す' : '電話番号・メールを一括表示'}
+                  </button>
+                </div>
+                )}
                 <div className="pipeline-sort-controls">
                   <span>見込み月で絞り込み:</span>
                   <input
@@ -6941,6 +7056,8 @@ const CandidatePipelineView: React.FC<{
                         onMoveRevivalToHidden={handleMoveRevivalToHidden}
                         isTeamsEditable={isTeamsEditable}
                         onToggleTeammateVisibility={onToggleTeammateVisibility}
+                        isContactRevealed={isContactRevealed(c.id)}
+                        onToggleContactReveal={() => toggleContactReveal(c.id)}
                     />
                 )) : (
                     candidates.length === 0 ? (

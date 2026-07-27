@@ -1751,7 +1751,7 @@ button.agent-interview-status-badge:focus-visible {
   font-size: 0.9rem;
   color: var(--text-color);
 }
-.key-info-item span {
+.key-info-item > span:first-child {
   color: var(--text-muted-color);
   margin-right: 0.5em;
 }
@@ -2031,6 +2031,33 @@ button.agent-interview-status-badge:focus-visible {
   flex-grow: 1;
   font-size: 1.25rem;
   font-weight: 700;
+}
+
+/* Phone number / email — masked by default (MaskedContactField in index.tsx); the dot string and
+   the 表示/隠す toggle sit inline so it still reads naturally inside .key-info-item/.candidate-
+   info-item rows. */
+.masked-contact {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.masked-contact-value {
+  letter-spacing: 0.1em;
+  color: var(--text-muted-color);
+}
+.contact-reveal-button {
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted-color);
+  font-size: 0.75rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 1rem;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.contact-reveal-button:hover {
+  background-color: #eef2f7;
+  color: var(--text-color);
 }
 
 .detail-view-title {
