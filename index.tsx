@@ -2304,6 +2304,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '歩留まり分析の全体ファネルに、任意の2地点間（例: スカウト返信数→候補者推薦数）の歩留まりを計算できるセレクトを追加（隣接ステージ間だけでなく、自由に区間を選べるようにした）',
       '【不具合修正】応募企業や候補者情報の項目数が多いと、候補者カードの詳細表示がfee料率あたりから下が表示されなくなる不具合を修正',
       '【不具合修正】登録済みの候補者について、Googleドライブから面談ログ（Google Meet議事録）を検索・取込みできるようにした（従来は新規登録時にしかこの機能を使えなかった）',
+      '候補者情報の編集項目の見た目を刷新。常に入力ボックスとして表示するのをやめ、通常はカードに埋め込まれたテキストとして表示し、クリックした時だけ編集できるようにした（テキスト・数値・プルダウン・日付/年月の各項目が対象）',
     ],
   },
   {
@@ -4980,11 +4981,27 @@ const SourceEffectivenessReport: React.FC<{ candidates: Candidate[]; allMedia: M
 };
 
 
+// Shared "click to edit" affordance props for the display-mode (non-editing) element rendered by
+// InlineTextField/InlineNumberField/InlineSelectField/InlineDateField/ScheduledDateTimeField below
+// — looks like plain embedded text (matching the read-only counterpart shown to non-owners)
+// instead of a permanently-visible input box, and only switches to a real form control once
+// clicked (or activated via Enter/Space when focused via keyboard).
+const editableDisplayProps = (onActivate: () => void, ariaLabel: string | undefined, extraClassName: string) => ({
+  className: `editable-value info-value ${extraClassName}`,
+  role: 'button' as const,
+  tabIndex: 0,
+  'aria-label': ariaLabel,
+  onClick: onActivate,
+  onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onActivate(); } },
+});
+
 // A text input/textarea that buffers keystrokes locally and only calls onCommit on blur (or
 // Escape-free change for non-text inputs elsewhere) — used throughout PipelineCandidateCard so
 // inline editing doesn't fire a full onSave (candidate KPI/Google-Tasks side effects included)
 // on every keystroke. Re-syncs its local draft whenever the committed value actually changes
-// (e.g. a save from elsewhere in the app updates this same field).
+// (e.g. a save from elsewhere in the app updates this same field). Renders as plain embedded text
+// (styled like the read-only view) until clicked, at which point it becomes a real input/textarea
+// — see editableDisplayProps above.
 const InlineTextField: React.FC<{
   value: string;
   onCommit: (value: string) => void;
@@ -4994,16 +5011,31 @@ const InlineTextField: React.FC<{
   ariaLabel?: string;
   disabled?: boolean;
   className?: string;
-}> = ({ value, onCommit, placeholder, multiline, rows, ariaLabel, disabled, className }) => {
+  // Overrides the class used for the DISPLAY (non-editing) element only — defaults to matching
+  // className, used e.g. for the candidate name field whose display should look like a heading
+  // (candidate-name-display) rather than small muted body text.
+  displayClassName?: string;
+}> = ({ value, onCommit, placeholder, multiline, rows, ariaLabel, disabled, className, displayClassName }) => {
+  const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
   const commit = () => { if (draft !== value) onCommit(draft); };
+  const finishEditing = () => { commit(); setIsEditing(false); };
+
+  if (!disabled && !isEditing) {
+    const displayText = value || placeholder || '未設定';
+    const displayProps = editableDisplayProps(() => setIsEditing(true), ariaLabel, `${!value ? 'is-empty' : ''} ${displayClassName ?? className ?? ''}`);
+    return multiline ? <p {...displayProps}>{displayText}</p> : <span {...displayProps}>{displayText}</span>;
+  }
   if (multiline) {
     return (
       <textarea
+        ref={inputRef as React.RefObject<HTMLTextAreaElement>}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={finishEditing}
         placeholder={placeholder}
         rows={rows}
         disabled={disabled}
@@ -5014,10 +5046,11 @@ const InlineTextField: React.FC<{
   }
   return (
     <input
+      ref={inputRef as React.RefObject<HTMLInputElement>}
       type="text"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
+      onBlur={finishEditing}
       placeholder={placeholder}
       disabled={disabled}
       aria-label={ariaLabel}
@@ -5027,7 +5060,8 @@ const InlineTextField: React.FC<{
 };
 
 // Same buffering pattern as InlineTextField, for numeric fields (salary, feeRate, etc.) — commits
-// a number (or undefined when cleared) rather than a raw string.
+// a number (or undefined when cleared) rather than a raw string. `unit` (e.g. '万円', '歳') is
+// appended only to the display-mode text, matching how the read-only view formats the same value.
 const InlineNumberField: React.FC<{
   value: number | undefined;
   onCommit: (value: number | undefined) => void;
@@ -5036,26 +5070,137 @@ const InlineNumberField: React.FC<{
   disabled?: boolean;
   min?: number;
   step?: number;
-}> = ({ value, onCommit, placeholder, ariaLabel, disabled, min, step }) => {
+  unit?: string;
+}> = ({ value, onCommit, placeholder, ariaLabel, disabled, min, step, unit }) => {
   const stringValue = value === undefined || value === 0 ? '' : String(value);
+  const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(stringValue);
   useEffect(() => { setDraft(stringValue); }, [stringValue]);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
   const commit = () => {
     const parsed = draft === '' ? undefined : Number(draft);
     if (parsed !== value) onCommit(parsed);
   };
+  const finishEditing = () => { commit(); setIsEditing(false); };
+
+  if (!disabled && !isEditing) {
+    const displayText = stringValue ? `${stringValue}${unit || ''}` : (placeholder || '未設定');
+    return <span {...editableDisplayProps(() => setIsEditing(true), ariaLabel, !stringValue ? 'is-empty' : '')}>{displayText}</span>;
+  }
   return (
     <input
+      ref={inputRef}
       type="number"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
+      onBlur={finishEditing}
       placeholder={placeholder}
       disabled={disabled}
       aria-label={ariaLabel}
       min={min}
       step={step}
     />
+  );
+};
+
+// InlineSelectField: same click-to-edit shell as InlineTextField/InlineNumberField, wrapping a
+// plain <select> — pass the same <option> children you'd give a raw select. `displayText`
+// controls what the collapsed (non-editing) view shows; callers pass the same formatting their
+// read-only (non-owner) view already uses, so both stay visually identical.
+const InlineSelectField: React.FC<{
+  value: string;
+  onCommit: (value: string) => void;
+  children: React.ReactNode;
+  ariaLabel?: string;
+  displayText?: string;
+  emptyText?: string;
+}> = ({ value, onCommit, children, ariaLabel, displayText, emptyText }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const selectRef = useRef<HTMLSelectElement>(null);
+  useEffect(() => { if (isEditing) selectRef.current?.focus(); }, [isEditing]);
+  const shownText = displayText || value;
+
+  if (!isEditing) {
+    return (
+      <span {...editableDisplayProps(() => setIsEditing(true), ariaLabel, !shownText ? 'is-empty' : '')}>
+        {shownText || emptyText || '未設定'}
+      </span>
+    );
+  }
+  return (
+    <select
+      ref={selectRef}
+      value={value}
+      onChange={(e) => { onCommit(e.target.value); setIsEditing(false); }}
+      onBlur={() => setIsEditing(false)}
+      aria-label={ariaLabel}
+    >
+      {children}
+    </select>
+  );
+};
+
+// InlineDateField: same click-to-edit shell, wrapping <input type="date"|"month">. `formatDisplay`
+// lets callers match whatever date formatting their read-only view already uses (defaults to
+// ja-JP localized for 'date', raw yyyy-MM for 'month').
+const InlineDateField: React.FC<{
+  value: string | undefined;
+  onCommit: (value: string | undefined) => void;
+  type?: 'date' | 'month';
+  ariaLabel?: string;
+  formatDisplay?: (value: string) => string;
+}> = ({ value, onCommit, type = 'date', ariaLabel, formatDisplay }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
+  const defaultFormat = (v: string) => (type === 'date' ? new Date(v + 'T00:00:00').toLocaleDateString('ja-JP') : v);
+
+  if (!isEditing) {
+    const displayText = value ? (formatDisplay ? formatDisplay(value) : defaultFormat(value)) : '未設定';
+    return <span {...editableDisplayProps(() => setIsEditing(true), ariaLabel, !value ? 'is-empty' : '')}>{displayText}</span>;
+  }
+  return (
+    <input
+      ref={inputRef}
+      type={type}
+      value={value || ''}
+      onChange={(e) => onCommit(e.target.value || undefined)}
+      onBlur={() => setIsEditing(false)}
+      aria-label={ariaLabel}
+    />
+  );
+};
+
+// 選考予定日: a date + time pair sharing one click-to-edit shell (rather than InlineDateField
+// twice) so the collapsed view shows both together ("7/28 14:00") and clicking either switches
+// both inputs into edit mode at once. onBlur is on the wrapping span (not each input) so tabbing
+// from the date input to the time input doesn't collapse the field back before the time is set —
+// it only closes once focus actually leaves both inputs.
+const ScheduledDateTimeField: React.FC<{
+  date: string | undefined;
+  time: string | undefined;
+  onCommitDate: (value: string | undefined) => void;
+  onCommitTime: (value: string | undefined) => void;
+}> = ({ date, time, onCommitDate, onCommitTime }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const dateRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (isEditing) dateRef.current?.focus(); }, [isEditing]);
+
+  if (!isEditing) {
+    const displayText = date
+      ? `${new Date(date + 'T00:00:00').toLocaleDateString('ja-JP')}${time ? ` ${time}` : ''}`
+      : '未設定';
+    return <span {...editableDisplayProps(() => setIsEditing(true), '選考予定日', !date ? 'is-empty' : '')}>{displayText}</span>;
+  }
+  return (
+    <span
+      className="scheduled-date-time-inputs"
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsEditing(false); }}
+    >
+      <input ref={dateRef} type="date" value={date || ''} onChange={(e) => onCommitDate(e.target.value || undefined)} aria-label="選考予定日" />
+      <input type="time" value={time || ''} onChange={(e) => onCommitTime(e.target.value || undefined)} aria-label="開始時刻" />
+    </span>
   );
 };
 
@@ -5303,6 +5448,7 @@ const PipelineCandidateCard: React.FC<{
               placeholder="候補者名"
               ariaLabel="候補者名"
               className="candidate-name-input"
+              displayClassName="candidate-name-display"
             />
           ) : (
             <h3 title={c.name}>{c.name}</h3>
@@ -5436,7 +5582,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">現職年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} />
+                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} unit="万円" />
                     ) : (
                         <span className="info-value">{c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</span>
                     )}
@@ -5444,7 +5590,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">希望年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} />
+                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} unit="万円" />
                     ) : (
                         <span className="info-value">{c.salary ? `${c.salary}万円` : '未設定'}</span>
                     )}
@@ -5452,7 +5598,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">想定年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} />
+                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} unit="万円" />
                     ) : (
                         <span className="info-value">{c.expectedAnnualSalary ? `${c.expectedAnnualSalary}万円` : '未設定'}</span>
                     )}
@@ -5460,7 +5606,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">集客媒体</span>
                     {candidateIsOwn ? (
-                        <select value={c.source} onChange={(e) => commitCandidateField('source', e.target.value)} aria-label="集客媒体">
+                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={c.source} emptyText="N/A">
                             <option value="">選択してください</option>
                             {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                             {c.source && c.source !== 'Other' && !activeMedia.some(m => m.id === c.source) && (
@@ -5469,7 +5615,7 @@ const PipelineCandidateCard: React.FC<{
                                 </option>
                             )}
                             <option value="Other">その他</option>
-                        </select>
+                        </InlineSelectField>
                     ) : (
                         <span className="info-value">{c.source || 'N/A'}</span>
                     )}
@@ -5477,11 +5623,11 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">見込み月</span>
                     {candidateIsOwn ? (
-                        <input
+                        <InlineDateField
                             type="month"
-                            value={c.expectedDecisionMonth || ''}
-                            onChange={(e) => commitCandidateField('expectedDecisionMonth', e.target.value || undefined)}
-                            aria-label="見込み月"
+                            value={c.expectedDecisionMonth}
+                            onCommit={(v) => commitCandidateField('expectedDecisionMonth', v)}
+                            ariaLabel="見込み月"
                         />
                     ) : (
                         <span className="info-value">{c.expectedDecisionMonth || '未設定'}</span>
@@ -5505,7 +5651,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">年齢</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} />
+                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} unit="歳" />
                     ) : (
                         <span className="info-value">{c.age ? `${c.age}歳` : 'N/A'}</span>
                     )}
@@ -5545,11 +5691,11 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">入社希望時期</span>
                     {candidateIsOwn ? (
-                        <input
+                        <InlineDateField
                             type="month"
-                            value={c.desiredJoinTiming || ''}
-                            onChange={(e) => commitCandidateField('desiredJoinTiming', e.target.value || undefined)}
-                            aria-label="入社希望時期"
+                            value={c.desiredJoinTiming}
+                            onCommit={(v) => commitCandidateField('desiredJoinTiming', v)}
+                            ariaLabel="入社希望時期"
                         />
                     ) : (
                         <span className="info-value">{c.desiredJoinTiming || '未設定'}</span>
@@ -5558,11 +5704,11 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">スカウト返信日</span>
                     {candidateIsOwn ? (
-                        <input
+                        <InlineDateField
                             type="date"
-                            value={c.scoutReplyDate || ''}
-                            onChange={(e) => commitCandidateField('scoutReplyDate', e.target.value || undefined)}
-                            aria-label="スカウト返信日"
+                            value={c.scoutReplyDate}
+                            onCommit={(v) => commitCandidateField('scoutReplyDate', v)}
+                            ariaLabel="スカウト返信日"
                         />
                     ) : (
                         <span className="info-value">{c.scoutReplyDate ? new Date(c.scoutReplyDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
@@ -5571,11 +5717,11 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">初回面談日</span>
                     {candidateIsOwn ? (
-                        <input
+                        <InlineDateField
                             type="date"
-                            value={c.firstInterviewDate || ''}
-                            onChange={(e) => commitCandidateField('firstInterviewDate', e.target.value || undefined)}
-                            aria-label="初回面談日"
+                            value={c.firstInterviewDate}
+                            onCommit={(v) => commitCandidateField('firstInterviewDate', v)}
+                            ariaLabel="初回面談日"
                         />
                     ) : (
                         <span className="info-value">{c.firstInterviewDate ? new Date(c.firstInterviewDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
@@ -5814,20 +5960,12 @@ const PipelineCandidateCard: React.FC<{
                                     <div className="detail-card-item">
                                         <span>選考予定日:</span>
                                         {candidateIsOwn ? (
-                                            <span className="scheduled-date-time-inputs">
-                                                <input
-                                                    type="date"
-                                                    value={app.scheduledDate || ''}
-                                                    onChange={(e) => commitApplicationField(app.id, { scheduledDate: e.target.value || undefined })}
-                                                    aria-label="選考予定日"
-                                                />
-                                                <input
-                                                    type="time"
-                                                    value={app.scheduledTime || ''}
-                                                    onChange={(e) => commitApplicationField(app.id, { scheduledTime: e.target.value || undefined })}
-                                                    aria-label="開始時刻"
-                                                />
-                                            </span>
+                                            <ScheduledDateTimeField
+                                                date={app.scheduledDate}
+                                                time={app.scheduledTime}
+                                                onCommitDate={(v) => commitApplicationField(app.id, { scheduledDate: v })}
+                                                onCommitTime={(v) => commitApplicationField(app.id, { scheduledTime: v })}
+                                            />
                                         ) : (
                                             <span>
                                                 {app.scheduledDate
@@ -5839,11 +5977,11 @@ const PipelineCandidateCard: React.FC<{
                                     <div className="detail-card-item">
                                         <span>意思決定時期:</span>
                                         {candidateIsOwn ? (
-                                            <input
+                                            <InlineDateField
                                                 type="date"
-                                                value={app.expectedDecisionDate || ''}
-                                                onChange={(e) => commitApplicationField(app.id, { expectedDecisionDate: e.target.value || undefined })}
-                                                aria-label="意思決定時期"
+                                                value={app.expectedDecisionDate}
+                                                onCommit={(v) => commitApplicationField(app.id, { expectedDecisionDate: v })}
+                                                ariaLabel="意思決定時期"
                                             />
                                         ) : (
                                             <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
@@ -5860,23 +5998,26 @@ const PipelineCandidateCard: React.FC<{
                                     <div className="detail-card-item">
                                         <span>内定確度 / 入社確度:</span>
                                         {candidateIsOwn ? (
-                                            <span style={{ display: 'flex', gap: '0.35rem' }}>
-                                                <select
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                                <InlineSelectField
                                                     value={app.offerConfidence || ''}
-                                                    onChange={(e) => commitApplicationField(app.id, { offerConfidence: (e.target.value || undefined) as ConfidenceGrade | undefined })}
-                                                    aria-label="内定確度"
+                                                    onCommit={(v) => commitApplicationField(app.id, { offerConfidence: (v || undefined) as ConfidenceGrade | undefined })}
+                                                    ariaLabel="内定確度"
+                                                    displayText={app.offerConfidence}
                                                 >
                                                     <option value="">未設定</option>
                                                     {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
-                                                </select>
-                                                <select
+                                                </InlineSelectField>
+                                                <span>/</span>
+                                                <InlineSelectField
                                                     value={app.acceptanceConfidence || ''}
-                                                    onChange={(e) => commitApplicationField(app.id, { acceptanceConfidence: (e.target.value || undefined) as ConfidenceGrade | undefined })}
-                                                    aria-label="入社確度"
+                                                    onCommit={(v) => commitApplicationField(app.id, { acceptanceConfidence: (v || undefined) as ConfidenceGrade | undefined })}
+                                                    ariaLabel="入社確度"
+                                                    displayText={app.acceptanceConfidence}
                                                 >
                                                     <option value="">未設定</option>
                                                     {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
-                                                </select>
+                                                </InlineSelectField>
                                             </span>
                                         ) : (
                                             <span>{app.offerConfidence || '未設定'} / {app.acceptanceConfidence || '未設定'}</span>

@@ -2002,6 +2002,37 @@ button.agent-interview-status-badge:focus-visible {
   padding: 1.5rem 2rem;
 }
 
+/* Click-to-edit display mode (InlineTextField/InlineNumberField/InlineSelectField/InlineDateField/
+   ScheduledDateTimeField in index.tsx) — looks like plain embedded text, identical to the
+   read-only view shown to non-owners, until clicked. A subtle hover/focus background is the only
+   hint it's interactive; no border/box is shown until the field is actually being edited. */
+.editable-value {
+  display: inline-block;
+  cursor: pointer;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.3rem;
+  margin: -0.1rem -0.3rem;
+  transition: background-color 0.15s;
+}
+.editable-value:hover,
+.editable-value:focus-visible {
+  background-color: #eef2f7;
+  outline: none;
+}
+.editable-value.is-empty {
+  color: var(--text-muted-color);
+  font-weight: normal;
+  font-style: italic;
+}
+/* Candidate name field's display mode — looks like the h3 heading shown to non-owners
+   (.candidate-card-header h3) rather than small muted body text. */
+.candidate-name-display {
+  display: block;
+  flex-grow: 1;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
 .detail-view-title {
   font-size: 1.2rem;
   margin-bottom: 1.5rem;
