@@ -2313,6 +2313,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】選考トラックの「打診」フェーズの色を、白文字が読みにくかった灰色からコントラストの高い色に変更し、日時表示の薄さ(半透明)もやめて濃く表示するようにした',
       '【不具合修正】選考企業を新規追加する際に「進捗状況」を打診以外（1次面接など）から選んだ場合、選考トラックに反映されず「打診」のまま表示されてしまう不具合を修正',
       '候補者詳細のメモ（複数追加できるメモ欄）と、選考企業ごとのメモの近くに拡大表示ボタンを追加。クリックすると、大きさを自由に変更できるポップアップウィンドウでメモを表示・編集できるようにした',
+      'ヘッダーの事業部切り替え（BCA/F+/AC）の初期表示を、これまで常に「BCA」だったのを、ログインユーザー自身の所属部署（F+またはAC）があればそれを初期選択するように変更（未所属の場合は従来通りBCA）',
     ],
   },
   {
@@ -8501,7 +8502,10 @@ const App: React.FC = () => {
 
   // BCA事業部 header switcher — 'BCA' shows F+ and AC combined (not a real assignment of its
   // own); filters which members' data 全ユーザー/チーム別/パイプライン(全ユーザー) show.
+  // Defaults to 'BCA' until memberDepartments loads (see the loadTeamsConfig effect below), which
+  // then applies the signed-in user's own department once, if they have one assigned.
   const [selectedDivision, setSelectedDivision] = useState<'BCA' | Department>('BCA');
+  const hasAppliedDefaultDivisionRef = useRef(false);
 
   // Teams state
   const [teams, setTeams] = useState<Team[]>([]);
@@ -8870,6 +8874,11 @@ const App: React.FC = () => {
         setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
         setMemberDepartments(result.data?.memberDepartments || {});
         setMiddleEmails(result.data?.middleEmails || []);
+        if (!hasAppliedDefaultDivisionRef.current) {
+          hasAppliedDefaultDivisionRef.current = true;
+          const ownDepartment = result.data?.memberDepartments?.[currentIdentity.email];
+          if (ownDepartment) setSelectedDivision(ownDepartment);
+        }
       } catch (error) {
         console.error('Failed to load teams config from Drive', error);
       } finally {
