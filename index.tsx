@@ -2335,6 +2335,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'Googleタスクへの選考予定の再登録（作成・更新）を、選考フェーズか予定日時が変わった時だけ行うように変更（企業名や次のアクションなど他の項目を編集しただけではタスクに触れないようにした）',
       '【不具合修正】面談ログのGoogleドライブ検索で、候補者名のスペースの有無（例:「山田 太郎」/「山田太郎」）が議事録側の表記と食い違うと見つからないことがある不具合を改善し、両方の表記で検索するようにした',
       '【不具合修正】面談ログファイルのドラッグ＆ドロップ取込みで、ブラウザがファイル形式を正しく検出できない場合に空のデータを送ってしまい原因のわかりにくいエラーになる不具合を修正。拡張子から形式を補完するようにし、対応していない形式やサイズが大きすぎるファイルは具体的なメッセージで案内するようにした',
+      '面談ログファイルの取込みで、Googleドキュメント（.gdoc）にも対応した',
     ],
   },
   {
@@ -3378,12 +3379,33 @@ const resolveInterviewLogFile = (file: File): { mimeType: string; error?: string
     const lowerName = file.name.toLowerCase();
     const extension = Object.keys(INTERVIEW_LOG_MIME_BY_EXTENSION).find(ext => lowerName.endsWith(ext));
     if (!extension) {
-        return { mimeType: '', error: `対応していないファイル形式です（${file.name}）。.txt / .pdf / .doc / .docx のいずれかを選択してください。` };
+        return { mimeType: '', error: `対応していないファイル形式です（${file.name}）。.txt / .pdf / .doc / .docx / .gdoc のいずれかを選択してください。` };
     }
     if (file.size > INTERVIEW_LOG_MAX_FILE_SIZE_BYTES) {
         return { mimeType: '', error: `ファイルサイズが大きすぎます（上限20MB）: ${file.name}` };
     }
     return { mimeType: file.type || INTERVIEW_LOG_MIME_BY_EXTENSION[extension] };
+};
+
+/**
+ * .gdoc はドキュメントの実体ではなく、Googleドライブ（デスクトップ同期・オフライン利用時など）
+ * が作る小さなJSONのポインターファイル — 実際のGoogleドキュメントのファイルIDへの参照だけを
+ * 持つ。ここでそのIDを取り出し、呼び出し側はexportGoogleDocAsText（Driveから自動検索した
+ * ケースと同じ関数）で本文を取得する。バージョンによってresource_id/doc_id/urlのいずれかに
+ * IDが入っているため、順に試す。
+ */
+const extractGoogleDocIdFromGdocFile = (pointerFileText: string): string | null => {
+    try {
+        const parsed = JSON.parse(pointerFileText);
+        const resourceIdMatch = typeof parsed.resource_id === 'string' ? parsed.resource_id.match(/^document:(.+)$/) : null;
+        if (resourceIdMatch) return resourceIdMatch[1];
+        if (typeof parsed.doc_id === 'string' && parsed.doc_id) return parsed.doc_id;
+        const urlMatch = typeof parsed.url === 'string' ? parsed.url.match(/\/d\/([a-zA-Z0-9_-]+)/) : null;
+        if (urlMatch) return urlMatch[1];
+    } catch {
+        // 想定するJSON形式でなかった — 呼び出し側でエラー表示する
+    }
+    return null;
 };
 
 const CandidateModal: React.FC<{
@@ -3792,12 +3814,27 @@ const CandidateModal: React.FC<{
     const handleInterviewLogFile = async (files: FileList) => {
         if (!files || files.length === 0) return;
         const file = files[0];
+        const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
+        if (file.name.toLowerCase().endsWith('.gdoc')) {
+            try {
+                const docId = extractGoogleDocIdFromGdocFile(await file.text());
+                if (!docId) {
+                    alert('この.gdocファイルからGoogleドキュメントの情報を読み取れませんでした。');
+                    return;
+                }
+                const text = await exportGoogleDocAsText(docId);
+                await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+            } catch (error) {
+                console.error('Error reading .gdoc pointer file:', error);
+                alert('Googleドキュメントの取得中にエラーが発生しました。');
+            }
+            return;
+        }
         const { mimeType, error: validationError } = resolveInterviewLogFile(file);
         if (validationError) {
             alert(validationError);
             return;
         }
-        const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
         try {
             if (mimeType === 'text/plain') {
                 const text = await file.text();
@@ -3984,7 +4021,7 @@ const CandidateModal: React.FC<{
                         </ul>
                     )}
                     <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
-                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Wordファイル）を直接アップロードしてください。
+                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Word・Googleドキュメント）を直接アップロードしてください。
                     </p>
                     <div
                         id="interview-log-drop-zone"
@@ -3998,11 +4035,11 @@ const CandidateModal: React.FC<{
                             ref={interviewLogInputRef}
                             type="file"
                             id="interview-log-upload"
-                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.gdoc"
                             onChange={handleInterviewLogFileChange}
                         />
                         <p onClick={onInterviewLogButtonClick}>
-                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx）をドラッグ＆ドロップ、またはクリックして選択'}
+                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx / .gdoc）をドラッグ＆ドロップ、またはクリックして選択'}
                         </p>
                     </div>
                   </div>
@@ -5792,12 +5829,27 @@ const PipelineCandidateCard: React.FC<{
   const handleInterviewLogFile = async (files: FileList) => {
     if (!files || files.length === 0) return;
     const file = files[0];
+    const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
+    if (file.name.toLowerCase().endsWith('.gdoc')) {
+      try {
+        const docId = extractGoogleDocIdFromGdocFile(await file.text());
+        if (!docId) {
+          alert('この.gdocファイルからGoogleドキュメントの情報を読み取れませんでした。');
+          return;
+        }
+        const text = await exportGoogleDocAsText(docId);
+        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+      } catch (error) {
+        console.error('Error reading .gdoc pointer file:', error);
+        alert('Googleドキュメントの取得中にエラーが発生しました。');
+      }
+      return;
+    }
     const { mimeType, error: validationError } = resolveInterviewLogFile(file);
     if (validationError) {
       alert(validationError);
       return;
     }
-    const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
     try {
       if (mimeType === 'text/plain') {
         const text = await file.text();
@@ -6355,7 +6407,7 @@ const PipelineCandidateCard: React.FC<{
                         </ul>
                     )}
                     <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
-                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Wordファイル）を直接アップロードしてください。
+                        Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Word・Googleドキュメント）を直接アップロードしてください。
                     </p>
                     <div
                         className={`drop-zone ${interviewLogDragActive ? 'drag-active' : ''}`}
@@ -6367,12 +6419,12 @@ const PipelineCandidateCard: React.FC<{
                         <input
                             ref={interviewLogInputRef}
                             type="file"
-                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            accept=".txt,text/plain,.pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.gdoc"
                             onChange={handleInterviewLogFileChange}
                             style={{ display: 'none' }}
                         />
                         <p onClick={() => interviewLogInputRef.current?.click()}>
-                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx）をドラッグ＆ドロップ、またはクリックして選択'}
+                            {isSummarizingInterviewLog ? '要約中...' : 'ここに議事録ファイル（.txt / .pdf / .doc・.docx / .gdoc）をドラッグ＆ドロップ、またはクリックして選択'}
                         </p>
                     </div>
                 </div>
