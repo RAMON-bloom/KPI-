@@ -649,9 +649,9 @@ interface UserData {
 
 // バグ報告・改善要望の種別とステータス。STAGE_COLOR_MAPと同じ考え方で、白文字と組み合わせて
 // 十分なコントラストが出る色のみを選んでいる（打診バッジの視認性修正時の教訓）。
-type FeedbackCategory = 'bug' | 'improvement';
-const FEEDBACK_CATEGORY_LABELS: Record<FeedbackCategory, string> = { bug: 'バグ報告', improvement: '改善要望' };
-const FEEDBACK_CATEGORY_COLOR_MAP: Record<FeedbackCategory, string> = { bug: 'crimson', improvement: '#0d6efd' };
+type FeedbackCategory = 'bug' | 'improvement' | 'other';
+const FEEDBACK_CATEGORY_LABELS: Record<FeedbackCategory, string> = { bug: 'バグ報告', improvement: '改善要望', other: 'その他' };
+const FEEDBACK_CATEGORY_COLOR_MAP: Record<FeedbackCategory, string> = { bug: 'crimson', improvement: '#0d6efd', other: '#6c757d' };
 
 const FEEDBACK_STATUSES = ['未対応', '対応予定', '対応済み', '対応しない'] as const;
 type FeedbackStatus = typeof FEEDBACK_STATUSES[number];
@@ -2326,6 +2326,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-07-28',
     items: [
       '【不具合修正】お問い合わせで、開発者が他ユーザーの投稿に返信しても保存できているか見た目上わからず「返信できない」ように見えていた不具合を修正。保存の成否をその場に表示するようにした',
+      'お問い合わせの種別に「その他」を追加',
     ],
   },
   {
@@ -2596,6 +2597,7 @@ const FeedbackModal: React.FC<{
               <select id="feedback-category" value={category} onChange={e => setCategory(e.target.value as FeedbackCategory)}>
                 <option value="bug">バグ報告</option>
                 <option value="improvement">改善要望</option>
+                <option value="other">その他</option>
               </select>
             </div>
             <div className="form-group">
