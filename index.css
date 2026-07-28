@@ -2450,32 +2450,54 @@ textarea.memo-content-text {
   white-space: pre-wrap;
   margin: 0 0 0.5rem;
 }
-.feedback-developer-controls {
+.feedback-thread {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   padding-top: 0.5rem;
+  margin-top: 0.25rem;
   border-top: 1px dashed var(--border-color);
 }
-.feedback-developer-controls textarea {
+.feedback-thread-message {
+  border-radius: var(--border-radius);
+  padding: 0.5rem 0.75rem;
+  max-width: 85%;
+}
+.feedback-thread-message.from-author {
+  background-color: var(--card-bg-color);
+  align-self: flex-start;
+}
+.feedback-thread-message.from-developer {
+  background-color: var(--secondary-color);
+  color: white;
+  align-self: flex-end;
+}
+.feedback-thread-message.from-developer .feedback-post-date {
+  color: rgba(255, 255, 255, 0.75);
+}
+.feedback-thread-message p {
+  white-space: pre-wrap;
+  margin: 0.25rem 0 0;
+}
+.feedback-thread-message-header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.feedback-thread-message-from {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.feedback-thread-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+}
+.feedback-thread-composer textarea {
   width: 100%;
   font-family: inherit;
   resize: vertical;
-}
-.feedback-reply {
-  background-color: var(--card-bg-color);
-  border-radius: var(--border-radius);
-  padding: 0.5rem 0.75rem;
-  margin-top: 0.5rem;
-}
-.feedback-reply p {
-  white-space: pre-wrap;
-  margin: 0.25rem 0;
-}
-.feedback-reply-label {
-  font-weight: 600;
-  font-size: 0.85rem;
-  color: var(--text-muted-color);
 }
 .feedback-save-message {
   font-size: 0.85rem;

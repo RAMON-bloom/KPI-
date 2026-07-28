@@ -662,15 +662,45 @@ const FEEDBACK_STATUS_COLOR_MAP: Record<FeedbackStatus, string> = {
   '対応しない': '#6c757d',
 };
 
+// 投稿者・開発者どちらが書いたかをauthorEmailで区別する、スレッド内の1メッセージ。
+interface FeedbackThreadMessage {
+  id: string;
+  authorEmail: string;
+  content: string;
+  createdAt: string;
+}
+
 interface FeedbackPost {
   id: string;
   category: FeedbackCategory;
   content: string;
   createdAt: string;
   status: FeedbackStatus;
+  // スレッド形式（投稿者⇄開発者で複数回やり取り）。空/未設定＝まだ返信なし。
+  messages?: FeedbackThreadMessage[];
+  // レガシー: スレッド機能追加前に保存された単発返信。新規のmessagesが無い投稿は
+  // getFeedbackThreadMessagesで読み取り時にmessages形式へ変換して表示・追記する
+  // （最初の追記時にmessagesへ実体が移り、以後はこちらは参照されなくなる）。
   developerReply?: string;
   repliedAt?: string;
 }
+
+/**
+ * 投稿のスレッドを常にFeedbackThreadMessage[]として返す — 新形式のmessagesがあればそのまま、
+ * 無ければレガシーのdeveloperReply/repliedAtから1件だけ合成する（開発者からの返信として扱う）。
+ */
+const getFeedbackThreadMessages = (post: FeedbackPost): FeedbackThreadMessage[] => {
+  if (post.messages && post.messages.length > 0) return post.messages;
+  if (post.developerReply) {
+    return [{
+      id: `${post.id}-legacy-reply`,
+      authorEmail: TEAMS_ADMIN_EMAIL,
+      content: post.developerReply,
+      createdAt: post.repliedAt || post.createdAt,
+    }];
+  }
+  return [];
+};
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
@@ -2336,6 +2366,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】面談ログのGoogleドライブ検索で、候補者名のスペースの有無（例:「山田 太郎」/「山田太郎」）が議事録側の表記と食い違うと見つからないことがある不具合を改善し、両方の表記で検索するようにした',
       '【不具合修正】面談ログファイルのドラッグ＆ドロップ取込みで、ブラウザがファイル形式を正しく検出できない場合に空のデータを送ってしまい原因のわかりにくいエラーになる不具合を修正。拡張子から形式を補完するようにし、対応していない形式やサイズが大きすぎるファイルは具体的なメッセージで案内するようにした',
       '面談ログファイルの取込みで、Googleドキュメント（.gdoc）にも対応した',
+      'お問い合わせを単発の返信からスレッド形式に変更。投稿者と開発者の間で複数回やり取りできるようにした（投稿者は自分の投稿に、開発者はどの投稿にもメッセージを追加できる）',
     ],
   },
   {
@@ -2547,23 +2578,23 @@ const ChangelogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
 const FeedbackModal: React.FC<{
   posts: (FeedbackPost & { authorEmail: string; authorLabel: string })[];
   isDeveloper: boolean;
+  currentUserEmail: string;
   onSubmit: (category: FeedbackCategory, content: string) => void;
-  onReply: (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => Promise<void>;
+  onAddMessage: (post: FeedbackPost & { authorEmail: string }, content: string) => Promise<void>;
   onSetStatus: (authorEmail: string, postId: string, status: FeedbackStatus) => Promise<void>;
   onDelete: (authorEmail: string, postId: string) => Promise<void>;
   onClose: () => void;
-}> = ({ posts, isDeveloper, onSubmit, onReply, onSetStatus, onDelete, onClose }) => {
+}> = ({ posts, isDeveloper, currentUserEmail, onSubmit, onAddMessage, onSetStatus, onDelete, onClose }) => {
   const [category, setCategory] = useState<FeedbackCategory>('bug');
   const [content, setContent] = useState('');
-  // 開発者の返信下書き。postIdごとに保持し、まだ触っていない投稿は既存のdeveloperReplyを
-  // 初期値として表示する。
-  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  // 「返信を保存」の進行状況 — 以前はonReplyがfire-and-forgetで、ボタンを押しても見た目上
-  // 何も起きず「返信できない」ように見えていたバグの修正。保存中はボタンを無効化し、完了後に
-  // 成功/失敗をその場に表示する。成功時はreplyDraftsをクリアし、以後はpost.developerReply
-  // （実際に保存された値）がそのまま表示されるようにする。
-  const [savingPostId, setSavingPostId] = useState<string | null>(null);
-  const [saveMessageByPostId, setSaveMessageByPostId] = useState<Record<string, string>>({});
+  // スレッドへの返信下書き。postIdごとに保持する。
+  const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
+  // 送信の進行状況 — 以前はonReplyがfire-and-forgetで、ボタンを押しても見た目上何も起きず
+  // 「返信できない」ように見えていたバグの修正。送信中はボタンを無効化し、完了後に成功/
+  // 失敗をその場に表示する。成功時はdraftをクリアし、スレッドに追加された実際のメッセージが
+  // そのまま表示されるようにする。
+  const [sendingPostId, setSendingPostId] = useState<string | null>(null);
+  const [sendMessageByPostId, setSendMessageByPostId] = useState<Record<string, string>>({});
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2572,22 +2603,23 @@ const FeedbackModal: React.FC<{
     setContent('');
   };
 
-  const handleReplyClick = (post: FeedbackPost & { authorEmail: string; authorLabel: string }) => {
-    const reply = (replyDrafts[post.id] ?? post.developerReply ?? '').trim();
-    setSavingPostId(post.id);
-    setSaveMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
-    onReply(post.authorEmail, post.id, reply, post.status)
+  const handleSendMessage = (post: FeedbackPost & { authorEmail: string; authorLabel: string }) => {
+    const draft = (messageDrafts[post.id] ?? '').trim();
+    if (!draft) return;
+    setSendingPostId(post.id);
+    setSendMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+    onAddMessage(post, draft)
       .then(() => {
-        setReplyDrafts(prev => { const next = { ...prev }; delete next[post.id]; return next; });
-        setSaveMessageByPostId(prev => ({ ...prev, [post.id]: '保存しました。' }));
+        setMessageDrafts(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+        setSendMessageByPostId(prev => ({ ...prev, [post.id]: '送信しました。' }));
       })
       .catch(() => {
-        setSaveMessageByPostId(prev => ({ ...prev, [post.id]: '保存に失敗しました。' }));
+        setSendMessageByPostId(prev => ({ ...prev, [post.id]: '送信に失敗しました。' }));
       })
       .finally(() => {
-        setSavingPostId(null);
+        setSendingPostId(null);
         setTimeout(() => {
-          setSaveMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+          setSendMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
         }, 4000);
       });
   };
@@ -2624,68 +2656,85 @@ const FeedbackModal: React.FC<{
           </form>
           <div className="feedback-list">
             {posts.length === 0 && <p className="no-data-message">まだ投稿がありません。</p>}
-            {posts.map(post => (
-              <div key={post.id} className="feedback-post">
-                <div className="feedback-post-header">
-                  <span className="status-badge" style={{ '--badge-color': FEEDBACK_CATEGORY_COLOR_MAP[post.category] } as React.CSSProperties}>
-                    {FEEDBACK_CATEGORY_LABELS[post.category]}
-                  </span>
-                  <span className="feedback-post-author">{post.authorLabel}</span>
-                  <span className="feedback-post-date">{new Date(post.createdAt).toLocaleString('ja-JP')}</span>
-                  <span className="status-badge" style={{ '--badge-color': FEEDBACK_STATUS_COLOR_MAP[post.status] } as React.CSSProperties}>
-                    {post.status}
-                  </span>
-                  {isDeveloper && (
-                    <button type="button" onClick={() => { onDelete(post.authorEmail, post.id).catch(() => {}); }} className="remove-file-button" aria-label="この投稿を削除">&times;</button>
+            {posts.map(post => {
+              const canWrite = isDeveloper || post.authorEmail === currentUserEmail;
+              const messages = getFeedbackThreadMessages(post);
+              return (
+                <div key={post.id} className="feedback-post">
+                  <div className="feedback-post-header">
+                    <span className="status-badge" style={{ '--badge-color': FEEDBACK_CATEGORY_COLOR_MAP[post.category] } as React.CSSProperties}>
+                      {FEEDBACK_CATEGORY_LABELS[post.category]}
+                    </span>
+                    <span className="feedback-post-author">{post.authorLabel}</span>
+                    <span className="feedback-post-date">{new Date(post.createdAt).toLocaleString('ja-JP')}</span>
+                    {isDeveloper ? (
+                      <select
+                        value={post.status}
+                        onChange={e => { onSetStatus(post.authorEmail, post.id, e.target.value as FeedbackStatus).catch(() => {}); }}
+                        className="status-badge-select"
+                        style={{ '--badge-color': FEEDBACK_STATUS_COLOR_MAP[post.status] } as React.CSSProperties}
+                        aria-label="ステータス"
+                      >
+                        {FEEDBACK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    ) : (
+                      <span className="status-badge" style={{ '--badge-color': FEEDBACK_STATUS_COLOR_MAP[post.status] } as React.CSSProperties}>
+                        {post.status}
+                      </span>
+                    )}
+                    {isDeveloper && (
+                      <button type="button" onClick={() => { onDelete(post.authorEmail, post.id).catch(() => {}); }} className="remove-file-button" aria-label="この投稿を削除">&times;</button>
+                    )}
+                  </div>
+                  <p className="feedback-post-content">{post.content}</p>
+                  {messages.length > 0 && (
+                    <div className="feedback-thread">
+                      {messages.map(msg => {
+                        const isFromAuthor = msg.authorEmail === post.authorEmail;
+                        return (
+                          <div key={msg.id} className={`feedback-thread-message ${isFromAuthor ? 'from-author' : 'from-developer'}`}>
+                            <div className="feedback-thread-message-header">
+                              <span className="feedback-thread-message-from">{isFromAuthor ? post.authorLabel : '開発者'}</span>
+                              <span className="feedback-post-date">{new Date(msg.createdAt).toLocaleString('ja-JP')}</span>
+                            </div>
+                            <p>{msg.content}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {canWrite && (
+                    <div className="feedback-thread-composer">
+                      <textarea
+                        value={messageDrafts[post.id] ?? ''}
+                        onChange={e => setMessageDrafts(prev => ({ ...prev, [post.id]: e.target.value }))}
+                        rows={2}
+                        placeholder={isDeveloper ? '返信を入力' : '追加のメッセージを入力'}
+                        aria-label="メッセージ"
+                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <button
+                          type="button"
+                          className="secondary-action-button"
+                          disabled={sendingPostId === post.id || !(messageDrafts[post.id] ?? '').trim()}
+                          onClick={() => handleSendMessage(post)}
+                        >
+                          {sendingPostId === post.id ? '送信中...' : '送信'}
+                        </button>
+                        {sendMessageByPostId[post.id] && (
+                          <span
+                            className="feedback-save-message"
+                            style={{ color: sendMessageByPostId[post.id].includes('失敗') ? 'var(--danger-color)' : 'var(--success-color)' }}
+                          >
+                            {sendMessageByPostId[post.id]}
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
-                <p className="feedback-post-content">{post.content}</p>
-                {isDeveloper ? (
-                  <div className="feedback-developer-controls">
-                    <select
-                      value={post.status}
-                      onChange={e => { onSetStatus(post.authorEmail, post.id, e.target.value as FeedbackStatus).catch(() => {}); }}
-                      aria-label="ステータス"
-                    >
-                      {FEEDBACK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                    <textarea
-                      value={replyDrafts[post.id] ?? post.developerReply ?? ''}
-                      onChange={e => setReplyDrafts(prev => ({ ...prev, [post.id]: e.target.value }))}
-                      rows={2}
-                      placeholder="返信を入力"
-                      aria-label="返信内容"
-                    />
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <button
-                        type="button"
-                        className="secondary-action-button"
-                        disabled={savingPostId === post.id}
-                        onClick={() => handleReplyClick(post)}
-                      >
-                        {savingPostId === post.id ? '保存中...' : '返信を保存'}
-                      </button>
-                      {saveMessageByPostId[post.id] && (
-                        <span
-                          className="feedback-save-message"
-                          style={{ color: saveMessageByPostId[post.id].includes('失敗') ? 'var(--danger-color)' : 'var(--success-color)' }}
-                        >
-                          {saveMessageByPostId[post.id]}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  post.developerReply && (
-                    <div className="feedback-reply">
-                      <span className="feedback-reply-label">開発者からの返信:</span>
-                      <p>{post.developerReply}</p>
-                      {post.repliedAt && <span className="feedback-post-date">{new Date(post.repliedAt).toLocaleString('ja-JP')}</span>}
-                    </div>
-                  )
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -9452,8 +9501,22 @@ const App: React.FC = () => {
       });
   };
 
-  const handleReplyFeedback = (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => {
-    return persistFeedbackUpdate(authorEmail, postId, { developerReply: reply, status, repliedAt: new Date().toISOString() });
+  // スレッドへのメッセージ追加 — 投稿者本人（自分の投稿への追記）・開発者（誰の投稿にも返信
+  // 可能）の両方から呼ばれる。persistFeedbackUpdateがどちらの経路で書き込むかを判別するので、
+  // ここでは新しいmessages配列を組み立てて渡すだけでよい。getFeedbackThreadMessagesでレガシー
+  // のdeveloperReplyも取り込むため、最初の追記時にそちらは自然とmessages形式へ移行する。
+  const handleAddFeedbackMessage = (post: FeedbackPost & { authorEmail: string }, content: string) => {
+    if (!currentIdentity) return Promise.resolve();
+    const trimmed = content.trim();
+    if (!trimmed) return Promise.resolve();
+    const newMessage: FeedbackThreadMessage = {
+      id: `msg_${Date.now()}`,
+      authorEmail: currentIdentity.email,
+      content: trimmed,
+      createdAt: new Date().toISOString(),
+    };
+    const messages = [...getFeedbackThreadMessages(post), newMessage];
+    return persistFeedbackUpdate(post.authorEmail, post.id, { messages });
   };
 
   const handleSetFeedbackStatus = (authorEmail: string, postId: string, status: FeedbackStatus) => {
@@ -10689,8 +10752,9 @@ const App: React.FC = () => {
         <FeedbackModal
           posts={allFeedbackPosts}
           isDeveloper={isDeveloper}
+          currentUserEmail={currentIdentity?.email || ''}
           onSubmit={handleSubmitFeedback}
-          onReply={handleReplyFeedback}
+          onAddMessage={handleAddFeedbackMessage}
           onSetStatus={handleSetFeedbackStatus}
           onDelete={handleDeleteFeedback}
           onClose={() => setIsFeedbackModalOpen(false)}
