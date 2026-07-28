@@ -36,17 +36,40 @@ export interface PipelineTaskContent {
   title: string;
   notes?: string;
   dueDateISO: string; // yyyy-mm-dd — Google Tasks ignores the time-of-day/timezone portion
+  // Stable identity for this reminder — either a CompanyApplication's id or `revival:${candidateId}`
+  // (see index.tsx's googleTaskIdsByApplicationId, which uses the exact same keys). Embedded into
+  // the task's notes (see embedSyncKey) so a resync can recognize "this Google Task already
+  // represents this application" even when the app's own locally-cached id→task mapping has gone
+  // stale. Matching used to be done by exact title+due-date text instead, which broke (creating a
+  // duplicate alongside the now-unrecognized original) the moment a title-forming field — candidate
+  // name, company name, or scheduled time — changed after the task was first created, which happens
+  // routinely over a candidate's lifetime.
+  syncKey: string;
 }
 
 function toDueTimestamp(dueDateISO: string): string {
   return `${dueDateISO}T00:00:00.000Z`;
 }
 
+const SYNC_KEY_PATTERN = /\[kpi-sync:([^\]]+)\]/;
+
+function embedSyncKey(notes: string | undefined, syncKey: string): string {
+  return `${notes ? `${notes}\n\n` : ''}[kpi-sync:${syncKey}]`;
+}
+
+function extractSyncKey(notes: string | null | undefined): string | null {
+  return notes?.match(SYNC_KEY_PATTERN)?.[1] ?? null;
+}
+
 /** Creates a new task in the user's default list and returns its Google-assigned task ID. */
 export async function createPipelineTask(accessToken: string, content: PipelineTaskContent): Promise<string> {
   const created = await tasksFetch(accessToken, '', {
     method: 'POST',
-    body: JSON.stringify({ title: content.title, notes: content.notes, due: toDueTimestamp(content.dueDateISO) }),
+    body: JSON.stringify({
+      title: content.title,
+      notes: embedSyncKey(content.notes, content.syncKey),
+      due: toDueTimestamp(content.dueDateISO),
+    }),
   });
   return created.id;
 }
@@ -59,7 +82,11 @@ export async function createPipelineTask(accessToken: string, content: PipelineT
 export async function updatePipelineTask(accessToken: string, taskId: string, content: PipelineTaskContent): Promise<string> {
   const updated = await tasksFetch(accessToken, `/${encodeURIComponent(taskId)}`, {
     method: 'PATCH',
-    body: JSON.stringify({ title: content.title, notes: content.notes, due: toDueTimestamp(content.dueDateISO) }),
+    body: JSON.stringify({
+      title: content.title,
+      notes: embedSyncKey(content.notes, content.syncKey),
+      due: toDueTimestamp(content.dueDateISO),
+    }),
   });
   return updated ? updated.id : createPipelineTask(accessToken, content);
 }
@@ -72,6 +99,10 @@ export interface ExistingPipelineTask {
   id: string;
   title: string;
   dueDateISO?: string; // yyyy-mm-dd, derived from the task's `due` field
+  // Extracted from the task's notes (see embedSyncKey) — null for tasks this app never created
+  // (or created before this marker existed), in which case the caller falls back to whatever
+  // legacy matching it still wants to attempt.
+  syncKey: string | null;
 }
 
 /**
@@ -92,7 +123,12 @@ export async function listPipelineTasks(accessToken: string): Promise<ExistingPi
     if (pageToken) params.set('pageToken', pageToken);
     const data = await tasksFetch(accessToken, `?${params.toString()}`);
     (data?.items || []).forEach((item: any) => {
-      results.push({ id: item.id, title: item.title || '', dueDateISO: item.due ? item.due.slice(0, 10) : undefined });
+      results.push({
+        id: item.id,
+        title: item.title || '',
+        dueDateISO: item.due ? item.due.slice(0, 10) : undefined,
+        syncKey: extractSyncKey(item.notes),
+      });
     });
     pageToken = data?.nextPageToken;
     pagesFetched++;

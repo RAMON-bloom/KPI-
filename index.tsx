@@ -2331,6 +2331,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ヘッダーのF+/ACボタンに説明を追加。絞り込みには各メンバーがヘッダー右の「所属部署」を設定している必要があり、未設定のメンバーが多い場合はその旨を画面に表示するようにした',
       '【不具合修正】候補者パイプラインの「チーム」スコープ表示が、事業部（BCA/F+/AC）を切り替えても所属にかかわらずチーム全員を表示し続けていた不具合を修正。チームスコープの選択肢も選択中の事業部のチームのみに絞り込むようにした',
       '候補者パイプラインの「特定ユーザー」スコープの選択肢も、選択中の事業部（BCA/F+/AC）に所属するユーザーのみに絞り込むようにした',
+      '【不具合修正】Googleタスクへの選考予定の同期で、候補者名・企業名・面接時間などタイトルに使われる項目を後から変更すると、既存のタスクを認識できず重複作成されてしまう不具合を修正。タスクごとに変更されない内部IDをメモ欄に埋め込んで管理するようにした（表示されているメモの末尾に識別用の短い文字列が追加されます）',
     ],
   },
   {
@@ -9795,6 +9796,7 @@ const App: React.FC = () => {
     title: `${app.scheduledTime ? `${app.scheduledTime} ` : ''}${candidate.name}（${app.companyName}）`,
     notes: `ステージ: ${app.stage}${app.nextAction ? ` / 次のアクション: ${app.nextAction}` : ''}`,
     dueDateISO: app.scheduledDate!,
+    syncKey: app.id,
   });
 
   // Unlike application tasks, a revival reminder is meant to stay even while the candidate is
@@ -9806,6 +9808,7 @@ const App: React.FC = () => {
     title: `掘り起し: ${candidate.name}${revival.nextAction ? ` / ${revival.nextAction}` : ''}`,
     notes: revival.nextAction || undefined,
     dueDateISO: revival.nextActionDate,
+    syncKey: `revival:${candidate.id}`,
   });
 
   /**
@@ -9845,7 +9848,6 @@ const App: React.FC = () => {
     const revivalTaskKey = candidateId ? `revival:${candidateId}` : null;
     const prevRevival = prevCandidate?.revival;
     const nextRevival = nextCandidate?.revival;
-    const lookupKey = (content: { title: string; dueDateISO: string }) => `${content.title}|||${content.dueDateISO}`;
 
     const runPromise: Promise<unknown> = tasksSyncQueueRef.current.catch(() => {}).then(async () => {
       const idMap = { ...googleTaskIdsRef.current };
@@ -9859,17 +9861,19 @@ const App: React.FC = () => {
       // a later item failed.
       let firstError: unknown = null;
       if (!opts?.silent) setTasksSyncStatus('loading');
-      // Reuses an already-existing Google Task recognized by exact title+due-date match (see
+      // Reuses an already-existing Google Task recognized by its embedded syncKey marker (see
       // opts.existingTasksLookup) instead of blindly creating a new one — the safety net for
       // when idMap itself has gone stale (e.g. a debounced Drive write from another tab/device
-      // hadn't landed when this session loaded its copy).
+      // hadn't landed when this session loaded its copy). Keying on the stable syncKey (app.id /
+      // revival:${candidateId}) rather than exact title+due-date text means this still recognizes
+      // the task even if the candidate's name, the company name, or the scheduled time changed
+      // since it was first created — previously any of those edits made the old task unrecognizable
+      // and a fresh duplicate got created right alongside it.
       const createOrReuseTask = async (content: ReturnType<typeof buildPipelineTaskContent>): Promise<string> => {
-        const key = lookupKey(content);
-        const reuseId = opts?.existingTasksLookup?.get(key);
+        const reuseId = opts?.existingTasksLookup?.get(content.syncKey);
         if (reuseId) {
-          // Removed once claimed so two different applications that happen to produce the same
-          // title+due can't both latch onto the same pre-existing task.
-          opts!.existingTasksLookup!.delete(key);
+          // Removed once claimed so it can't also be reused for anything else in this same batch.
+          opts!.existingTasksLookup!.delete(content.syncKey);
           return reuseId;
         }
         return createPipelineTask(accessToken, content);
@@ -9997,13 +10001,17 @@ const App: React.FC = () => {
       try {
         const existingTasks = await listPipelineTasks(session.accessToken);
         existingTasksLookup = new Map();
+        // Keyed by the syncKey embedded in each task's notes (see services/googleTasks.ts), not
+        // by title+due-date text — a task whose candidate name, company name, or scheduled time
+        // has since changed still keeps the SAME syncKey, so it's still recognized. Tasks with no
+        // syncKey (created before this marker existed, or unrelated tasks in the same list) are
+        // skipped — they simply won't be reused, same as before this fix for that one task.
         // Earlier entries win on a duplicate key — if Google's own list already has two tasks
-        // with the same title+due (e.g. from a past occurrence of this very bug), resync settles
-        // on one of them rather than alternating, and the other is left for the user to clean up.
+        // for the same syncKey (e.g. a leftover from a past occurrence of this bug), resync
+        // settles on one of them rather than alternating, and the other is left for cleanup.
         existingTasks.forEach(t => {
-          if (!t.dueDateISO) return;
-          const key = `${t.title}|||${t.dueDateISO}`;
-          if (!existingTasksLookup!.has(key)) existingTasksLookup!.set(key, t.id);
+          if (!t.syncKey) return;
+          if (!existingTasksLookup!.has(t.syncKey)) existingTasksLookup!.set(t.syncKey, t.id);
         });
       } catch (error) {
         console.error('Failed to list existing Google Tasks before resync', error);
