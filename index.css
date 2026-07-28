@@ -1727,6 +1727,15 @@ section {
   font-weight: 500;
   white-space: nowrap;
 }
+.duplicate-candidate-tag {
+  background-color: var(--danger-color);
+  color: #fff;
+  padding: 0.2rem 0.7rem;
+  border-radius: 1rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
 .agent-interview-status-badge {
   padding: 0.2rem 0.7rem;
   border-radius: 1rem;

@@ -487,6 +487,9 @@ interface Candidate {
   agentInterviewStatus?: '未面談' | '面談済み';
   scoutReplyDate?: string; // yyyy-mm-dd
   firstInterviewDate?: string; // yyyy-mm-dd — 自社側の初回面談日（agentInterviewStatusと連動）
+  // 新規登録の瞬間に、氏名＋現職企業が一致する候補者を既に他ユーザーが登録済みだった場合のスナップ
+  // ショット。登録時点でのみ判定し、以後は固定表示（相手側が後から削除・変更しても更新しない）。
+  duplicateMatches?: { ownerEmail: string; ownerLabel: string }[];
 }
 
 /**
@@ -703,6 +706,10 @@ const getFeedbackThreadMessages = (post: FeedbackPost): FeedbackThreadMessage[] 
 };
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+
+// 重複候補者判定用: 前後の空白・全角/半角スペースの違いを無視して比較する（氏名・現職企業名）。
+const normalizeForDuplicateMatch = (value?: string): string =>
+  (value || '').trim().replace(/[\s　]+/g, '').toLowerCase();
 
 /**
  * Case-insensitively resolves a Team's free-typed memberEmails entry against allUsersData's
@@ -2367,6 +2374,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】面談ログファイルのドラッグ＆ドロップ取込みで、ブラウザがファイル形式を正しく検出できない場合に空のデータを送ってしまい原因のわかりにくいエラーになる不具合を修正。拡張子から形式を補完するようにし、対応していない形式やサイズが大きすぎるファイルは具体的なメッセージで案内するようにした',
       '面談ログファイルの取込みで、Googleドキュメント（.gdoc）にも対応した',
       'お問い合わせを単発の返信からスレッド形式に変更。投稿者と開発者の間で複数回やり取りできるようにした（投稿者は自分の投稿に、開発者はどの投稿にもメッセージを追加できる）',
+      '新規候補者の登録時に、氏名＋現職企業が一致する候補者を他ユーザーが既に登録していないか全ユーザー横断でチェックし、重複していればポップアップで通知した上で登録するようにした。重複と判定された候補者のカードには、登録時点の判定結果として「重複中」バッジと相手のユーザー名を表示する（以後は固定表示で、都度は再判定しない）',
     ],
   },
   {
@@ -3462,7 +3470,8 @@ const CandidateModal: React.FC<{
     onClose: () => void;
     initialData?: Candidate | null;
     allMedia: MediaEntry[];
-}> = ({ onSave, onClose, initialData, allMedia }) => {
+    currentUserEmail: string;
+}> = ({ onSave, onClose, initialData, allMedia, currentUserEmail }) => {
     const activeMedia = allMedia.filter(m => !m.isArchived);
     const defaultCandidate: Candidate = {
         id: initialData?.id || `candidate_${Date.now()}`,
@@ -3943,16 +3952,56 @@ const CandidateModal: React.FC<{
     };
 
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const [isCheckingDuplicate, setIsCheckingDuplicate] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!candidate.name) {
             alert('候補者名は必須です。');
             return;
         }
-        onSave(candidate);
+
+        let candidateToSave = candidate;
+        // 重複判定は新規登録時のみ（編集時は対象外）。氏名＋現職企業が一致する候補者を他ユーザーが
+        // 既に登録していないか、Driveから全ユーザー分を都度取得して確認する。
+        if (!initialData) {
+            setIsCheckingDuplicate(true);
+            try {
+                const teammates = await loadAllTeammatesData<UserData>();
+                const normalizedName = normalizeForDuplicateMatch(candidate.name);
+                const normalizedCompany = normalizeForDuplicateMatch(candidate.currentCompany);
+                const matches: { ownerEmail: string; ownerLabel: string }[] = [];
+                teammates.forEach(({ email, data }) => {
+                    if (normalizeEmail(email) === normalizeEmail(currentUserEmail)) return;
+                    (data.candidates || []).forEach(other => {
+                        if (
+                            normalizedName &&
+                            normalizeForDuplicateMatch(other.name) === normalizedName &&
+                            normalizeForDuplicateMatch(other.currentCompany) === normalizedCompany
+                        ) {
+                            matches.push({ ownerEmail: email, ownerLabel: data.displayName || email });
+                        }
+                    });
+                });
+                if (matches.length > 0) {
+                    const uniqueLabels = Array.from(new Set(matches.map(m => m.ownerLabel)));
+                    alert(
+                        `「${candidate.name}」（${candidate.currentCompany || '現職未入力'}）は、既に以下のユーザーが登録済みの候補者と重複している可能性があります。\n\n` +
+                        `${uniqueLabels.join('\n')}\n\nこのまま登録します。`
+                    );
+                    candidateToSave = { ...candidate, duplicateMatches: matches };
+                }
+            } catch (err) {
+                console.error('重複候補者チェックに失敗しました', err);
+            } finally {
+                setIsCheckingDuplicate(false);
+            }
+        }
+
+        onSave(candidateToSave);
         onClose();
     };
-    
+
     const title = initialData ? '候補者情報を編集' : '新規候補者を追加';
 
     return (
@@ -4332,7 +4381,9 @@ const CandidateModal: React.FC<{
             </form>
             <div className="modal-footer">
                 <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
-                <button type="submit" form="candidate-form" className="submit-button">保存</button>
+                <button type="submit" form="candidate-form" className="submit-button" disabled={isCheckingDuplicate}>
+                    {isCheckingDuplicate ? '重複確認中...' : '保存'}
+                </button>
             </div>
         </div>
       </div>
@@ -5976,6 +6027,14 @@ const PipelineCandidateCard: React.FC<{
           )}
           {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
           {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
+          {c.duplicateMatches && c.duplicateMatches.length > 0 && (
+              <span
+                  className="duplicate-candidate-tag"
+                  title="登録時点で、氏名・現職企業が一致する候補者が他ユーザーに既に登録されていました。"
+              >
+                  重複中: {Array.from(new Set(c.duplicateMatches.map(m => m.ownerLabel))).join('、')}
+              </span>
+          )}
           {candidateIsOwn ? (
               <button
                   type="button"
@@ -7217,6 +7276,7 @@ const CandidatePipelineView: React.FC<{
                   onClose={() => setIsModalOpen(false)}
                   initialData={editingCandidate}
                   allMedia={allMedia}
+                  currentUserEmail={currentUserEmail}
               />
             )}
             
