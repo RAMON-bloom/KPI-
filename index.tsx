@@ -2327,6 +2327,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '【不具合修正】お問い合わせで、開発者が他ユーザーの投稿に返信しても保存できているか見た目上わからず「返信できない」ように見えていた不具合を修正。保存の成否をその場に表示するようにした',
       'お問い合わせの種別に「その他」を追加',
+      '【不具合修正】チーム/媒体の共有設定ファイルの権限が「閲覧のみ」のまま「編集可」に更新されないことがあり、本人以外が書き込めない不具合を修正（事業部切り替え用の「所属部署」が保存されていなかった一因とみられる）',
+      'ヘッダーのF+/ACボタンに説明を追加。絞り込みには各メンバーがヘッダー右の「所属部署」を設定している必要があり、未設定のメンバーが多い場合はその旨を画面に表示するようにした',
     ],
   },
   {
@@ -10606,8 +10608,8 @@ const App: React.FC = () => {
         <h1 className="app-title">KPI管理くん</h1>
         <div className="division-switcher" role="group" aria-label="事業部切り替え">
           <button onClick={() => setSelectedDivision('BCA')} disabled={selectedDivision === 'BCA'} title="F+とACを合わせた全体表示">BCA</button>
-          <button onClick={() => setSelectedDivision('F+')} disabled={selectedDivision === 'F+'}>F+</button>
-          <button onClick={() => setSelectedDivision('AC')} disabled={selectedDivision === 'AC'}>AC</button>
+          <button onClick={() => setSelectedDivision('F+')} disabled={selectedDivision === 'F+'} title="「所属部署」がF+のメンバーのみ表示（未設定のメンバーはヘッダー右の「所属部署」から設定できます）">F+</button>
+          <button onClick={() => setSelectedDivision('AC')} disabled={selectedDivision === 'AC'} title="「所属部署」がACのメンバーのみ表示（未設定のメンバーはヘッダー右の「所属部署」から設定できます）">AC</button>
         </div>
         <div className="header-controls">
           <div className="view-switcher">
@@ -11117,6 +11119,11 @@ const App: React.FC = () => {
             <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
           ) : (
             <>
+              {selectedDivision !== 'BCA' && divisionScopedUserOptions.length === 0 && (
+                <p className="no-data-message">
+                  「所属部署」が{selectedDivision}に設定されているメンバーがいません。ヘッダー右の「所属部署」から各自設定してください。
+                </p>
+              )}
               <div className="comparison-user-selector">
                 <div className="comparison-user-selector-header">
                   <span>比較するユーザーを選択（未選択の場合は全員を表示）</span>
@@ -11269,6 +11276,11 @@ const App: React.FC = () => {
                   <option value="">選択してください</option>
                   {divisionScopedTeams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
+                {selectedDivision !== 'BCA' && divisionScopedTeams.length === 0 && (
+                  <p className="no-data-message" style={{ marginTop: '0.5rem' }}>
+                    「所属部署」が{selectedDivision}のメンバーがいるチームがありません。ヘッダー右の「所属部署」から各自設定してください。
+                  </p>
+                )}
               </div>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
                 <button

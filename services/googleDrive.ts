@@ -90,9 +90,18 @@ export async function ensureDomainPermission(fileId: string, role: 'reader' | 'w
       const data = await res.json();
       const domainPermission = (data.permissions || []).find((p: any) => p.type === 'domain');
       if (domainPermission) {
-        if (!domainPermission.allowFileDiscovery) {
-          console.warn(`Drive file ${fileId}'s domain permission was not search-discoverable — recreating it now.`);
-          await recreateDomainPermissionWithDiscovery(fileId, domainPermission.id, domainPermission.role ?? role);
+        const needsDiscoveryFix = !domainPermission.allowFileDiscovery;
+        // A file whose domain permission is only 'reader' can't be WRITTEN to by anyone but its
+        // owner — even under this app's full `drive` scope, the per-file ACL still governs actual
+        // access. Previously this function only ever checked allowFileDiscovery and silently
+        // returned once a domain permission existed at all, so a shared config file (teams/media)
+        // stuck at 'reader' (e.g. from an older code path, or a failed initial grant) would never
+        // get upgraded to 'writer' — every non-owner write (like a member setting their own 所属
+        // 部署) would keep failing indefinitely with no self-heal.
+        const needsRoleUpgrade = role === 'writer' && domainPermission.role !== 'writer';
+        if (needsDiscoveryFix || needsRoleUpgrade) {
+          console.warn(`Drive file ${fileId}'s domain permission needs repair (discovery=${needsDiscoveryFix}, roleUpgrade=${needsRoleUpgrade}) — recreating it now.`);
+          await recreateDomainPermissionWithDiscovery(fileId, domainPermission.id, needsRoleUpgrade ? role : (domainPermission.role ?? role));
         }
         return;
       }
