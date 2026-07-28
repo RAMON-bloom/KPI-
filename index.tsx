@@ -2332,6 +2332,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】候補者パイプラインの「チーム」スコープ表示が、事業部（BCA/F+/AC）を切り替えても所属にかかわらずチーム全員を表示し続けていた不具合を修正。チームスコープの選択肢も選択中の事業部のチームのみに絞り込むようにした',
       '候補者パイプラインの「特定ユーザー」スコープの選択肢も、選択中の事業部（BCA/F+/AC）に所属するユーザーのみに絞り込むようにした',
       '【不具合修正】Googleタスクへの選考予定の同期で、候補者名・企業名・面接時間などタイトルに使われる項目を後から変更すると、既存のタスクを認識できず重複作成されてしまう不具合を修正。タスクごとに変更されない内部IDをメモ欄に埋め込んで管理するようにした（表示されているメモの末尾に識別用の短い文字列が追加されます）',
+      'Googleタスクへの選考予定の再登録（作成・更新）を、選考フェーズか予定日時が変わった時だけ行うように変更（企業名や次のアクションなど他の項目を編集しただけではタスクに触れないようにした）',
     ],
   },
   {
@@ -9902,13 +9903,15 @@ const App: React.FC = () => {
               }
               continue;
             }
+            // タスクへの再登録（作成/更新）は選考フェーズ・日時が変わった時だけ行う —
+            // 企業名や次のアクションなど他の項目だけを編集した場合は、たとえタイトル/メモの
+            // 表示上は多少古くなっても、次に選考フェーズか日時が変わった時にまとめて反映される
+            // （その時点の最新のapp/candidateからcontentを組み立てるため）。
             const prevApp = prevAppById.get(app.id);
             const isUnchanged = prevApp && existingTaskId
               && prevApp.scheduledDate === app.scheduledDate
               && prevApp.scheduledTime === app.scheduledTime
-              && prevApp.companyName === app.companyName
-              && prevApp.stage === app.stage
-              && prevApp.nextAction === app.nextAction;
+              && prevApp.stage === app.stage;
             if (isUnchanged) continue;
             const content = buildPipelineTaskContent(effectiveNext, app);
             if (existingTaskId) {
