@@ -2323,6 +2323,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-28',
+    items: [
+      '【不具合修正】お問い合わせで、開発者が他ユーザーの投稿に返信しても保存できているか見た目上わからず「返信できない」ように見えていた不具合を修正。保存の成否をその場に表示するようにした',
+    ],
+  },
+  {
     date: '2026-07-27',
     items: [
       '面談の音声・議事録要約プロンプトを、より詳細な項目（返信理由、他エージェント利用状況、キャリアサマリー、転職理由の多角的分析、希望条件、備考、面接可能時間・方法、紹介すべき企業の方向性、次回アクションなど）を整理する形式に統一',
@@ -2532,9 +2538,9 @@ const FeedbackModal: React.FC<{
   posts: (FeedbackPost & { authorEmail: string; authorLabel: string })[];
   isDeveloper: boolean;
   onSubmit: (category: FeedbackCategory, content: string) => void;
-  onReply: (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => void;
-  onSetStatus: (authorEmail: string, postId: string, status: FeedbackStatus) => void;
-  onDelete: (authorEmail: string, postId: string) => void;
+  onReply: (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => Promise<void>;
+  onSetStatus: (authorEmail: string, postId: string, status: FeedbackStatus) => Promise<void>;
+  onDelete: (authorEmail: string, postId: string) => Promise<void>;
   onClose: () => void;
 }> = ({ posts, isDeveloper, onSubmit, onReply, onSetStatus, onDelete, onClose }) => {
   const [category, setCategory] = useState<FeedbackCategory>('bug');
@@ -2542,12 +2548,38 @@ const FeedbackModal: React.FC<{
   // 開発者の返信下書き。postIdごとに保持し、まだ触っていない投稿は既存のdeveloperReplyを
   // 初期値として表示する。
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  // 「返信を保存」の進行状況 — 以前はonReplyがfire-and-forgetで、ボタンを押しても見た目上
+  // 何も起きず「返信できない」ように見えていたバグの修正。保存中はボタンを無効化し、完了後に
+  // 成功/失敗をその場に表示する。成功時はreplyDraftsをクリアし、以後はpost.developerReply
+  // （実際に保存された値）がそのまま表示されるようにする。
+  const [savingPostId, setSavingPostId] = useState<string | null>(null);
+  const [saveMessageByPostId, setSaveMessageByPostId] = useState<Record<string, string>>({});
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!content.trim()) return;
     onSubmit(category, content.trim());
     setContent('');
+  };
+
+  const handleReplyClick = (post: FeedbackPost & { authorEmail: string; authorLabel: string }) => {
+    const reply = (replyDrafts[post.id] ?? post.developerReply ?? '').trim();
+    setSavingPostId(post.id);
+    setSaveMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+    onReply(post.authorEmail, post.id, reply, post.status)
+      .then(() => {
+        setReplyDrafts(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+        setSaveMessageByPostId(prev => ({ ...prev, [post.id]: '保存しました。' }));
+      })
+      .catch(() => {
+        setSaveMessageByPostId(prev => ({ ...prev, [post.id]: '保存に失敗しました。' }));
+      })
+      .finally(() => {
+        setSavingPostId(null);
+        setTimeout(() => {
+          setSaveMessageByPostId(prev => { const next = { ...prev }; delete next[post.id]; return next; });
+        }, 4000);
+      });
   };
 
   return (
@@ -2593,7 +2625,7 @@ const FeedbackModal: React.FC<{
                     {post.status}
                   </span>
                   {isDeveloper && (
-                    <button type="button" onClick={() => onDelete(post.authorEmail, post.id)} className="remove-file-button" aria-label="この投稿を削除">&times;</button>
+                    <button type="button" onClick={() => { onDelete(post.authorEmail, post.id).catch(() => {}); }} className="remove-file-button" aria-label="この投稿を削除">&times;</button>
                   )}
                 </div>
                 <p className="feedback-post-content">{post.content}</p>
@@ -2601,7 +2633,7 @@ const FeedbackModal: React.FC<{
                   <div className="feedback-developer-controls">
                     <select
                       value={post.status}
-                      onChange={e => onSetStatus(post.authorEmail, post.id, e.target.value as FeedbackStatus)}
+                      onChange={e => { onSetStatus(post.authorEmail, post.id, e.target.value as FeedbackStatus).catch(() => {}); }}
                       aria-label="ステータス"
                     >
                       {FEEDBACK_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -2613,13 +2645,24 @@ const FeedbackModal: React.FC<{
                       placeholder="返信を入力"
                       aria-label="返信内容"
                     />
-                    <button
-                      type="button"
-                      className="secondary-action-button"
-                      onClick={() => onReply(post.authorEmail, post.id, (replyDrafts[post.id] ?? post.developerReply ?? '').trim(), post.status)}
-                    >
-                      返信を保存
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <button
+                        type="button"
+                        className="secondary-action-button"
+                        disabled={savingPostId === post.id}
+                        onClick={() => handleReplyClick(post)}
+                      >
+                        {savingPostId === post.id ? '保存中...' : '返信を保存'}
+                      </button>
+                      {saveMessageByPostId[post.id] && (
+                        <span
+                          className="feedback-save-message"
+                          style={{ color: saveMessageByPostId[post.id].includes('失敗') ? 'var(--danger-color)' : 'var(--success-color)' }}
+                        >
+                          {saveMessageByPostId[post.id]}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   post.developerReply && (
@@ -9270,9 +9313,12 @@ const App: React.FC = () => {
   };
 
   // 開発者による他ユーザーの投稿への返信・ステータス変更・削除 — persistTeammateCandidateVisibility
-  // と同じ、楽観的ローカル更新 + fire-and-forgetのDrive書き込みパターン。投稿者本人（＝開発者自身
-  // の投稿）の場合は自分のUserDataを更新するだけでよい。patch=nullは投稿の削除を意味する。
-  const persistFeedbackUpdate = (authorEmail: string, postId: string, patch: Partial<FeedbackPost> | null) => {
+  // と同じ、楽観的ローカル更新 + Drive書き込みのパターン。投稿者本人（＝開発者自身の投稿）の場合は
+  // 自分のUserDataを更新するだけでよい。patch=nullは投稿の削除を意味する。呼び出し元
+  // （FeedbackModal）が成功/失敗を画面に表示できるよう、Drive書き込みの結果までちゃんと
+  // 待てるPromiseを返す（以前はfire-and-forgetで、返信ボタンを押しても見た目上何も起きず
+  // 「返信できない」ように見えていた）。
+  const persistFeedbackUpdate = (authorEmail: string, postId: string, patch: Partial<FeedbackPost> | null): Promise<void> => {
     if (currentIdentity && authorEmail === currentIdentity.email) {
       setCurrentUserData(prev => {
         if (!prev) return prev;
@@ -9280,7 +9326,7 @@ const App: React.FC = () => {
         const updated = patch === null ? posts.filter(p => p.id !== postId) : posts.map(p => (p.id === postId ? { ...p, ...patch } : p));
         return { ...prev, feedbackPosts: updated };
       });
-      return;
+      return Promise.resolve();
     }
     setAllUsersData(prev => {
       const target = prev[authorEmail];
@@ -9291,26 +9337,30 @@ const App: React.FC = () => {
     });
     const targetFileId = driveFileIdByEmail[authorEmail];
     if (!targetFileId) {
-      alert('投稿者のデータファイルが見つかりませんでした。');
-      return;
+      const err = new Error('投稿者のデータファイルが見つかりませんでした。ページを更新してから再度お試しください。');
+      alert(err.message);
+      return Promise.reject(err);
     }
-    overwriteTeammateFeedbackPost<UserData>(targetFileId, postId, patch as Record<string, unknown> | null).catch(err => {
-      console.error('Failed to save feedback update to author Drive file', err);
-      alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    return overwriteTeammateFeedbackPost<UserData>(targetFileId, postId, patch as Record<string, unknown> | null)
+      .then(() => {})
+      .catch(err => {
+        console.error('Failed to save feedback update to author Drive file', err);
+        alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
+      });
   };
 
   const handleReplyFeedback = (authorEmail: string, postId: string, reply: string, status: FeedbackStatus) => {
-    persistFeedbackUpdate(authorEmail, postId, { developerReply: reply, status, repliedAt: new Date().toISOString() });
+    return persistFeedbackUpdate(authorEmail, postId, { developerReply: reply, status, repliedAt: new Date().toISOString() });
   };
 
   const handleSetFeedbackStatus = (authorEmail: string, postId: string, status: FeedbackStatus) => {
-    persistFeedbackUpdate(authorEmail, postId, { status });
+    return persistFeedbackUpdate(authorEmail, postId, { status });
   };
 
   const handleDeleteFeedback = (authorEmail: string, postId: string) => {
-    if (!confirm('この投稿を削除しますか？')) return;
-    persistFeedbackUpdate(authorEmail, postId, null);
+    if (!confirm('この投稿を削除しますか？')) return Promise.resolve();
+    return persistFeedbackUpdate(authorEmail, postId, null);
   };
 
   // Division-switcher filter for 全ユーザー/チーム別/パイプライン(全ユーザー) — 'BCA' (the
