@@ -2329,7 +2329,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'お問い合わせの種別に「その他」を追加',
       '【不具合修正】チーム/媒体の共有設定ファイルの権限が「閲覧のみ」のまま「編集可」に更新されないことがあり、本人以外が書き込めない不具合を修正（事業部切り替え用の「所属部署」が保存されていなかった一因とみられる）',
       'ヘッダーのF+/ACボタンに説明を追加。絞り込みには各メンバーがヘッダー右の「所属部署」を設定している必要があり、未設定のメンバーが多い場合はその旨を画面に表示するようにした',
-      '【不具合修正】候補者パイプラインの「チーム」スコープ表示が、事業部（BCA/F+/AC）を切り替えても所属にかかわらずチーム全員を表示し続けていた不具合を修正。チームスコープの選択肢も選択中の事業部のチームのみに絞り込むようにした（「特定ユーザー」スコープは従来通り事業部を問わず選べる）',
+      '【不具合修正】候補者パイプラインの「チーム」スコープ表示が、事業部（BCA/F+/AC）を切り替えても所属にかかわらずチーム全員を表示し続けていた不具合を修正。チームスコープの選択肢も選択中の事業部のチームのみに絞り込むようにした',
+      '候補者パイプラインの「特定ユーザー」スコープの選択肢も、選択中の事業部（BCA/F+/AC）に所属するユーザーのみに絞り込むようにした',
     ],
   },
   {
@@ -10105,15 +10106,14 @@ const App: React.FC = () => {
     // Candidates shown in the pipeline view, scoped to self / all users / a team. Non-personal
     // scopes flatten every in-scope teammate's candidates and tag each with its owner, so the
     // pipeline UI can label them and disable editing on candidates that aren't the viewer's own.
-    // 事業部（BCA/F+/AC）フィルターは team/all_users スコープに適用する（team_kpiの
-    // selectedTeamMemberEmails/全ユーザーのcomparisonUsersと同じ考え方 — チームメンバーの一部
-    // だけ他事業部でも、選択中の事業部に属さないメンバーは除外する）。以前はteamスコープに
-    // このフィルターがかかっておらず、事業部を切り替えてもチームメンバー全員がそのまま表示
-    // され続ける不具合があった。userスコープ（特定ユーザーを直接指定）はdivisionScoped
-    // UserOptions同様、意図的に対象外のまま（誰を見るか明示的に選んでいるので、事業部を
-    // またいで検索できる必要がある）。memberEmailsは自由入力のため、resolveUserDataEntryで
-    // 実際のサインインメール（大文字小文字を含む正しい表記）に解決してからフィルターする
-    // （さもないと大小文字が食い違うメンバーが素通りしてしまう）。
+    // 事業部（BCA/F+/AC）フィルターは team/all_users/user すべてのスコープに適用する
+    // （team_kpiのselectedTeamMemberEmails/全ユーザーのcomparisonUsersと同じ考え方 —
+    // チームメンバーの一部だけ他事業部でも、選択中の事業部に属さないメンバーは除外する）。
+    // userスコープの選択肢自体もdivisionScopedUserOptionsに絞ってあるので通常はここまで
+    // 来ないが、事業部切り替え直後の再レンダリング中に古い選択が残っていた場合の保険として
+    // ここでもフィルターする。memberEmailsは自由入力のため、resolveUserDataEntryで実際の
+    // サインインメール（大文字小文字を含む正しい表記）に解決してからフィルターする（さも
+    // ないと大小文字が食い違うメンバーが素通りしてしまう）。
     const pipelineCandidates = useMemo(() => {
       if (pipelineScope === 'personal') return candidates;
       if (pipelineScope === 'user') {
@@ -10122,6 +10122,7 @@ const App: React.FC = () => {
         const resolved = resolveUserDataEntry(displayedAllUsersData, email);
         if (!resolved) return [];
         const [ownerEmail, data] = resolved;
+        if (!isEmailInSelectedDivision(ownerEmail)) return [];
         const ownerLabel = data.displayName || ownerEmail;
         return (data.candidates || []).map(c => ({ ...c, ownerEmail, ownerLabel }));
       }
@@ -10149,13 +10150,22 @@ const App: React.FC = () => {
     }, [displayedAllUsersData]);
 
     // Same list, narrowed to the header's selected division — used for the 全ユーザー tab's
-    // 比較するユーザー picker, so the picker itself (not just the resulting totals) reflects
-    // the current BCA/F+/AC scope. pipelineUserOptions itself stays unfiltered for contexts that
-    // need every known user regardless of division (TeamsModal's department assignment, the
-    // pipeline's single-user lookup).
+    // 比較するユーザー picker and パイプラインの「特定ユーザー」スコープの選択肢、so the picker
+    // itself (not just the resulting totals) reflects the current BCA/F+/AC scope.
+    // pipelineUserOptions itself stays unfiltered for contexts that need every known user
+    // regardless of division (TeamsModal's department assignment).
     const divisionScopedUserOptions = useMemo(() => {
       return pipelineUserOptions.filter(u => isEmailInSelectedDivision(u.email));
     }, [pipelineUserOptions, isEmailInSelectedDivision]);
+
+    // If switching the division switcher makes the currently-selected user disappear from
+    // パイプラインの「特定ユーザー」dropdown, drop the selection too — same idea as the
+    // selectedTeamId/pipelineSelectedTeamId resets above.
+    useEffect(() => {
+      if (pipelineSelectedUserEmail && !divisionScopedUserOptions.some(u => u.email === pipelineSelectedUserEmail)) {
+        setPipelineSelectedUserEmail(null);
+      }
+    }, [pipelineSelectedUserEmail, divisionScopedUserOptions]);
 
     // Team members whose KPI actuals the signed-in account, if they hold the ミドル role, is
     // allowed to proxy-enter — every member of every Team they themselves belong to (never
@@ -11415,7 +11425,7 @@ const App: React.FC = () => {
                 teams={divisionScopedTeams}
                 selectedTeamId={pipelineSelectedTeamId}
                 onSelectedTeamIdChange={setPipelineSelectedTeamId}
-                userOptions={pipelineUserOptions}
+                userOptions={divisionScopedUserOptions}
                 selectedUserEmail={pipelineSelectedUserEmail}
                 onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
