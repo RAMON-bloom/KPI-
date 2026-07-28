@@ -2376,6 +2376,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'お問い合わせを単発の返信からスレッド形式に変更。投稿者と開発者の間で複数回やり取りできるようにした（投稿者は自分の投稿に、開発者はどの投稿にもメッセージを追加できる）',
       '新規候補者の登録時に、氏名＋現職企業が一致する候補者を他ユーザーが既に登録していないか全ユーザー横断でチェックし、重複していればポップアップで通知した上で登録するようにした。重複と判定された候補者のカードには、登録時点の判定結果として「重複中」バッジと相手のユーザー名を表示する（以後は固定表示で、都度は再判定しない）',
       '重複候補者のポップアップに「このまま登録しますか？」の選択肢を追加し、キャンセルすれば登録自体を取りやめられるようにした',
+      'レジュメ・面談ログ（音声/議事録）の取込み時に、年齢・希望年収・電話番号・メールアドレスも読み取れる場合は自動入力するようにした（記載がない項目は自動入力しない）',
     ],
   },
   {
@@ -3404,6 +3405,51 @@ const buildInterviewSummaryTranscriptPrompt = (transcriptText: string) =>
 const INTERVIEW_SUMMARY_FILE_INSTRUCTION =
     `あなたはプロの転職エージェントです。これはGoogle Meetなどの面談議事録のファイルです。この内容を元に、候補者情報を以下のフォーマットで整理・要約してください。\n\n${INTERVIEW_SUMMARY_FORMAT}`;
 
+const CANDIDATE_BASIC_INFO_SCHEMA = {
+    type: Type.OBJECT,
+    properties: {
+        age: { type: Type.NUMBER, description: '候補者の年齢（数値）。言及がなければ省略する。' },
+        salary: { type: Type.NUMBER, description: '候補者の希望年収（万円単位の数値。例: 650万円なら650）。言及がなければ省略する。' },
+        phoneNumber: { type: Type.STRING, description: '候補者の電話番号。言及がなければ省略する。' },
+        email: { type: Type.STRING, description: '候補者のメールアドレス。言及がなければ省略する。' },
+    },
+};
+
+const toGenerateContentParts = (contents: any): any[] => {
+    if (typeof contents === 'string') return [{ text: contents }];
+    if (contents && Array.isArray(contents.parts)) return contents.parts;
+    return [{ text: String(contents) }];
+};
+
+/**
+ * 面談ログ・音声の要約生成（summarizeAndAppendInterviewLog / handleAudioFile）と同じ入力素材から、
+ * 年齢・希望年収・電話番号・メールアドレスを構造化データとして抽出する — 要約本文の自由記述と
+ * 混ざらないよう、responseSchemaで厳密なJSON出力を強制する別呼び出しにしている。CandidateModal
+ * （新規登録時）とPipelineCandidateCard（登録済み候補者への追加取込み時）の両方から使う。
+ */
+const extractCandidateBasicInfo = async (
+    contents: any
+): Promise<{ age?: number; salary?: number; phoneNumber?: string; email?: string }> => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const instructionPart = {
+        text: '上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレスが読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。',
+    };
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [...toGenerateContentParts(contents), instructionPart] },
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: CANDIDATE_BASIC_INFO_SCHEMA,
+            },
+        });
+        return JSON.parse(response.text.trim());
+    } catch (error) {
+        console.error('Error extracting candidate basic info:', error);
+        return {};
+    }
+};
+
 // Shared by CandidateModal (resume/audio upload) and PipelineCandidateCard's inline audio
 // upload — module-level since both need it and it has no component-specific state.
 const fileToBase64 = (file: File): Promise<string> => {
@@ -3584,7 +3630,7 @@ const CandidateModal: React.FC<{
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
 
       const instructionPart = {
-          text: 'これらの履歴書から候補者の氏名、現在の勤務先企業名、最終学歴、そして学歴、職歴、スキルを重視した概要を抽出してください。複数の情報源がある場合は、情報を集約し、最も包括的な内容にしてください。',
+          text: 'これらの履歴書から候補者の氏名、現在の勤務先企業名、最終学歴、年齢、希望年収、電話番号、メールアドレス、そして学歴、職歴、スキルを重視した概要を抽出してください。複数の情報源がある場合は、情報を集約し、最も包括的な内容にしてください。',
       };
 
       const response = await ai.models.generateContent({
@@ -3611,6 +3657,22 @@ const CandidateModal: React.FC<{
                         type: Type.STRING,
                         description: '候補者の学歴、職歴、スキル、職務概要に焦点を当てた簡潔な要約。採用担当者が候補者の全体像を素早く把握できるように記述する。',
                     },
+                    age: {
+                        type: Type.NUMBER,
+                        description: '候補者の年齢（数値）。見つからない場合は省略する。',
+                    },
+                    salary: {
+                        type: Type.NUMBER,
+                        description: '候補者の希望年収（万円単位の数値。例: 650万円なら650）。見つからない場合は省略する。',
+                    },
+                    phoneNumber: {
+                        type: Type.STRING,
+                        description: '候補者の電話番号。見つからない場合は省略する。',
+                    },
+                    email: {
+                        type: Type.STRING,
+                        description: '候補者のメールアドレス。見つからない場合は省略する。',
+                    },
                 },
                 required: ["name", "summary", "currentCompany", "education"],
             },
@@ -3626,6 +3688,10 @@ const CandidateModal: React.FC<{
           currentCompany: parsedData.currentCompany?.trim() || prev.currentCompany,
           education: parsedData.education?.trim() || prev.education,
           summary: parsedData.summary?.trim() || prev.summary,
+          age: parsedData.age ?? prev.age,
+          salary: parsedData.salary ?? prev.salary,
+          phoneNumber: parsedData.phoneNumber?.trim() || prev.phoneNumber,
+          email: parsedData.email?.trim() || prev.email,
       }));
     };
 
@@ -3758,14 +3824,21 @@ const CandidateModal: React.FC<{
                 text: INTERVIEW_SUMMARY_AUDIO_PROMPT,
             };
 
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: { parts: [audioPart, textPart] },
-            });
+            const [response, basicInfo] = await Promise.all([
+                ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: { parts: [audioPart, textPart] },
+                }),
+                extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
+            ]);
 
             setCandidate(prev => ({
                 ...prev,
                 interviewSummary: response.text.trim(),
+                age: basicInfo.age ?? prev.age,
+                salary: basicInfo.salary ?? prev.salary,
+                phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
+                email: basicInfo.email?.trim() || prev.email,
             }));
 
         } catch (error) {
@@ -3835,11 +3908,18 @@ const CandidateModal: React.FC<{
         setIsSummarizingInterviewLog(true);
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-            const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents });
+            const [response, basicInfo] = await Promise.all([
+                ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
+                extractCandidateBasicInfo(contents),
+            ]);
             const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
             setCandidate(prev => ({
                 ...prev,
                 interviewSummary: prev.interviewSummary ? `${prev.interviewSummary}\n\n${entry}` : entry,
+                age: basicInfo.age ?? prev.age,
+                salary: basicInfo.salary ?? prev.salary,
+                phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
+                email: basicInfo.email?.trim() || prev.email,
             }));
         } catch (error) {
             console.error('Error summarizing interview log:', error);
@@ -5843,8 +5923,19 @@ const PipelineCandidateCard: React.FC<{
       const base64Data = await fileToBase64(audioFile);
       const audioPart = { inlineData: { mimeType: audioFile.type, data: base64Data } };
       const textPart = { text: INTERVIEW_SUMMARY_AUDIO_PROMPT };
-      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } });
-      onSave({ ...c, interviewAudioFile: audioFileInfo, interviewSummary: response.text.trim() });
+      const [response, basicInfo] = await Promise.all([
+        ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } }),
+        extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
+      ]);
+      onSave({
+        ...c,
+        interviewAudioFile: audioFileInfo,
+        interviewSummary: response.text.trim(),
+        age: basicInfo.age ?? c.age,
+        salary: basicInfo.salary ?? c.salary,
+        phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
+        email: basicInfo.email?.trim() || c.email,
+      });
     } catch (error) {
       console.error("Error generating interview summary:", error);
       alert('AIによる面談要約の生成中にエラーが発生しました。');
@@ -5908,9 +5999,19 @@ const PipelineCandidateCard: React.FC<{
     setIsSummarizingInterviewLog(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents });
+      const [response, basicInfo] = await Promise.all([
+        ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
+        extractCandidateBasicInfo(contents),
+      ]);
       const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
-      onSave({ ...c, interviewSummary: c.interviewSummary ? `${c.interviewSummary}\n\n${entry}` : entry });
+      onSave({
+        ...c,
+        interviewSummary: c.interviewSummary ? `${c.interviewSummary}\n\n${entry}` : entry,
+        age: basicInfo.age ?? c.age,
+        salary: basicInfo.salary ?? c.salary,
+        phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
+        email: basicInfo.email?.trim() || c.email,
+      });
     } catch (error) {
       console.error('Error summarizing interview log:', error);
       alert('面談ログの要約生成中にエラーが発生しました。');
