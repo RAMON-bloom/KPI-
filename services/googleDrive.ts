@@ -307,17 +307,27 @@ export interface InterviewLogFile {
 }
 
 /**
- * Searches the signed-in user's own Drive (drive.readonly — this app was never granted
- * access to files it didn't create, so this only ever searches the current user's Drive,
- * not other users') for Google Docs whose name or content mentions the candidate. Google
- * Meet saves auto-generated transcripts/notes as Google Docs, so this is restricted to that
- * mimeType.
+ * Searches the signed-in user's own Drive (full `drive` scope, but this call only ever queries
+ * the default corpus, i.e. files this account can see in "My Drive" — never other users') for
+ * Google Docs whose name or content mentions the candidate. Google Meet saves auto-generated
+ * transcripts/notes as Google Docs, so this is restricted to that mimeType.
  */
 export async function searchInterviewLogsByName(candidateName: string): Promise<InterviewLogFile[]> {
-  const escaped = escapeDriveQueryValue(candidateName);
-  const q = `mimeType='application/vnd.google-apps.document' and trashed=false and (name contains '${escaped}' or fullText contains '${escaped}')`;
+  // Meeting titles/transcripts don't always use the same spacing convention as however the
+  // recruiter typed the candidate's name into this app (e.g. "山田 太郎" here vs "山田太郎" in the
+  // Meet title, or vice versa) — Drive's `contains` operator requires an exact substring match,
+  // so a spacing mismatch alone was enough to silently miss an otherwise-findable transcript.
+  // Trying both the as-typed name and a whitespace-stripped variant in the same query covers
+  // both directions without an extra round-trip.
+  const noSpaceName = candidateName.replace(/[\s　]+/g, '');
+  const nameVariants = Array.from(new Set([candidateName, noSpaceName].filter(Boolean)));
+  const clause = nameVariants
+    .map(escapeDriveQueryValue)
+    .map(v => `name contains '${v}' or fullText contains '${v}'`)
+    .join(' or ');
+  const q = `mimeType='application/vnd.google-apps.document' and trashed=false and (${clause})`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=5&spaces=drive`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=10&spaces=drive`
   );
   if (!res.ok) throw new Error('面談ログの検索に失敗しました。');
   const data = await res.json();

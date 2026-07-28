@@ -2333,6 +2333,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者パイプラインの「特定ユーザー」スコープの選択肢も、選択中の事業部（BCA/F+/AC）に所属するユーザーのみに絞り込むようにした',
       '【不具合修正】Googleタスクへの選考予定の同期で、候補者名・企業名・面接時間などタイトルに使われる項目を後から変更すると、既存のタスクを認識できず重複作成されてしまう不具合を修正。タスクごとに変更されない内部IDをメモ欄に埋め込んで管理するようにした（表示されているメモの末尾に識別用の短い文字列が追加されます）',
       'Googleタスクへの選考予定の再登録（作成・更新）を、選考フェーズか予定日時が変わった時だけ行うように変更（企業名や次のアクションなど他の項目を編集しただけではタスクに触れないようにした）',
+      '【不具合修正】面談ログのGoogleドライブ検索で、候補者名のスペースの有無（例:「山田 太郎」/「山田太郎」）が議事録側の表記と食い違うと見つからないことがある不具合を改善し、両方の表記で検索するようにした',
+      '【不具合修正】面談ログファイルのドラッグ＆ドロップ取込みで、ブラウザがファイル形式を正しく検出できない場合に空のデータを送ってしまい原因のわかりにくいエラーになる不具合を修正。拡張子から形式を補完するようにし、対応していない形式やサイズが大きすぎるファイルは具体的なメッセージで案内するようにした',
     ],
   },
   {
@@ -3354,6 +3356,36 @@ const fileToBase64 = (file: File): Promise<string> => {
     });
 };
 
+// 面談ログの手動アップロード（CandidateModal / PipelineCandidateCard 共通）が対応する形式。
+// <input accept="..."> はクリックで選ぶファイルピッカーにしか効かず、ドラッグ＆ドロップは
+// 素通りしてしまうため、実際の形式チェックはここで行う。
+const INTERVIEW_LOG_MIME_BY_EXTENSION: Record<string, string> = {
+    '.txt': 'text/plain',
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+const INTERVIEW_LOG_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // Gemini generateContentのinlineData実用上限に合わせた目安
+
+/**
+ * ドロップ/選択された面談ログファイルを検証し、実際に使うMIMEタイプを決める。
+ * file.type はブラウザ/OSが常に正しく埋めてくれるとは限らず、特にドラッグ＆ドロップでは
+ * 空文字列になることがある — その場合に空のmimeTypeをそのままGeminiへ送ると、原因の
+ * わかりにくいエラーになっていた（対応拡張子から補完する）。対応していない拡張子や
+ * 大きすぎるファイルは、ここで具体的なエラーメッセージを返して弾く。
+ */
+const resolveInterviewLogFile = (file: File): { mimeType: string; error?: string } => {
+    const lowerName = file.name.toLowerCase();
+    const extension = Object.keys(INTERVIEW_LOG_MIME_BY_EXTENSION).find(ext => lowerName.endsWith(ext));
+    if (!extension) {
+        return { mimeType: '', error: `対応していないファイル形式です（${file.name}）。.txt / .pdf / .doc / .docx のいずれかを選択してください。` };
+    }
+    if (file.size > INTERVIEW_LOG_MAX_FILE_SIZE_BYTES) {
+        return { mimeType: '', error: `ファイルサイズが大きすぎます（上限20MB）: ${file.name}` };
+    }
+    return { mimeType: file.type || INTERVIEW_LOG_MIME_BY_EXTENSION[extension] };
+};
+
 const CandidateModal: React.FC<{
     onSave: (candidate: Candidate) => void;
     onClose: () => void;
@@ -3760,9 +3792,14 @@ const CandidateModal: React.FC<{
     const handleInterviewLogFile = async (files: FileList) => {
         if (!files || files.length === 0) return;
         const file = files[0];
+        const { mimeType, error: validationError } = resolveInterviewLogFile(file);
+        if (validationError) {
+            alert(validationError);
+            return;
+        }
         const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
         try {
-            if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
+            if (mimeType === 'text/plain') {
                 const text = await file.text();
                 await summarizeAndAppendInterviewLog(
                     buildInterviewSummaryTranscriptPrompt(text),
@@ -3774,7 +3811,7 @@ const CandidateModal: React.FC<{
                 await summarizeAndAppendInterviewLog(
                     {
                         parts: [
-                            { inlineData: { mimeType: file.type, data: base64Data } },
+                            { inlineData: { mimeType, data: base64Data } },
                             { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION },
                         ],
                     },
@@ -5755,15 +5792,20 @@ const PipelineCandidateCard: React.FC<{
   const handleInterviewLogFile = async (files: FileList) => {
     if (!files || files.length === 0) return;
     const file = files[0];
+    const { mimeType, error: validationError } = resolveInterviewLogFile(file);
+    if (validationError) {
+      alert(validationError);
+      return;
+    }
     const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
     try {
-      if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
+      if (mimeType === 'text/plain') {
         const text = await file.text();
         await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
       } else {
         const base64Data = await fileToBase64(file);
         await summarizeAndAppendInterviewLog(
-          { parts: [{ inlineData: { mimeType: file.type, data: base64Data } }, { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION }] },
+          { parts: [{ inlineData: { mimeType, data: base64Data } }, { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION }] },
           file.name,
           dateLabel
         );
