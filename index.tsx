@@ -2375,6 +2375,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '面談ログファイルの取込みで、Googleドキュメント（.gdoc）にも対応した',
       'お問い合わせを単発の返信からスレッド形式に変更。投稿者と開発者の間で複数回やり取りできるようにした（投稿者は自分の投稿に、開発者はどの投稿にもメッセージを追加できる）',
       '新規候補者の登録時に、氏名＋現職企業が一致する候補者を他ユーザーが既に登録していないか全ユーザー横断でチェックし、重複していればポップアップで通知した上で登録するようにした。重複と判定された候補者のカードには、登録時点の判定結果として「重複中」バッジと相手のユーザー名を表示する（以後は固定表示で、都度は再判定しない）',
+      '重複候補者のポップアップに「このまま登録しますか？」の選択肢を追加し、キャンセルすれば登録自体を取りやめられるようにした',
     ],
   },
   {
@@ -3985,10 +3986,14 @@ const CandidateModal: React.FC<{
                 });
                 if (matches.length > 0) {
                     const uniqueLabels = Array.from(new Set(matches.map(m => m.ownerLabel)));
-                    alert(
+                    const shouldProceed = window.confirm(
                         `「${candidate.name}」（${candidate.currentCompany || '現職未入力'}）は、既に以下のユーザーが登録済みの候補者と重複している可能性があります。\n\n` +
-                        `${uniqueLabels.join('\n')}\n\nこのまま登録します。`
+                        `${uniqueLabels.join('\n')}\n\nこのまま登録しますか？`
                     );
+                    if (!shouldProceed) {
+                        setIsCheckingDuplicate(false);
+                        return;
+                    }
                     candidateToSave = { ...candidate, duplicateMatches: matches };
                 }
             } catch (err) {
