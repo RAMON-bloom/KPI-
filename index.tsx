@@ -2329,6 +2329,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'お問い合わせの種別に「その他」を追加',
       '【不具合修正】チーム/媒体の共有設定ファイルの権限が「閲覧のみ」のまま「編集可」に更新されないことがあり、本人以外が書き込めない不具合を修正（事業部切り替え用の「所属部署」が保存されていなかった一因とみられる）',
       'ヘッダーのF+/ACボタンに説明を追加。絞り込みには各メンバーがヘッダー右の「所属部署」を設定している必要があり、未設定のメンバーが多い場合はその旨を画面に表示するようにした',
+      '【不具合修正】候補者パイプラインの「チーム」スコープ表示が、事業部（BCA/F+/AC）を切り替えても所属にかかわらずチーム全員を表示し続けていた不具合を修正。チームスコープの選択肢も選択中の事業部のチームのみに絞り込むようにした（「特定ユーザー」スコープは従来通り事業部を問わず選べる）',
     ],
   },
   {
@@ -9398,6 +9399,13 @@ const App: React.FC = () => {
     }
   }, [selectedTeamId, divisionScopedTeams]);
 
+  // Same as above, for パイプライン's team-scope selector (also now narrowed to divisionScopedTeams).
+  useEffect(() => {
+    if (pipelineSelectedTeamId && !divisionScopedTeams.some(t => t.id === pipelineSelectedTeamId)) {
+      setPipelineSelectedTeamId(null);
+    }
+  }, [pipelineSelectedTeamId, divisionScopedTeams]);
+
   // The signed-in user's own team, if they belong to one — the first team (in load order) whose
   // memberEmails includes them. Used only to pre-select チーム別/パイプラインのチームスコープ
   // selectors below; a user in several teams just gets the first as a starting point.
@@ -10097,13 +10105,33 @@ const App: React.FC = () => {
     // Candidates shown in the pipeline view, scoped to self / all users / a team. Non-personal
     // scopes flatten every in-scope teammate's candidates and tag each with its owner, so the
     // pipeline UI can label them and disable editing on candidates that aren't the viewer's own.
+    // 事業部（BCA/F+/AC）フィルターは team/all_users スコープに適用する（team_kpiの
+    // selectedTeamMemberEmails/全ユーザーのcomparisonUsersと同じ考え方 — チームメンバーの一部
+    // だけ他事業部でも、選択中の事業部に属さないメンバーは除外する）。以前はteamスコープに
+    // このフィルターがかかっておらず、事業部を切り替えてもチームメンバー全員がそのまま表示
+    // され続ける不具合があった。userスコープ（特定ユーザーを直接指定）はdivisionScoped
+    // UserOptions同様、意図的に対象外のまま（誰を見るか明示的に選んでいるので、事業部を
+    // またいで検索できる必要がある）。memberEmailsは自由入力のため、resolveUserDataEntryで
+    // 実際のサインインメール（大文字小文字を含む正しい表記）に解決してからフィルターする
+    // （さもないと大小文字が食い違うメンバーが素通りしてしまう）。
     const pipelineCandidates = useMemo(() => {
       if (pipelineScope === 'personal') return candidates;
-      const emailsInScope = pipelineScope === 'team'
+      if (pipelineScope === 'user') {
+        const email = pipelineSelectedUserEmail;
+        if (!email) return [];
+        const resolved = resolveUserDataEntry(displayedAllUsersData, email);
+        if (!resolved) return [];
+        const [ownerEmail, data] = resolved;
+        const ownerLabel = data.displayName || ownerEmail;
+        return (data.candidates || []).map(c => ({ ...c, ownerEmail, ownerLabel }));
+      }
+      const rawEmailsInScope: string[] = pipelineScope === 'team'
         ? (teams.find(t => t.id === pipelineSelectedTeamId)?.memberEmails || [])
-        : pipelineScope === 'user'
-        ? (pipelineSelectedUserEmail ? [pipelineSelectedUserEmail] : [])
-        : Object.keys(displayedAllUsersData).filter(isEmailInSelectedDivision);
+        : Object.keys(displayedAllUsersData);
+      const resolvedEmailsInScope: string[] = Array.from(new Set(
+        rawEmailsInScope.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email)
+      ));
+      const emailsInScope: string[] = resolvedEmailsInScope.filter(isEmailInSelectedDivision);
       return emailsInScope.flatMap(email => {
         const resolved = resolveUserDataEntry(displayedAllUsersData, email);
         if (!resolved) return [];
@@ -11384,7 +11412,7 @@ const App: React.FC = () => {
                 currentUserEmail={currentIdentity?.email || ''}
                 scope={pipelineScope}
                 onScopeChange={setPipelineScope}
-                teams={teams}
+                teams={divisionScopedTeams}
                 selectedTeamId={pipelineSelectedTeamId}
                 onSelectedTeamIdChange={setPipelineSelectedTeamId}
                 userOptions={pipelineUserOptions}
