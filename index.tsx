@@ -711,6 +711,17 @@ const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 const normalizeForDuplicateMatch = (value?: string): string =>
   (value || '').trim().replace(/[\s　]+/g, '').toLowerCase();
 
+// candidate.id はユーザー個人のブラウザ内だけでなく、全ユーザー/チーム別パイプライン表示で
+// 全員分のcandidatesを1つの配列に平坦化してkey={c.id}で描画する際にも一意である必要がある。
+// タイムスタンプのみ（candidate_${Date.now()}）だと、別のユーザーが同じミリ秒に新規登録した
+// 場合にIDが衝突し、Reactのkey重複により一方が画面に表示されなくなる（「たまに特定の候補者が
+// 表示されない」不具合の原因）。ランダムな接尾辞を足すことで実質的に衝突しないようにする。
+const generateCandidateId = (): string => `candidate_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+// 同じ理由（CompanyPipelineViewなど、複数ユーザー分のapplicationsを1つのkey={application.id}
+// 一覧に平坦化して描画する画面がある）でapplication.idにもランダム接尾辞を付与する。
+const generateApplicationId = (): string => `app_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
 /**
  * Case-insensitively resolves a Team's free-typed memberEmails entry against allUsersData's
  * keys (which are always exactly the casing Google returned at sign-in). A member email typed
@@ -2360,6 +2371,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-29',
+    items: [
+      '【不具合修正】ごくまれに、全ユーザー/チーム別パイプラインで別ユーザーが登録した特定の候補者が表示されないことがある不具合を修正。候補者・選考企業のIDがタイムスタンプのみで生成されており、別ユーザーが同じミリ秒に新規登録した場合にIDが衝突し、一覧描画時に一方が表示されなくなることがあったため、IDにランダムな接尾辞を追加して衝突しないようにした（既存の候補者IDへの影響はなく、これ以降新規登録する候補者・選考企業から適用されます）',
+    ],
+  },
+  {
     date: '2026-07-28',
     items: [
       '【不具合修正】お問い合わせで、開発者が他ユーザーの投稿に返信しても保存できているか見た目上わからず「返信できない」ように見えていた不具合を修正。保存の成否をその場に表示するようにした',
@@ -3522,7 +3539,7 @@ const CandidateModal: React.FC<{
 }> = ({ onSave, onClose, initialData, allMedia, currentUserEmail }) => {
     const activeMedia = allMedia.filter(m => !m.isArchived);
     const defaultCandidate: Candidate = {
-        id: initialData?.id || `candidate_${Date.now()}`,
+        id: initialData?.id || generateCandidateId(),
         name: '',
         salary: 0,
         currentSalary: 0,
@@ -3604,7 +3621,7 @@ const CandidateModal: React.FC<{
 
     const addApplication = () => {
         const newApp: CompanyApplication = {
-            id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '',
+            id: generateApplicationId(), companyName: '', stage: '打診', nextAction: '',
             stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
         };
         setCandidate(prev => ({ ...prev, applications: [...prev.applications, newApp] }));
@@ -4495,7 +4512,7 @@ const ApplicationModal: React.FC<{
             } else {
                 // Adding new application
                 setApplication({
-                    id: `app_${Date.now()}`,
+                    id: generateApplicationId(),
                     companyName: '',
                     stage: '打診',
                     nextAction: '',
@@ -5893,7 +5910,7 @@ const PipelineCandidateCard: React.FC<{
 
   const addApplication = () => {
     const newApp: CompanyApplication = {
-      id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '',
+      id: generateApplicationId(), companyName: '', stage: '打診', nextAction: '',
       stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
     };
     onSave({ ...c, applications: [...c.applications, newApp] });
@@ -7024,7 +7041,7 @@ const CandidatePipelineView: React.FC<{
         const prefilled: CompanyApplication = application
             ? { ...application, scheduledDate: scheduleModalDate }
             : {
-                id: `app_${Date.now()}`, companyName: '', stage: '打診', nextAction: '', scheduledDate: scheduleModalDate, memo: '',
+                id: generateApplicationId(), companyName: '', stage: '打診', nextAction: '', scheduledDate: scheduleModalDate, memo: '',
                 stageHistory: [{ stage: '打診', date: new Date().toLocaleDateString('sv-SE') }],
               };
         setScheduleModalDate(null);
