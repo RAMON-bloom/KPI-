@@ -2174,6 +2174,11 @@ textarea.interview-summary-text {
 textarea.memo-content-text {
   min-height: 8rem;
 }
+/* Read-only (non-editing) view of the same memo content — without this, the <p> InlineTextField
+   falls back to render collapses newline characters and multi-line memos look like one line. */
+p.memo-content-text {
+  white-space: pre-wrap;
+}
 
 /* --- Candidate memo list (PipelineCandidateCard) --- */
 .memo-list {
