@@ -2382,6 +2382,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '現職年収・希望年収・想定年収を、万円未満（1円単位）まで細かく入力できるようにした',
       '選考企業ごとの報酬形態に「固定報酬」を追加。従来の「料率(%) × 想定年収」に加え、企業によっては年収に関係なく固定額の紹介料になる場合に対応（新規候補者登録・選考情報の編集・候補者カードの各画面から選択可能。想定粗利の集計にも反映されます）',
       '候補者カードの現職年収・希望年収・想定年収の表示/入力を、万円建ての小数（例: 654.321万円）ではなく実際の円単位（例: 654万3,210円）に変更し、千・百・十・一の位まで見やすく入力しやすくした。あわせて、候補者カードの「ぱっと見」表示（現職・学歴・現年収などが並ぶ箇所）に想定年収を現年収の隣に追加表示するようにした',
+      '候補者カードの「ぱっと見」表示にある選考状況バッジに、カーソルを合わせると日程調整済みの選考予定日時をツールチップで表示するようにした。また、バッジをクリックした際の挙動を「進捗状況だけをその場で変更」から、次アクション・選考予定日時・報酬・確度・メモなど、その選考企業の全項目を編集できる編集画面を開く方式に変更した',
     ],
   },
   {
@@ -5852,48 +5853,36 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
-// The 選考状況 badge shown in a candidate card's collapsed "ぱっと見" summary — click-to-edit
-// like the other dashboard fields, but keeps the colored-pill look in both modes (reusing
-// .status-badge-clickable and .status-badge-select, the same classes the 進捗状況 field in the
-// expanded detail view already uses) rather than falling back to the plain-text .editable-value
-// look, since a status badge without its stage color would lose its at-a-glance meaning.
+// カーソルを合わせた時に、日程調整済みの選考予定日時をツールチップで見せる（未調整ならその行は
+// 省く）。editableな（＝クリックで編集できる）バッジには末尾に案内文を足す。
+const buildStageTooltip = (app: CompanyApplication, editable: boolean): string => {
+  const scheduleLine = app.scheduledDate
+    ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+    : '';
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}`;
+  return editable ? `${base}\n（クリックして選考情報を編集）` : base;
+};
+
+// The 選考状況 badge shown in a candidate card's collapsed "ぱっと見" summary. Hovering shows the
+// scheduled interview date/time (if set) via the title tooltip; clicking opens the full
+// ApplicationModal (next action / scheduled date&time / fee / confidence / memo — every field for
+// that company, not just the stage) rather than a quick inline stage-only <select> as before.
 const ApplicationStageBadge: React.FC<{
   app: CompanyApplication;
-  onCommitStage: (stage: PipelineStage) => void;
-}> = ({ app, onCommitStage }) => {
-  const [isEditing, setIsEditing] = useState(false);
-  const selectRef = useRef<HTMLSelectElement>(null);
-  useEffect(() => { if (isEditing) selectRef.current?.focus(); }, [isEditing]);
-
-  if (isEditing) {
-    return (
-      <select
-        ref={selectRef}
-        value={app.stage}
-        onChange={(e) => { onCommitStage(e.target.value as PipelineStage); setIsEditing(false); }}
-        onBlur={() => setIsEditing(false)}
-        style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
-        className="status-badge-select"
-        aria-label={`${app.companyName}の進捗状況`}
-      >
-        {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
-      </select>
-    );
-  }
-  return (
-    <span
-      className="status-badge status-badge-clickable"
-      style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
-      title={`${app.companyName}: ${app.stage}（クリックして更新）`}
-      role="button"
-      tabIndex={0}
-      onClick={() => setIsEditing(true)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsEditing(true); } }}
-    >
-      {app.companyName}: {app.stage}
-    </span>
-  );
-};
+  onClick: () => void;
+}> = ({ app, onClick }) => (
+  <span
+    className="status-badge status-badge-clickable"
+    style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
+    title={buildStageTooltip(app, true)}
+    role="button"
+    tabIndex={0}
+    onClick={onClick}
+    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+  >
+    {app.companyName}: {app.stage}
+  </span>
+);
 
 const formatMemoTimestamp = (iso: string): string =>
   new Date(iso).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -6028,11 +6017,15 @@ const PipelineCandidateCard: React.FC<{
   // して親（CandidatePipelineView）側で保持する。掘り起しリスト一括表示のため。
   isContactRevealed: boolean;
   onToggleContactReveal: () => void;
+  // カード上部の選考状況バッジをクリックした時に、その選考の全項目（次アクション・予定日時・
+  // fee・確度・メモ等）を編集できるApplicationModalを開く。
+  onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
+  onEditApplication,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   const visibleApplications = c.applications.filter(app => !app.isHidden);
@@ -6507,14 +6500,14 @@ const PipelineCandidateCard: React.FC<{
                                 <ApplicationStageBadge
                                     key={app.id}
                                     app={app}
-                                    onCommitStage={(stage) => commitApplicationField(app.id, { stage })}
+                                    onClick={() => onEditApplication(c, app)}
                                 />
                             ) : (
                                 <span
                                     key={app.id}
                                     className="status-badge"
                                     style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                    title={`${app.companyName}: ${app.stage}`}
+                                    title={buildStageTooltip(app, false)}
                                 >
                                     {app.companyName}: {app.stage}
                                 </span>
@@ -7862,6 +7855,7 @@ const CandidatePipelineView: React.FC<{
                         onToggleTeammateVisibility={onToggleTeammateVisibility}
                         isContactRevealed={isContactRevealed(c.id)}
                         onToggleContactReveal={() => toggleContactReveal(c.id)}
+                        onEditApplication={handleOpenApplicationModal}
                     />
                 )) : (
                     candidates.length === 0 ? (
