@@ -411,6 +411,47 @@ export async function overwriteTeammateCandidateVisibility<T extends { candidate
 }
 
 /**
+ * ミドルによる代理での候補者パイプライン全項目編集: fetches the target teammate's LATEST data
+ * (same re-fetch-before-write pattern as the other overwriteTeammate* functions above), re-derives
+ * the patched candidate AND any KPI actuals it triggers (recommendationRecorded/exitRecorded/
+ * stage-advance deltas) from that FRESH copy — not from whatever the ミドル's local aggregate cache
+ * last saw — merges both back in, and writes the result. `patch` is only the fields the ミドル
+ * actually changed (never the whole candidate object), so a stale local cache can only ever
+ * overwrite the handful of fields genuinely edited, not clobber the rest of the candidate.
+ * `computeUpdate` is the caller's computeStageAdvanceUpdate, injected so this data-layer module
+ * doesn't need to know about KPI business rules. Requires this fileId to already have been granted
+ * direct 'writer' access to the signed-in account (see syncIndividualWriterPermissions) —
+ * otherwise the underlying Drive write fails with 403.
+ */
+export async function overwriteTeammateCandidatePatch<T extends { candidates: any[]; entries: any[] } = any>(
+  driveFileId: string,
+  candidateId: string,
+  patch: Record<string, any>,
+  computeUpdate: (prevCandidate: any, nextCandidate: any, todayStr: string) => { candidate: any; kpiDeltas: Record<string, number> },
+  todayStr: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const candidates = latest.candidates || [];
+  const prevCandidate = candidates.find((c: any) => c.id === candidateId);
+  if (!prevCandidate) throw new Error('対象の候補者が見つかりませんでした（既に削除されている可能性があります）。');
+  const patchedCandidate = { ...prevCandidate, ...patch };
+  const { candidate: finalCandidate, kpiDeltas } = computeUpdate(prevCandidate, patchedCandidate, todayStr);
+  const updatedCandidates = candidates.map((c: any) => (c.id === candidateId ? finalCandidate : c));
+  let updatedEntries = latest.entries || [];
+  if (Object.keys(kpiDeltas).length > 0) {
+    const entriesByDateMap = new Map<string, any>(updatedEntries.map((e: any) => [e.date, e]));
+    const existingEntry = entriesByDateMap.get(todayStr);
+    const values: Record<string, number> = existingEntry ? { ...existingEntry.values } : {};
+    Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key] = (values[key] || 0) + delta; });
+    entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+    updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  }
+  const updated = { ...latest, candidates: updatedCandidates, entries: updatedEntries };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
  * 開発者（TEAMS_ADMIN_EMAIL）による、他ユーザーの「お問い合わせ」投稿への返信・ステータス
  * 変更・削除: fetches the target user's LATEST data (same re-fetch-before-write pattern as
  * overwriteTeammateEntry/overwriteTeammateCandidateVisibility, to avoid clobbering a concurrent

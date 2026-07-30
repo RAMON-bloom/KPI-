@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -2383,6 +2383,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '選考企業ごとの報酬形態に「固定報酬」を追加。従来の「料率(%) × 想定年収」に加え、企業によっては年収に関係なく固定額の紹介料になる場合に対応（新規候補者登録・選考情報の編集・候補者カードの各画面から選択可能。想定粗利の集計にも反映されます）',
       '候補者カードの現職年収・希望年収・想定年収の表示/入力を、万円建ての小数（例: 654.321万円）ではなく実際の円単位（例: 654万3,210円）に変更し、千・百・十・一の位まで見やすく入力しやすくした。あわせて、候補者カードの「ぱっと見」表示（現職・学歴・現年収などが並ぶ箇所）に想定年収を現年収の隣に追加表示するようにした',
       '候補者カードの「ぱっと見」表示にある選考状況バッジに、カーソルを合わせると日程調整済みの選考予定日時をツールチップで表示するようにした。また、バッジをクリックした際の挙動を「進捗状況だけをその場で変更」から、次アクション・選考予定日時・報酬・確度・メモなど、その選考企業の全項目を編集できる編集画面を開く方式に変更した',
+      'ミドルの人が、自分の所属チームのメンバーの候補者パイプラインを代理編集できるようにした（氏名・年収・メモ・選考企業の追加/編集/削除・非表示切り替え・掘り起しリスト登録など、本人ができる操作は一通り対応）。選考ステージが進んだ際のKPI実績（候補者推薦数・通過数など）は、代理編集したミドルではなく候補者本人（対象メンバー）の実績に加算されます。対象メンバー自身が一度アプリを開いていないと権限が反映されない点は既存のミドル機能と同様です',
     ],
   },
   {
@@ -5996,7 +5997,12 @@ const MemoExpandButton: React.FC<{
 const PipelineCandidateCard: React.FC<{
   candidate: Candidate;
   allMedia: MediaEntry[];
+  // 「編集できるか」（本人 または 自分を代理管理できるミドル）を表す。真の所有者かどうかまでは
+  // 区別しないため、その区別が必要な唯一の箇所（非表示/再表示ボタン）はisManagedByMiddleを見る。
   candidateIsOwn: boolean;
+  // trueなら「本人ではないが、ミドルとして代理編集中」— onToggleVisibility（本人専用のApp側
+  // ハンドラー、candidateIdしか受け取らずownerEmailを知らない）を素通しできないケースの判別に使う。
+  isManagedByMiddle: boolean;
   visibilityFilter: 'active' | 'hidden' | 'revival';
   isExpanded: boolean;
   showHiddenApps: boolean;
@@ -6021,7 +6027,7 @@ const PipelineCandidateCard: React.FC<{
   // fee・確度・メモ等）を編集できるApplicationModalを開く。
   onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
 }> = ({
-  candidate: c, allMedia, candidateIsOwn, visibilityFilter, isExpanded, showHiddenApps,
+  candidate: c, allMedia, candidateIsOwn, isManagedByMiddle, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
@@ -6324,7 +6330,10 @@ const PipelineCandidateCard: React.FC<{
                           {visibilityFilter === 'active' && (
                               <button onClick={() => onOpenRevivalModal(c)} className="secondary-action-button">掘り起しリストに追加</button>
                           )}
-                          <button onClick={() => onToggleVisibility(c.id)} className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}>
+                          <button
+                              onClick={() => (isManagedByMiddle ? onSave({ ...c, isHidden: !c.isHidden }) : onToggleVisibility(c.id))}
+                              className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}
+                          >
                               {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
                           </button>
                       </>
@@ -7092,12 +7101,45 @@ const CandidatePipelineView: React.FC<{
     isLoadingAggregate: boolean;
     isTeamsEditable: boolean;
     onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
+    // ミドルは自分が所属するチームのメンバーの候補者パイプラインも代理編集できる — isTeamsEditable
+    // （非表示切り替えのみ）とは別軸の、より広い権限。middleManagedMemberEmailsは対象メンバーの
+    // メールアドレス一覧（自分自身は含まない）。
+    isCurrentUserMiddle: boolean;
+    middleManagedMemberEmails: string[];
+    onSaveManagedCandidate: (targetEmail: string, candidateId: string, patch: Partial<Candidate>) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
-    isTeamsEditable, onToggleTeammateVisibility,
+    isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
+    // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
+    // かどうか。isOwnとは独立した判定 — 両方falseなら誰も編集できない、両方trueにはならない
+    // （ownerEmailが自分ならisOwnがtrueになるため）。
+    const isManagedByMiddle = (c: Candidate) => !!c.ownerEmail && isCurrentUserMiddle && middleManagedMemberEmails.includes(c.ownerEmail);
+    // 編集操作の書き込み先を振り分ける唯一の場所: 自分の候補者はそのままonSave（App側の
+    // handleSaveCandidate）へ。ミドルが代理編集できるメンバーの候補者は、このコンポーネントが
+    // 最後に知っていたバージョン（candidates prop）との差分だけをパッチとして
+    // onSaveManagedCandidateへ渡す — 丸ごと置換すると、この集約ビューにまだ届いていない本人側の
+    // 変更を手元の古いキャッシュで上書きしてしまうおそれがあるため。
+    const saveCandidate = (candidateData: Candidate) => {
+        const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
+        if (isOwn(candidateData)) {
+            onSave(candidateData);
+            return;
+        }
+        if (!ownerEmail || !isManagedByMiddle(candidateData)) return;
+        const prevKnown = candidates.find(c => c.id === sanitized.id);
+        if (!prevKnown) return;
+        const patch: Partial<Candidate> = {};
+        (Object.keys(sanitized) as (keyof Candidate)[]).forEach(key => {
+            if (sanitized[key] !== (prevKnown as any)[key]) {
+                (patch as any)[key] = sanitized[key];
+            }
+        });
+        if (Object.keys(patch).length === 0) return;
+        onSaveManagedCandidate(ownerEmail, sanitized.id, patch);
+    };
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -7199,13 +7241,13 @@ const CandidatePipelineView: React.FC<{
     };
 
     const handleOpenApplicationModal = (candidate: Candidate, application: CompanyApplication | null) => {
-        if (!isOwn(candidate)) return;
+        if (!isOwn(candidate) && !isManagedByMiddle(candidate)) return;
         setApplicationModalData({ candidate, application });
         setIsApplicationModalOpen(true);
     };
 
     const handlePickApplicationForSchedule = (candidate: Candidate, application: CompanyApplication | null) => {
-        if (!isOwn(candidate) || !scheduleModalDate) return;
+        if ((!isOwn(candidate) && !isManagedByMiddle(candidate)) || !scheduleModalDate) return;
         const prefilled: CompanyApplication = application
             ? { ...application, scheduledDate: scheduleModalDate }
             : {
@@ -7237,20 +7279,20 @@ const CandidatePipelineView: React.FC<{
             applications: updatedApplications,
         };
 
-        onSave(updatedCandidate);
+        saveCandidate(updatedCandidate);
     };
 
     const handleToggleApplicationVisibility = (candidate: Candidate, applicationId: string) => {
-        if (!isOwn(candidate)) return;
+        if (!isOwn(candidate) && !isManagedByMiddle(candidate)) return;
         const updatedApplications = candidate.applications.map(app =>
             app.id === applicationId ? { ...app, isHidden: !app.isHidden } : app
         );
         const updatedCandidate = { ...candidate, applications: updatedApplications };
-        onSave(updatedCandidate);
+        saveCandidate(updatedCandidate);
     };
 
     const handleOpenRevivalModal = (candidate: Candidate) => {
-        if (!isOwn(candidate)) return;
+        if (!isOwn(candidate) && !isManagedByMiddle(candidate)) return;
         setRevivalModalCandidate(candidate);
     };
 
@@ -7262,25 +7304,25 @@ const CandidatePipelineView: React.FC<{
     // calendar reminder).
     const handleSaveRevival = (data: { nextAction: string; nextActionDate: string }) => {
         if (!revivalModalCandidate) return;
-        onSave({ ...revivalModalCandidate, revival: data, isHidden: true });
+        saveCandidate({ ...revivalModalCandidate, revival: data, isHidden: true });
         handleCloseRevivalModal();
     };
 
     // "掘り起しリストから解除" — clears the revival entry and restores the candidate to the
     // active pipeline in one step (rather than just un-hiding while leaving stale revival data).
     const handleRemoveFromRevivalList = (candidate: Candidate) => {
-        if (!isOwn(candidate)) return;
+        if (!isOwn(candidate) && !isManagedByMiddle(candidate)) return;
         const { revival, ...rest } = candidate;
-        onSave({ ...rest, isHidden: false });
+        saveCandidate({ ...rest, isHidden: false });
     };
 
     // "非表示に登録" from the 掘り起しリスト — clears the revival entry but stays hidden,
     // moving the candidate into the plain 非表示（その他） bucket instead of resuming active
     // pursuit or lingering on the revival list.
     const handleMoveRevivalToHidden = (candidate: Candidate) => {
-        if (!isOwn(candidate)) return;
+        if (!isOwn(candidate) && !isManagedByMiddle(candidate)) return;
         const { revival, ...rest } = candidate;
-        onSave({ ...rest, isHidden: true });
+        saveCandidate({ ...rest, isHidden: true });
     };
 
     const handleExportCSV = () => {
@@ -7585,7 +7627,7 @@ const CandidatePipelineView: React.FC<{
             {scheduleModalDate && (
                 <PipelineDateScheduleModal
                     date={scheduleModalDate}
-                    ownCandidates={candidates.filter(c => isOwn(c) && !c.isHidden)}
+                    ownCandidates={candidates.filter(c => (isOwn(c) || isManagedByMiddle(c)) && !c.isHidden)}
                     onClose={() => setScheduleModalDate(null)}
                     onPickApplication={handlePickApplicationForSchedule}
                 />
@@ -7839,13 +7881,14 @@ const CandidatePipelineView: React.FC<{
                         key={c.id}
                         candidate={c}
                         allMedia={allMedia}
-                        candidateIsOwn={isOwn(c)}
+                        candidateIsOwn={isOwn(c) || isManagedByMiddle(c)}
+                        isManagedByMiddle={isManagedByMiddle(c)}
                         visibilityFilter={visibilityFilter}
                         isExpanded={expandedCandidateId === c.id}
                         showHiddenApps={showHiddenApps}
                         onToggleExpand={() => handleToggleExpand(c.id)}
                         onToggleShowHiddenApps={setShowHiddenApps}
-                        onSave={onSave}
+                        onSave={saveCandidate}
                         onToggleVisibility={onToggleVisibility}
                         onToggleApplicationVisibility={handleToggleApplicationVisibility}
                         onOpenRevivalModal={handleOpenRevivalModal}
@@ -10266,6 +10309,48 @@ const App: React.FC = () => {
     });
   };
 
+  // ミドルによる代理での候補者パイプライン全項目編集 — persistTeammateCandidateVisibility と同じ
+  // optimistic-local-update-then-fire-and-forget-Drive-write の形だが、`patch`（実際に変更された
+  // フィールドのみ）を受け取り、選考ステージ前進によるKPI実績（候補者推薦数・通過数等）はこの
+  // 候補者の本人（targetEmail）のentriesに加算する。ローカルの楽観更新はこのミドルの手元にある
+  // （多少古いかもしれない）集約キャッシュを元にした概算表示に過ぎず、実際のDrive書き込み
+  // （overwriteTeammateCandidatePatch）は対象ファイルを都度再取得してそこから最終結果を作り直す
+  // ため、手元のキャッシュが古くても本人の最新データを壊すことはない。KPI連動先が対象ファイルの
+  // entriesである点を除けば、他はhandleSaveCandidateと同じcomputeStageAdvanceUpdateのロジックを
+  // 流用する。Googleタスク同期（queueCandidateTasksSync）はサインイン中のミドル自身のGoogle
+  // セッションでしか動かせないため、代理編集では意図的に呼ばない（本人が次に編集した際に追従する）。
+  const persistTeammateCandidateEdit = (targetEmail: string, candidateId: string, patch: Partial<Candidate>) => {
+    const todayStr = new Date().toLocaleDateString('sv-SE');
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      const prevCandidate = target.candidates.find(c => c.id === candidateId);
+      if (!prevCandidate) return prev;
+      const patchedCandidate = { ...prevCandidate, ...patch };
+      const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(prevCandidate, patchedCandidate, todayStr);
+      const updatedCandidates = target.candidates.map(c => (c.id === candidateId ? finalCandidate : c));
+      let updatedEntries = target.entries;
+      if (Object.keys(kpiDeltas).length > 0) {
+        const entriesByDateMap = new Map<string, KpiEntry>(target.entries.map(e => [e.date, e] as [string, KpiEntry]));
+        const existingEntry = entriesByDateMap.get(todayStr);
+        const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
+        Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
+        entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+        updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+      }
+      return { ...prev, [targetEmail]: { ...target, candidates: updatedCandidates, entries: updatedEntries } };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert('対象メンバーのデータファイルが見つかりませんでした。');
+      return;
+    }
+    overwriteTeammateCandidatePatch<UserData>(targetFileId, candidateId, patch, computeStageAdvanceUpdate, todayStr).catch(err => {
+      console.error('Failed to save proxy candidate edit to teammate Drive file', err);
+      alert(`候補者情報の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
   // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
   // writing both scoutsSent and scoutReplies for that one media per date.
   const handleApplyMediaCsvImport = (mediaId: ScoutCsvMediaId, countsByDate: Record<string, ScoutCsvDayCounts>) => {
@@ -11953,6 +12038,9 @@ const App: React.FC = () => {
                 isLoadingAggregate={isLoadingAllUsers}
                 isTeamsEditable={isTeamsEditable}
                 onToggleTeammateVisibility={persistTeammateCandidateVisibility}
+                isCurrentUserMiddle={isCurrentUserMiddle}
+                middleManagedMemberEmails={middleManagedMemberEmails}
+                onSaveManagedCandidate={persistTeammateCandidateEdit}
             />
           </>
         )}
