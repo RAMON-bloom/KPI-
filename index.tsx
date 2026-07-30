@@ -2381,6 +2381,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '現職年収・希望年収・想定年収を、万円未満（1円単位）まで細かく入力できるようにした',
       '選考企業ごとの報酬形態に「固定報酬」を追加。従来の「料率(%) × 想定年収」に加え、企業によっては年収に関係なく固定額の紹介料になる場合に対応（新規候補者登録・選考情報の編集・候補者カードの各画面から選択可能。想定粗利の集計にも反映されます）',
+      '候補者カードの現職年収・希望年収・想定年収の表示/入力を、万円建ての小数（例: 654.321万円）ではなく実際の円単位（例: 654万3,210円）に変更し、千・百・十・一の位まで見やすく入力しやすくした。あわせて、候補者カードの「ぱっと見」表示（現職・学歴・現年収などが並ぶ箇所）に想定年収を現年収の隣に追加表示するようにした',
     ],
   },
   {
@@ -5692,6 +5693,65 @@ const InlineNumberField: React.FC<{
   );
 };
 
+// 現職年収/希望年収/想定年収は万円単位（小数で1円まで表現可能）で保存されているが、
+// 「654.321万円」のような万円建ての小数は千・百・十・一の位が読み取りにくい。表示・入力の
+// 両方を実際の円単位に変換し、万に満たない端数は3桁区切りの円として見せることで、万円だけで
+// なく千・百・十・一の位まで自然に表現する。0を除き未設定（undefined/0）は空文字を返す。
+const formatSalaryAsYen = (manYen: number | undefined): string => {
+  if (!manYen) return '';
+  const yen = Math.round(manYen * 10000);
+  const man = Math.trunc(yen / 10000);
+  const remainder = yen - man * 10000;
+  if (man === 0) return `${yen.toLocaleString()}円`;
+  if (remainder === 0) return `${man.toLocaleString()}万円`;
+  return `${man.toLocaleString()}万${remainder.toLocaleString()}円`;
+};
+
+// Same click-to-edit shell as InlineNumberField, but for the 万円-denominated salary fields —
+// stores/commits in 万円 (unchanged, for compatibility with CSV export and the gross-profit
+// math) while letting the user type and read the plain yen amount (e.g. 6543210 instead of
+// 654.321), converting at the edges only. See formatSalaryAsYen for the display format.
+const InlineSalaryField: React.FC<{
+  value: number | undefined; // 万円
+  onCommit: (value: number | undefined) => void; // 万円
+  placeholder?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+}> = ({ value, onCommit, placeholder, ariaLabel, disabled }) => {
+  const yenValue = value ? Math.round(value * 10000) : undefined;
+  const stringValue = yenValue ? String(yenValue) : '';
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(stringValue);
+  useEffect(() => { setDraft(stringValue); }, [stringValue]);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
+  const commit = () => {
+    const parsedYen = draft === '' ? undefined : Number(draft);
+    const parsed = parsedYen === undefined ? undefined : parsedYen / 10000;
+    if (parsed !== value) onCommit(parsed);
+  };
+  const finishEditing = () => { commit(); setIsEditing(false); };
+
+  if (!disabled && !isEditing) {
+    const displayText = yenValue ? formatSalaryAsYen(value) : (placeholder || '未設定');
+    return <span {...editableDisplayProps(() => setIsEditing(true), ariaLabel, !yenValue ? 'is-empty' : '')}>{displayText}</span>;
+  }
+  return (
+    <input
+      ref={inputRef}
+      type="number"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={finishEditing}
+      placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      min={0}
+      step="1"
+    />
+  );
+};
+
 // InlineSelectField: same click-to-edit shell as InlineTextField/InlineNumberField, wrapping a
 // plain <select> — pass the same <option> children you'd give a raw select. `displayText`
 // controls what the collapsed (non-editing) view shows; callers pass the same formatting their
@@ -6315,9 +6375,17 @@ const PipelineCandidateCard: React.FC<{
                 <div className="key-info-item">
                     <span>現年収:</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} step="any" unit="万円" />
+                        <InlineSalaryField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 5000000" ariaLabel="現職年収" />
                     ) : (
-                        c.currentSalary ? `${c.currentSalary}万円` : 'N/A'
+                        formatSalaryAsYen(c.currentSalary) || 'N/A'
+                    )}
+                </div>
+                <div className="key-info-item">
+                    <span>想定年収:</span>
+                    {candidateIsOwn ? (
+                        <InlineSalaryField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 6000000" ariaLabel="想定年収" />
+                    ) : (
+                        formatSalaryAsYen(c.expectedAnnualSalary) || 'N/A'
                     )}
                 </div>
                 <div className="key-info-item">
@@ -6490,27 +6558,27 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="candidate-info-item">
-                    <span className="info-label">現職年収 (万円)</span>
+                    <span className="info-label">現職年収</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} step="any" unit="万円" />
+                        <InlineSalaryField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 5000000" ariaLabel="現職年収" />
                     ) : (
-                        <span className="info-value">{c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</span>
+                        <span className="info-value">{formatSalaryAsYen(c.currentSalary) || 'N/A'}</span>
                     )}
                 </div>
                 <div className="candidate-info-item">
-                    <span className="info-label">希望年収 (万円)</span>
+                    <span className="info-label">希望年収</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} step="any" unit="万円" />
+                        <InlineSalaryField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 6500000" ariaLabel="希望年収" />
                     ) : (
-                        <span className="info-value">{c.salary ? `${c.salary}万円` : '未設定'}</span>
+                        <span className="info-value">{formatSalaryAsYen(c.salary) || '未設定'}</span>
                     )}
                 </div>
                 <div className="candidate-info-item">
-                    <span className="info-label">想定年収 (万円)</span>
+                    <span className="info-label">想定年収</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} step="any" unit="万円" />
+                        <InlineSalaryField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 6000000" ariaLabel="想定年収" />
                     ) : (
-                        <span className="info-value">{c.expectedAnnualSalary ? `${c.expectedAnnualSalary}万円` : '未設定'}</span>
+                        <span className="info-value">{formatSalaryAsYen(c.expectedAnnualSalary) || '未設定'}</span>
                     )}
                 </div>
                 <div className="candidate-info-item">
