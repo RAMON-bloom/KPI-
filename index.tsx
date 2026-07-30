@@ -357,8 +357,14 @@ interface CompanyApplication {
   isHidden?: boolean;
   // Referral fee rate charged to this client company (% of the candidate's expected annual
   // salary) — position-specific, since different companies/positions can negotiate different
-  // rates for the same candidate.
+  // rates for the same candidate. Only used when feeType is 'rate' (the default).
   feeRate?: number;
+  // 'rate'（年収に対する料率、既定）か'fixed'（固定報酬額）か — 未設定は既存データとの後方
+  // 互換のため'rate'として扱う。
+  feeType?: 'rate' | 'fixed';
+  // feeType === 'fixed' の場合の固定報酬額（万円）。expectedAnnualSalaryと同じ単位にすることで、
+  // computeApplicationGrossProfitがrate/fixedどちらでも同じ単位のrevenueを返せるようにしている。
+  fixedFeeAmount?: number;
   // Likelihood ratings for this specific application: offerConfidence = chance of receiving
   // an offer at all, acceptanceConfidence = chance the candidate accepts it if offered. Used
   // to pick the single most-likely-to-close application per candidate for the gross-profit
@@ -2371,6 +2377,13 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-30',
+    items: [
+      '現職年収・希望年収・想定年収を、万円未満（1円単位）まで細かく入力できるようにした',
+      '選考企業ごとの報酬形態に「固定報酬」を追加。従来の「料率(%) × 想定年収」に加え、企業によっては年収に関係なく固定額の紹介料になる場合に対応（新規候補者登録・選考情報の編集・候補者カードの各画面から選択可能。想定粗利の集計にも反映されます）',
+    ],
+  },
+  {
     date: '2026-07-29',
     items: [
       '【不具合修正】ごくまれに、全ユーザー/チーム別パイプラインで別ユーザーが登録した特定の候補者が表示されないことがある不具合を修正。候補者・選考企業のIDがタイムスタンプのみで生成されており、別ユーザーが同じミリ秒に新規登録した場合にIDが衝突し、一覧描画時に一方が表示されなくなることがあったため、IDにランダムな接尾辞を追加して衝突しないようにした（既存の候補者IDへの影響はなく、これ以降新規登録する候補者・選考企業から適用されます）',
@@ -3603,7 +3616,7 @@ const CandidateModal: React.FC<{
 
     const handleApplicationChange = (index: number, field: keyof CompanyApplication, value: string) => {
         const newApplications = [...candidate.applications];
-        const parsedValue: string | number | undefined = field === 'feeRate'
+        const parsedValue: string | number | undefined = (field === 'feeRate' || field === 'fixedFeeAmount')
             ? (value === '' ? undefined : Number(value))
             : value;
         const target = { ...newApplications[index], [field]: parsedValue };
@@ -4261,15 +4274,15 @@ const CandidateModal: React.FC<{
                 </div>
                 <div className="form-group">
                     <label htmlFor="currentSalary">現職年収 (万円)</label>
-                    <input type="number" id="currentSalary" name="currentSalary" value={candidate.currentSalary || ''} onChange={handleChange} placeholder="例: 500" />
+                    <input type="number" id="currentSalary" name="currentSalary" step="any" value={candidate.currentSalary || ''} onChange={handleChange} placeholder="例: 500" />
                 </div>
                 <div className="form-group">
                     <label htmlFor="salary">希望年収 (万円)</label>
-                    <input type="number" id="salary" name="salary" value={candidate.salary || ''} onChange={handleChange} placeholder="例: 650" />
+                    <input type="number" id="salary" name="salary" step="any" value={candidate.salary || ''} onChange={handleChange} placeholder="例: 650" />
                 </div>
                 <div className="form-group">
                     <label htmlFor="expectedAnnualSalary">想定年収 (万円)</label>
-                    <input type="number" id="expectedAnnualSalary" name="expectedAnnualSalary" value={candidate.expectedAnnualSalary || ''} onChange={handleChange} placeholder="例: 600" />
+                    <input type="number" id="expectedAnnualSalary" name="expectedAnnualSalary" step="any" value={candidate.expectedAnnualSalary || ''} onChange={handleChange} placeholder="例: 600" />
                 </div>
                 <div className="form-group">
                     <label htmlFor="expectedDecisionMonth">見込み月</label>
@@ -4420,18 +4433,46 @@ const CandidateModal: React.FC<{
                           />
                        </div>
                        <div className="form-group">
-                          <label htmlFor={`feeRate-${app.id}`}>fee料率(%)</label>
-                          <input
-                            id={`feeRate-${app.id}`}
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            placeholder="例: 35"
-                            value={app.feeRate ?? ''}
-                            onChange={e => handleApplicationChange(index, 'feeRate', e.target.value)}
-                            aria-label={`fee料率 ${index + 1}`}
-                          />
+                          <label htmlFor={`feeType-${app.id}`}>報酬形態</label>
+                          <select
+                            id={`feeType-${app.id}`}
+                            value={app.feeType || 'rate'}
+                            onChange={e => handleApplicationChange(index, 'feeType', e.target.value)}
+                            aria-label={`報酬形態 ${index + 1}`}
+                          >
+                            <option value="rate">料率(%)</option>
+                            <option value="fixed">固定報酬(万円)</option>
+                          </select>
                        </div>
+                       {(app.feeType || 'rate') === 'fixed' ? (
+                         <div className="form-group">
+                            <label htmlFor={`fixedFeeAmount-${app.id}`}>固定報酬(万円)</label>
+                            <input
+                              id={`fixedFeeAmount-${app.id}`}
+                              type="number"
+                              min="0"
+                              step="any"
+                              placeholder="例: 100"
+                              value={app.fixedFeeAmount ?? ''}
+                              onChange={e => handleApplicationChange(index, 'fixedFeeAmount', e.target.value)}
+                              aria-label={`固定報酬 ${index + 1}`}
+                            />
+                         </div>
+                       ) : (
+                         <div className="form-group">
+                            <label htmlFor={`feeRate-${app.id}`}>fee料率(%)</label>
+                            <input
+                              id={`feeRate-${app.id}`}
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              placeholder="例: 35"
+                              value={app.feeRate ?? ''}
+                              onChange={e => handleApplicationChange(index, 'feeRate', e.target.value)}
+                              aria-label={`fee料率 ${index + 1}`}
+                            />
+                         </div>
+                       )}
                        <div className="form-group">
                           <label htmlFor={`offerConfidence-${app.id}`}>内定確度</label>
                           <select
@@ -4528,8 +4569,8 @@ const ApplicationModal: React.FC<{
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
-        if (name === 'feeRate') {
-            setApplication(prev => ({ ...prev, feeRate: value === '' ? undefined : Number(value) }));
+        if (name === 'feeRate' || name === 'fixedFeeAmount') {
+            setApplication(prev => ({ ...prev, [name]: value === '' ? undefined : Number(value) }));
             return;
         }
         if (name === 'stage' && !initialData) {
@@ -4630,18 +4671,46 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label htmlFor="feeRate">fee料率(%)</label>
-                        <input
-                            type="number"
-                            id="feeRate"
-                            name="feeRate"
-                            min="0"
-                            step="0.1"
-                            placeholder="例: 35"
-                            value={application.feeRate ?? ''}
+                        <label htmlFor="feeType">報酬形態</label>
+                        <select
+                            id="feeType"
+                            name="feeType"
+                            value={application.feeType || 'rate'}
                             onChange={handleChange}
-                        />
+                        >
+                            <option value="rate">料率(%)</option>
+                            <option value="fixed">固定報酬(万円)</option>
+                        </select>
                     </div>
+                    {(application.feeType || 'rate') === 'fixed' ? (
+                        <div className="form-group">
+                            <label htmlFor="fixedFeeAmount">固定報酬(万円)</label>
+                            <input
+                                type="number"
+                                id="fixedFeeAmount"
+                                name="fixedFeeAmount"
+                                min="0"
+                                step="any"
+                                placeholder="例: 100"
+                                value={application.fixedFeeAmount ?? ''}
+                                onChange={handleChange}
+                            />
+                        </div>
+                    ) : (
+                        <div className="form-group">
+                            <label htmlFor="feeRate">fee料率(%)</label>
+                            <input
+                                type="number"
+                                id="feeRate"
+                                name="feeRate"
+                                min="0"
+                                step="0.1"
+                                placeholder="例: 35"
+                                value={application.feeRate ?? ''}
+                                onChange={handleChange}
+                            />
+                        </div>
+                    )}
                     <div className="form-group">
                         <label htmlFor="offerConfidence">内定確度</label>
                         <select
@@ -4913,20 +4982,28 @@ interface StageGrossProfit {
 }
 
 /**
- * Expected gross profit for one application: revenue is the client referral fee (candidate's
- * expected annual salary × the position's own fee rate — different positions for the same
- * candidate can negotiate different rates). The media's fee rate is a cut OF THAT REVENUE
- * (not of the candidate's salary directly) — i.e. 粗利 = 紹介料 − 紹介料×媒体手数料率.
- * Returns null when either the candidate's expected annual salary or the position's fee rate
- * hasn't been entered yet, so callers can tell "zero profit" apart from "not enough data".
+ * Expected gross profit for one application: revenue is the client referral fee. For the default
+ * feeType ('rate'), that's the candidate's expected annual salary × the position's own fee rate
+ * — different positions for the same candidate can negotiate different rates. For 'fixed', the
+ * company instead charges a flat amount regardless of the candidate's salary, so revenue is just
+ * that amount directly. Either way, the media's fee rate is a cut OF THAT REVENUE (not of the
+ * candidate's salary directly) — i.e. 粗利 = 紹介料 − 紹介料×媒体手数料率. Returns null when the
+ * data needed for the selected feeType hasn't been entered yet, so callers can tell "zero profit"
+ * apart from "not enough data".
  */
 function computeApplicationGrossProfit(
     candidate: Candidate,
     application: CompanyApplication,
     mediaFeeRateById: Map<string, number>
 ): { revenue: number; cost: number; profit: number } | null {
-    if (!candidate.expectedAnnualSalary || application.feeRate === undefined || application.feeRate === null) return null;
-    const revenue = candidate.expectedAnnualSalary * (application.feeRate / 100);
+    let revenue: number;
+    if (application.feeType === 'fixed') {
+        if (application.fixedFeeAmount === undefined || application.fixedFeeAmount === null) return null;
+        revenue = application.fixedFeeAmount;
+    } else {
+        if (!candidate.expectedAnnualSalary || application.feeRate === undefined || application.feeRate === null) return null;
+        revenue = candidate.expectedAnnualSalary * (application.feeRate / 100);
+    }
     const mediaFeeRate = mediaFeeRateById.get(candidate.source) || 0;
     const cost = revenue * (mediaFeeRate / 100);
     return { revenue, cost, profit: revenue - cost };
@@ -5024,9 +5101,10 @@ const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}�
 /**
  * Shows expected gross profit (client referral fee minus the sourcing media's handling fee)
  * broken down by selection stage, plus a grand total across every stage except お見送り/選考辞退/
- * 内定承諾後辞退 (lost — they'll never generate revenue). Applications missing either the
- * candidate's expected annual salary or their own fee rate are counted but excluded from the
- * sums, and that gap is surfaced rather than silently under-reporting the total.
+ * 内定承諾後辞退 (lost — they'll never generate revenue). Applications missing the data their
+ * feeType needs (expected annual salary + fee rate for 'rate', or the fixed fee amount for
+ * 'fixed') are counted but excluded from the sums, and that gap is surfaced rather than silently
+ * under-reporting the total.
  */
 const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
@@ -5094,7 +5172,7 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
             </div>
             {grandTotal.count > grandTotal.estimableCount && (
                 <p className="gross-profit-note">
-                    ※ {selectedStageFilters.length > 0 ? '選択中のフェーズ' : 'お見送り・選考辞退・内定承諾後辞退を除く'}{grandTotal.count}件中、想定年収とfee料率が両方入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
+                    ※ {selectedStageFilters.length > 0 ? '選択中のフェーズ' : 'お見送り・選考辞退・内定承諾後辞退を除く'}{grandTotal.count}件中、想定年収とfee料率が両方入力済み、または固定報酬額が入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
                 </p>
             )}
             <div className="detail-application-grid">
@@ -5579,7 +5657,7 @@ const InlineNumberField: React.FC<{
   ariaLabel?: string;
   disabled?: boolean;
   min?: number;
-  step?: number;
+  step?: number | 'any';
   unit?: string;
 }> = ({ value, onCommit, placeholder, ariaLabel, disabled, min, step, unit }) => {
   const stringValue = value === undefined || value === 0 ? '' : String(value);
@@ -6237,7 +6315,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="key-info-item">
                     <span>現年収:</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} unit="万円" />
+                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} step="any" unit="万円" />
                     ) : (
                         c.currentSalary ? `${c.currentSalary}万円` : 'N/A'
                     )}
@@ -6414,7 +6492,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">現職年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} unit="万円" />
+                        <InlineNumberField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 500" ariaLabel="現職年収" min={0} step="any" unit="万円" />
                     ) : (
                         <span className="info-value">{c.currentSalary ? `${c.currentSalary}万円` : 'N/A'}</span>
                     )}
@@ -6422,7 +6500,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">希望年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} unit="万円" />
+                        <InlineNumberField value={c.salary} onCommit={(v) => commitCandidateField('salary', v || 0)} placeholder="例: 650" ariaLabel="希望年収" min={0} step="any" unit="万円" />
                     ) : (
                         <span className="info-value">{c.salary ? `${c.salary}万円` : '未設定'}</span>
                     )}
@@ -6430,7 +6508,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">想定年収 (万円)</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} unit="万円" />
+                        <InlineNumberField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 600" ariaLabel="想定年収" min={0} step="any" unit="万円" />
                     ) : (
                         <span className="info-value">{c.expectedAnnualSalary ? `${c.expectedAnnualSalary}万円` : '未設定'}</span>
                     )}
@@ -6835,11 +6913,40 @@ const PipelineCandidateCard: React.FC<{
                                         )}
                                     </div>
                                     <div className="detail-card-item">
-                                        <span>fee料率 (%):</span>
+                                        <span>報酬形態:</span>
                                         {candidateIsOwn ? (
-                                            <InlineNumberField value={app.feeRate} onCommit={(v) => commitApplicationField(app.id, { feeRate: v })} placeholder="例: 35" ariaLabel="fee料率" min={0} step={0.1} />
+                                            <InlineSelectField
+                                                value={app.feeType || 'rate'}
+                                                onCommit={(v) => commitApplicationField(app.id, { feeType: v as 'rate' | 'fixed' })}
+                                                ariaLabel="報酬形態"
+                                                displayText={(app.feeType || 'rate') === 'fixed' ? '固定報酬' : '料率(%)'}
+                                            >
+                                                <option value="rate">料率(%)</option>
+                                                <option value="fixed">固定報酬(万円)</option>
+                                            </InlineSelectField>
                                         ) : (
-                                            <span>{app.feeRate ?? '未設定'}</span>
+                                            <span>{(app.feeType || 'rate') === 'fixed' ? '固定報酬' : '料率(%)'}</span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        {(app.feeType || 'rate') === 'fixed' ? (
+                                            <>
+                                                <span>固定報酬 (万円):</span>
+                                                {candidateIsOwn ? (
+                                                    <InlineNumberField value={app.fixedFeeAmount} onCommit={(v) => commitApplicationField(app.id, { fixedFeeAmount: v })} placeholder="例: 100" ariaLabel="固定報酬" min={0} step="any" unit="万円" />
+                                                ) : (
+                                                    <span>{app.fixedFeeAmount !== undefined ? `${app.fixedFeeAmount}万円` : '未設定'}</span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span>fee料率 (%):</span>
+                                                {candidateIsOwn ? (
+                                                    <InlineNumberField value={app.feeRate} onCommit={(v) => commitApplicationField(app.id, { feeRate: v })} placeholder="例: 35" ariaLabel="fee料率" min={0} step={0.1} />
+                                                ) : (
+                                                    <span>{app.feeRate ?? '未設定'}</span>
+                                                )}
+                                            </>
                                         )}
                                     </div>
                                     <div className="detail-card-item">
