@@ -545,7 +545,17 @@ function computeStageAdvanceUpdate(
     base = { ...base, stageHistory: [...priorHistory, { stage: app.stage, date: todayStr }] };
 
     const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn' && k !== 'acceptanceWithdrawn');
-    if (keys.length === 0) return base;
+    if (keys.length === 0) {
+      // A genuine forward move (prevApp.stage !== app.stage, not an exit stage) should always
+      // yield at least one key — an empty result here means prevApp.stage/app.stage didn't match
+      // any entry in FORWARD_PIPELINE_STAGES (e.g. a stale/unexpected stage string), silently
+      // skipping the KPI credit even though 選考トラック still records the transition below.
+      // Logged so a "stage changed but KPI didn't move" report can be diagnosed from the console.
+      if (FORWARD_PIPELINE_STAGES.includes(app.stage) && !EXIT_PIPELINE_STAGES.includes(app.stage)) {
+        console.warn('[KPI] getStageAdvanceKpiKeys returned no keys for a forward stage change — KPI actuals were NOT credited.', { candidateId: nextCandidate.id, applicationId: app.id, prevStage: prevApp.stage, nextStage: app.stage });
+      }
+      return base;
+    }
     const recorded = new Set(base.recordedAchievementKpiKeys || []);
     let changed = false;
     keys.forEach(key => {
@@ -561,6 +571,11 @@ function computeStageAdvanceUpdate(
       changed = true;
       kpiDeltas[key] = (kpiDeltas[key] || 0) + 1;
     });
+    if (!changed && !(keys.length === 1 && keys[0] === 'candidatesSubmitted')) {
+      // Every key this transition would have credited was already in recordedAchievementKpiKeys
+      // — the KPI actual silently doesn't move even though 選考トラック shows the new stage.
+      console.warn('[KPI] Stage change detected but every KPI key was already recorded for this application — no actual was added.', { candidateId: nextCandidate.id, applicationId: app.id, prevStage: prevApp.stage, nextStage: app.stage, keys, alreadyRecorded: Array.from(recorded) });
+    }
     return changed ? { ...base, recordedAchievementKpiKeys: Array.from(recorded) } : base;
   });
 
@@ -2384,6 +2399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者カードの現職年収・希望年収・想定年収の表示/入力を、万円建ての小数（例: 654.321万円）ではなく実際の円単位（例: 654万3,210円）に変更し、千・百・十・一の位まで見やすく入力しやすくした。あわせて、候補者カードの「ぱっと見」表示（現職・学歴・現年収などが並ぶ箇所）に想定年収を現年収の隣に追加表示するようにした',
       '候補者カードの「ぱっと見」表示にある選考状況バッジに、カーソルを合わせると日程調整済みの選考予定日時をツールチップで表示するようにした。また、バッジをクリックした際の挙動を「進捗状況だけをその場で変更」から、次アクション・選考予定日時・報酬・確度・メモなど、その選考企業の全項目を編集できる編集画面を開く方式に変更した',
       'ミドルの人が、自分の所属チームのメンバーの候補者パイプラインを代理編集できるようにした（氏名・年収・メモ・選考企業の追加/編集/削除・非表示切り替え・掘り起しリスト登録など、本人ができる操作は一通り対応）。選考ステージが進んだ際のKPI実績（候補者推薦数・通過数など）は、代理編集したミドルではなく候補者本人（対象メンバー）の実績に加算されます。対象メンバー自身が一度アプリを開いていないと権限が反映されない点は既存のミドル機能と同様です',
+      '選考フェーズの変更が個人実績のKPIに正しく反映されないケースを診断できるよう、反映されなかった場合にブラウザのコンソールへ詳細（候補者ID・企業ID・変更前後のフェーズ）を出力するようにした（不具合そのものの再現条件は特定できていないため、まずは発生時に原因を追えるようにする対応です）',
     ],
   },
   {
