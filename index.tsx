@@ -2400,6 +2400,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者カードの「ぱっと見」表示にある選考状況バッジに、カーソルを合わせると日程調整済みの選考予定日時をツールチップで表示するようにした。また、バッジをクリックした際の挙動を「進捗状況だけをその場で変更」から、次アクション・選考予定日時・報酬・確度・メモなど、その選考企業の全項目を編集できる編集画面を開く方式に変更した',
       'ミドルの人が、自分の所属チームのメンバーの候補者パイプラインを代理編集できるようにした（氏名・年収・メモ・選考企業の追加/編集/削除・非表示切り替え・掘り起しリスト登録など、本人ができる操作は一通り対応）。選考ステージが進んだ際のKPI実績（候補者推薦数・通過数など）は、代理編集したミドルではなく候補者本人（対象メンバー）の実績に加算されます。対象メンバー自身が一度アプリを開いていないと権限が反映されない点は既存のミドル機能と同様です',
       '選考フェーズの変更が個人実績のKPIに正しく反映されないケースを診断できるよう、反映されなかった場合にブラウザのコンソールへ詳細（候補者ID・企業ID・変更前後のフェーズ）を出力するようにした（不具合そのものの再現条件は特定できていないため、まずは発生時に原因を追えるようにする対応です）',
+      'ヘッダーに「使い方」を追加。アプリの機能を「メンバー向け」「マネージャー向け」の2つの視点で切り替えて確認できるガイドをアプリ内から見られるようにした',
     ],
   },
   {
@@ -2632,6 +2633,139 @@ const ChangelogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
     </div>
   </div>
 );
+
+// 「使い方」モーダルの本文データ。role別（メンバー/マネージャー）にセクションを分けて保持する
+// だけのプレーンなデータ — HelpModal側は単純にこれを見出し+箇条書きとして描画する。
+const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[] }[]> = {
+  member: [
+    {
+      title: '候補者の新規登録',
+      items: [
+        '候補者パイプラインの「+ 新規候補者を追加」から登録します（氏名のみ必須）。',
+        'レジュメ（PDFアップロード・テキスト貼付）や面談ログ（音声ファイル・Google Meet議事録）を取り込むと、氏名・現職・学歴・年齢・希望年収・電話番号・メールアドレスなどをAIが自動入力します。',
+        '登録時に、氏名＋現職企業が一致する候補者を他ユーザーが既に登録していないか自動でチェックします。重複していればポップアップで通知され、そのまま登録するかキャンセルするか選べます。重複と判定された候補者のカードには「重複中」バッジが表示されます。',
+      ],
+    },
+    {
+      title: '候補者カードの見方・使い方',
+      items: [
+        '「ぱっと見」表示（現職・学歴・現年収・想定年収・媒体など）はクリックするとその場で編集できます。',
+        '年収は円単位で入力できます（例: 6543210と入力→654万3,210円と表示）。',
+        '電話番号・メールアドレスはデフォルトでマスク表示され、クリックで表示/非表示を切り替えられます。',
+        '選考状況バッジにカーソルを合わせると、日程調整済みの選考予定日時をツールチップで確認できます。クリックすると、その選考企業の次アクション・予定日時・報酬・確度・メモなど全項目を編集できる画面が開きます。',
+      ],
+    },
+    {
+      title: '選考企業（パイプライン）の管理',
+      items: [
+        '候補者カードの「+ 選考追加」で応募企業を追加し、進捗状況（打診〜内定承諾・内定承諾後辞退・お見送り・選考辞退）を更新します。',
+        '報酬形態は「料率(%) × 想定年収」か「固定報酬（万円）」のどちらかを選べます。企業によっては年収に関係なく固定額の紹介料になる場合に対応しています。',
+        '選考予定日時を入れるとパイプラインカレンダーに表示され、選考トラックでこれまでの経緯（いつどのフェーズに進んだか）を確認できます。',
+        '見送りたくない候補者は「非表示」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
+      ],
+    },
+    {
+      title: '実績の自動連動と手動入力',
+      items: [
+        'パイプラインの選考フェーズが進む（書類選考通過・面接通過・内定・内定承諾など）と、その日の個人実績（KPI）に自動で加算されます。',
+        '実績カレンダーから日付を選ぶと、スカウト数・返信数などの媒体別実績や、上記フェーズ通過数を手動で入力・修正できます。',
+      ],
+    },
+    {
+      title: '個人実績タブの見方',
+      items: [
+        '今日の実績、週次サマリー、月次進捗トレンドを確認できます。',
+        '歩留まり分析では、各フェーズの通過率とボトルネックになっているフェーズを確認できます。',
+        '想定粗利では、選考中の候補者の紹介料・媒体手数料・粗利の見込みをフェーズ別に確認できます。',
+      ],
+    },
+    {
+      title: 'お問い合わせ',
+      items: [
+        'バグ報告・改善要望・その他を投稿できます。開発者とスレッド形式でやり取りでき、全ユーザーが投稿を閲覧できます。',
+      ],
+    },
+    {
+      title: '事業部の切り替え',
+      items: [
+        'ヘッダーのBCA/F+/ACで自分の所属事業部を設定できます。候補者パイプラインの「チーム」「特定ユーザー」などの絞り込みは、この所属事業部をもとに行われます。',
+      ],
+    },
+  ],
+  manager: [
+    {
+      title: 'チーム管理',
+      items: [
+        'ヘッダーの「チーム管理」からチームを作成し、メンバーのメールアドレスを登録します。',
+        'チームの作成・編集権限は、開発者が特定のユーザーに付与します。',
+        '各メンバーの所属事業部（BCA/F+/AC）を設定でき、チーム別/全ユーザー表示をその事業部で絞り込めます。',
+      ],
+    },
+    {
+      title: 'ミドル権限（チームメンバーの代理入力・代理編集）',
+      items: [
+        '「チーム管理」からメンバーに「ミドル」権限を付与できます。',
+        'ミドルは、自分が所属するチームのメンバーの実績（KPI）を、実績カレンダーから代理で入力できます。',
+        'ミドルは、自分が所属するチームのメンバーの候補者パイプラインも代理編集できます（氏名・年収・メモ・選考企業の追加/編集/削除・非表示切り替え・掘り起しリスト登録など、本人と同等の操作が可能）。選考ステージが進んだ際のKPI実績は、代理編集したミドルではなく候補者本人（対象メンバー）の実績に加算されます。',
+        '対象メンバー自身が一度アプリを開いていないと、権限がGoogleドライブ側に反映されない点にご注意ください。',
+      ],
+    },
+    {
+      title: 'チーム作成・編集権限保持者の権限',
+      items: [
+        'ミドルではなくても、チーム作成・編集権限を持つユーザーは、所属メンバーの候補者の「非表示」切り替えだけは代理で行えます（それ以外の項目の編集はミドルのみ）。',
+      ],
+    },
+    {
+      title: '媒体管理',
+      items: [
+        '集客媒体の追加・アーカイブ・媒体ごとの手数料率（%）を設定できます。この手数料率は想定粗利の計算に使われます。',
+      ],
+    },
+    {
+      title: 'チーム別・全ユーザーダッシュボード',
+      items: [
+        'チーム・事業部・特定ユーザー単位で実績を横断的に比較できます。',
+        '歩留まり分析・想定粗利・月次推移をチーム単位/全社単位で確認できます。',
+        'メンバー別の週次サマリーや、見送り・選考辞退・内定承諾後辞退の発生フェーズ分析も確認できます。',
+      ],
+    },
+    {
+      title: 'お問い合わせの管理（開発者のみ）',
+      items: [
+        '開発者は、全ユーザーの「お問い合わせ」投稿にステータス変更・返信・削除ができます。',
+      ],
+    },
+  ],
+};
+
+const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [role, setRole] = useState<'member' | 'manager'>('member');
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="help-modal-title">使い方</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <div className="view-switcher" style={{ marginBottom: '1rem' }}>
+            <button onClick={() => setRole('member')} disabled={role === 'member'}>メンバー向け</button>
+            <button onClick={() => setRole('manager')} disabled={role === 'manager'}>マネージャー向け</button>
+          </div>
+          {HELP_CONTENT[role].map(section => (
+            <div key={section.title} className="help-section">
+              <h4 className="help-section-title">{section.title}</h4>
+              <ul className="help-item-list">
+                {section.items.map((item, idx) => <li key={idx}>{item}</li>)}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // お問い合わせ（バグ報告・改善要望）— 社内掲示板形式。全ユーザーが全員の投稿を閲覧でき、
 // 新規投稿は誰でもできる。返信・ステータス変更・削除は isDeveloper（TEAMS_ADMIN_EMAIL）のみ。
@@ -9282,6 +9416,7 @@ const App: React.FC = () => {
   // dropdown above 実績カレンダー (personal_kpi tab only).
   const [middleEntryTargetEmail, setMiddleEntryTargetEmail] = useState('');
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
+  const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
   const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   // Empty = no filter (show everyone) on the 全ユーザー tab; otherwise an ad-hoc selection of
@@ -11202,6 +11337,9 @@ const App: React.FC = () => {
       {isChangelogModalOpen && (
         <ChangelogModal onClose={() => setIsChangelogModalOpen(false)} />
       )}
+      {isHelpModalOpen && (
+        <HelpModal onClose={() => setIsHelpModalOpen(false)} />
+      )}
       {isFeedbackModalOpen && (
         <FeedbackModal
           posts={allFeedbackPosts}
@@ -11340,6 +11478,7 @@ const App: React.FC = () => {
             )}
             <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
+            <button onClick={() => setIsHelpModalOpen(true)}>使い方</button>
             <button onClick={() => setIsChangelogModalOpen(true)}>更新履歴</button>
             <button onClick={() => setIsFeedbackModalOpen(true)}>お問い合わせ</button>
             <button onClick={handleLogout} className="logout-button">ログアウト</button>
