@@ -2401,6 +2401,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ミドルの人が、自分の所属チームのメンバーの候補者パイプラインを代理編集できるようにした（氏名・年収・メモ・選考企業の追加/編集/削除・非表示切り替え・掘り起しリスト登録など、本人ができる操作は一通り対応）。選考ステージが進んだ際のKPI実績（候補者推薦数・通過数など）は、代理編集したミドルではなく候補者本人（対象メンバー）の実績に加算されます。対象メンバー自身が一度アプリを開いていないと権限が反映されない点は既存のミドル機能と同様です',
       '選考フェーズの変更が個人実績のKPIに正しく反映されないケースを診断できるよう、反映されなかった場合にブラウザのコンソールへ詳細（候補者ID・企業ID・変更前後のフェーズ）を出力するようにした（不具合そのものの再現条件は特定できていないため、まずは発生時に原因を追えるようにする対応です）',
       'ヘッダーに「使い方」を追加。アプリの機能を「メンバー向け」「マネージャー向け」の2つの視点で切り替えて確認できるガイドをアプリ内から見られるようにした',
+      '想定粗利を、意思決定時期（見込み月）が今月に該当する選考をデフォルトで集計するように変更し、前月/次月ボタンやカスタム期間指定で過去月・任意期間の想定粗利も確認できるようにした（パイプラインタブ・チーム別タブの両方に適用。全ユーザータブは従来通り想定粗利セクションを表示しません）',
+      'チーム別タブの進捗表示に「メンバー別想定粗利」の一覧表を追加し、チーム合計だけでなくメンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした',
     ],
   },
   {
@@ -5226,13 +5228,63 @@ function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipeli
     return result;
 }
 
-function computeGrossProfitByStage(candidates: Candidate[], allMedia: MediaEntry[]): StageGrossProfit[] {
+/**
+ * Whether an application's expected decision falls within the given period — its own
+ * expectedDecisionDate takes priority; falls back to the candidate's manually-set
+ * expectedDecisionMonth (見込み月) when the application itself has no date, the same either/or
+ * the existing 見込み月 pipeline filter already uses (see getNearestExpectedDecisionDate). With
+ * no periodOverride, "the period" is the real current calendar month (same convention as
+ * isDateInFunnelPeriod). Returns false when neither timing field is set at all — such an
+ * application has no period to scope it to yet, so it's excluded from any period-based view
+ * (still visible in the unfiltered パイプライン tab, which doesn't use this).
+ */
+function isDecisionInPeriod(
+    candidate: Candidate,
+    application: CompanyApplication,
+    periodOverride: { start: Date; end: Date } | null
+): boolean {
+    if (application.expectedDecisionDate) {
+        if (periodOverride) {
+            const t = new Date(application.expectedDecisionDate + 'T00:00:00').getTime();
+            return t >= periodOverride.start.getTime() && t <= periodOverride.end.getTime();
+        }
+        const now = new Date();
+        const d = new Date(application.expectedDecisionDate + 'T00:00:00');
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    }
+    if (candidate.expectedDecisionMonth) {
+        if (periodOverride) {
+            const [y, m] = candidate.expectedDecisionMonth.split('-').map(Number);
+            const monthStart = new Date(y, m - 1, 1);
+            const monthEnd = new Date(y, m, 0, 23, 59, 59);
+            return monthStart.getTime() <= periodOverride.end.getTime() && monthEnd.getTime() >= periodOverride.start.getTime();
+        }
+        const now = new Date();
+        const nowYYYYMM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+        return candidate.expectedDecisionMonth === nowYYYYMM;
+    }
+    return false;
+}
+
+/**
+ * periodOverride defaults to null (the real current calendar month, via isDecisionInPeriod) —
+ * 想定粗利 is scoped to "expected to reach a decision this month" by default, rather than every
+ * application currently anywhere in the pipeline, so it reads as a monthly figure comparable
+ * month over month. Pass an explicit period (or a past month) to see a different one.
+ */
+function computeGrossProfitByStage(
+    candidates: Candidate[],
+    allMedia: MediaEntry[],
+    periodOverride: { start: Date; end: Date } | null = null
+): StageGrossProfit[] {
     const mediaFeeRateById = new Map(allMedia.map(m => [m.id, m.feeRate || 0]));
     const totalsByStage = new Map<PipelineStage, StageGrossProfit>(
         PIPELINE_STAGES.map(stage => [stage, { stage, count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0, entries: [] }])
     );
 
-    pickBestApplicationPerCandidate(candidates).forEach(entry => {
+    pickBestApplicationPerCandidate(candidates)
+        .filter(entry => isDecisionInPeriod(entry.candidate, entry.application, periodOverride))
+        .forEach(entry => {
         const { candidate, application } = entry;
         const bucket = totalsByStage.get(application.stage)!;
         bucket.count++;
@@ -5258,14 +5310,63 @@ const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}�
  * feeType needs (expected annual salary + fee rate for 'rate', or the fixed fee amount for
  * 'fixed') are counted but excluded from the sums, and that gap is surfaced rather than silently
  * under-reporting the total.
+ *
+ * Scoped to a period by 意思決定時期 (見込み月) — see isDecisionInPeriod — defaulting to the
+ * current calendar month rather than every application anywhere in the pipeline, so the figure
+ * reads as "this month's" and is comparable month over month. When the parent already has its
+ * own period picker (全ユーザー/チーム別ダッシュボード — periodOverride/periodLabel passed in),
+ * this component defers to it and renders no picker of its own; otherwise (パイプライン tab) it
+ * manages its own period state and renders a self-contained 今月/前月/次月/カスタム期間 picker,
+ * the same pattern the dashboards use.
  */
-const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEntry[] }> = ({ candidates, allMedia }) => {
+const GrossProfitSummary: React.FC<{
+    candidates: Candidate[];
+    allMedia: MediaEntry[];
+    periodOverride?: { start: Date; end: Date } | null;
+    periodLabel?: string;
+}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel }) => {
+    const isControlled = externalPeriodOverride !== undefined;
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     const toggleStageFilter = (stage: PipelineStage) => {
         setSelectedStageFilters(prev => prev.includes(stage) ? prev.filter(s => s !== stage) : [...prev, stage]);
     };
 
-    const stageTotals = useMemo(() => computeGrossProfitByStage(candidates, allMedia), [candidates, allMedia]);
+    // 自前の期間ピッカー（isControlledがfalseの時だけ使う）。全ユーザー/チーム別ダッシュボードの
+    // 「表示・出力期間」バーと同じ、今月既定・前月/次月シフト・カスタム期間指定のパターン。
+    const [ownStartDate, setOwnStartDate] = useState('');
+    const [ownEndDate, setOwnEndDate] = useState('');
+    const [isOwnPeriodEnabled, setIsOwnPeriodEnabled] = useState(false);
+    const ownPeriodOverride = useMemo(() => {
+        if (!isOwnPeriodEnabled || !ownStartDate || !ownEndDate) return null;
+        return { start: new Date(ownStartDate + 'T00:00:00'), end: new Date(ownEndDate + 'T23:59:59') };
+    }, [isOwnPeriodEnabled, ownStartDate, ownEndDate]);
+    const handleToggleOwnPeriod = () => {
+        if (ownPeriodOverride) {
+            setIsOwnPeriodEnabled(false);
+            return;
+        }
+        if (!ownStartDate || !ownEndDate) {
+            alert('開始日と終了日を指定してください。');
+            return;
+        }
+        setIsOwnPeriodEnabled(true);
+    };
+    const handleShiftOwnMonth = (offset: number) => {
+        const reference = ownStartDate ? new Date(ownStartDate + 'T00:00:00') : new Date();
+        const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
+        const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
+        const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        setOwnStartDate(fmt(monthStart));
+        setOwnEndDate(fmt(monthEnd));
+        setIsOwnPeriodEnabled(true);
+    };
+
+    const periodOverride = isControlled ? (externalPeriodOverride ?? null) : ownPeriodOverride;
+    const periodLabel = isControlled
+        ? (externalPeriodLabel || '今月')
+        : (ownPeriodOverride ? `${formatPeriodDate(ownPeriodOverride.start)}〜${formatPeriodDate(ownPeriodOverride.end)}` : '今月');
+
+    const stageTotals = useMemo(() => computeGrossProfitByStage(candidates, allMedia, periodOverride), [candidates, allMedia, periodOverride]);
 
     // With no explicit filter, cards show every stage that has data but the total still
     // excludes lost stages (they'll never generate revenue) — the same default as before this
@@ -5291,6 +5392,20 @@ const GrossProfitSummary: React.FC<{ candidates: Candidate[]; allMedia: MediaEnt
 
     return (
         <div className="gross-profit-summary">
+            {!isControlled && (
+                <div className="custom-period-export-bar">
+                    <span>対象期間（未入力の場合は今月）:</span>
+                    <button type="button" onClick={() => handleShiftOwnMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                    <input type="date" value={ownStartDate} onChange={(e) => setOwnStartDate(e.target.value)} aria-label="開始日" />
+                    <span>〜</span>
+                    <input type="date" value={ownEndDate} onChange={(e) => setOwnEndDate(e.target.value)} aria-label="終了日" />
+                    <button type="button" onClick={() => handleShiftOwnMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+                    <button type="button" onClick={handleToggleOwnPeriod} className="secondary-action-button">
+                        {ownPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
+                    </button>
+                </div>
+            )}
+            <p className="gross-profit-note">意思決定時期（見込み月）が「{periodLabel}」に該当する選考を集計しています。</p>
             <div className="pipeline-sort-controls">
                 <span>選考フェーズで絞り込み:</span>
                 {PIPELINE_STAGES.map(stage => (
@@ -8749,9 +8864,29 @@ const AllUsersDashboard: React.FC<{
     [users, allUsersData]
   );
   const grossProfitStageTotals = useMemo(
-    () => (showGrossProfit ? computeGrossProfitByStage(candidatesAcrossUsers, allMedia) : undefined),
-    [showGrossProfit, candidatesAcrossUsers, allMedia]
+    () => (showGrossProfit ? computeGrossProfitByStage(candidatesAcrossUsers, allMedia, periodOverride) : undefined),
+    [showGrossProfit, candidatesAcrossUsers, allMedia, periodOverride]
   );
+  // メンバー別想定粗利 — 全体合計だけでなく個人単位でも確認できるように、ユーザーごとに同じ
+  // computeGrossProfitByStageを回して合計行（お見送り・選考辞退・内定承諾後辞退を除く）だけ
+  // 取り出す。showGrossProfitがfalse（全ユーザータブ）の間は計算自体を省略する。
+  const perUserGrossProfitTotals = useMemo(() => {
+    if (!showGrossProfit) return [];
+    return users.map(user => {
+      const displayName = allUsersData[user]?.displayName || user;
+      const stageTotals = computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, periodOverride);
+      const total = stageTotals
+        .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
+        .reduce((acc, s) => ({
+          count: acc.count + s.count,
+          estimableCount: acc.estimableCount + s.estimableCount,
+          revenue: acc.revenue + s.revenue,
+          cost: acc.cost + s.cost,
+          profit: acc.profit + s.profit,
+        }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+      return { user, displayName, ...total };
+    });
+  }, [showGrossProfit, users, allUsersData, allMedia, periodOverride]);
 
   // Hoisted out of the table's render loop so the same per-user period totals can also be
   // handed to the AI panel as context, instead of duplicating this calculation twice.
@@ -8944,7 +9079,35 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
-          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} />
+          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} />
+          <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{periodLabel}）</h3>
+          <div className="all-users-table-container">
+            <table className="weekly-summary-table">
+              <thead>
+                <tr>
+                  <th>ユーザー</th>
+                  <th>対象件数</th>
+                  <th>想定紹介料</th>
+                  <th>想定媒体手数料</th>
+                  <th>想定粗利</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perUserGrossProfitTotals.map(stat => (
+                  <tr key={stat.user}>
+                    <td>{stat.displayName}</td>
+                    <td>{stat.count}件{stat.count > stat.estimableCount && `（うち算出可能 ${stat.estimableCount}件）`}</td>
+                    <td>{formatManYen(stat.revenue)}</td>
+                    <td>{formatManYen(stat.cost)}</td>
+                    <td>{formatManYen(stat.profit)}</td>
+                  </tr>
+                ))}
+                {perUserGrossProfitTotals.length === 0 && (
+                  <tr><td colSpan={5}>表示するユーザーがいません。</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
       )}
