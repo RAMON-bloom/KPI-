@@ -1524,6 +1524,17 @@ section {
   color: #fff;
   border-color: var(--primary-color);
 }
+/* .pipeline-sort-controls buttonの白背景指定が.secondary-action-buttonの背景色を打ち消して
+   しまい、白文字が白背景に埋もれて見えなくなっていた（見込み月で絞り込みの「クリア」など）。
+   ここで.secondary-action-button側の配色を明示的に取り戻す。 */
+.pipeline-sort-controls button.secondary-action-button {
+  background-color: var(--secondary-color);
+  color: #fff;
+  border-color: var(--secondary-color);
+}
+.pipeline-sort-controls button.secondary-action-button:hover {
+  background-color: #5a6268;
+}
 
 .stage-filter-dropdown {
   position: relative;
