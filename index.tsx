@@ -2983,6 +2983,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '「自分」タブに「スプレッドシートからKPI実績を取り込む」を追加。これまで各チームが独自フォーマットで管理していたKPI実績スプレッドシートをCSVで書き出してアップロードすると、AIがどの列が日付でどの列がどのKPI項目（候補者推薦数・書類選考通過数・各媒体のスカウト送信数など）に対応するか自動判定します。取り込む前に対応表と反映内容を必ず画面で確認・修正でき、対応付けた項目だけが取り込んだ内容で上書きされます（他の項目・他の日の実績は変更されません）。まずは自分自身のKPI実績データの一度きりの移行を想定した機能です',
       'スプレッドシート取込みは1枚のシートにチーム全員分がまとまっていることが多いため、ミドルの人には「自分のKPIのみ」か「チームメンバー分も含めて取り込む」かを選べるようにした。後者を選ぶと、どの列が担当者（誰の実績か）を表すかもAIが判定し、担当者列に実際に登場した値（氏名表記など）をどのメンバーに対応付けるかも自動推定します。担当者との対応も含め、必ず画面で確認・修正してから反映でき、各メンバー分はそのメンバー本人のKPI実績として反映されます（代理登録したミドルの実績にはなりません）',
       '候補者パイプラインの「チーム」タブの想定粗利にも、チーム別タブと同様の「メンバー別想定粗利」の一覧表を追加。チーム合計だけでなく、メンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした（対象期間は合計と同じものを使用します）',
+      '【不具合修正】想定粗利の集計で、内定承諾まで至った候補者を非表示（掘り起しリスト登録や成約後のアーカイブなど）にすると、その成約実績が集計から消えてしまっていた不具合を修正。非表示の候補者でも、内定承諾済みの選考は引き続き想定粗利に反映されます（内定承諾後辞退は従来通り対象外のままです）',
     ],
   },
   {
@@ -5813,12 +5814,22 @@ function isDateInMonth(dateISO: string, yyyyMM: string): boolean {
  * them — summing gross profit across all their applications would double-count the same
  * placement. Picks the single most-likely-to-close application (lowest combined offer +
  * acceptance confidence rank) per candidate instead.
+ *
+ * 非表示（isHidden）の候補者は通常ここから除外するが、既に内定承諾（実際に成約）まで至って
+ * いる場合だけは例外的に残す — 非表示は「もう追いかけていない」ことを表すだけで、成約後に
+ * 掘り起しリストや非表示に移した候補者の実績まで想定粗利から消えてしまうのは意図しない挙動
+ * だったため。内定承諾後辞退（EXIT_PIPELINE_STAGESの1つ）は成約が覆った扱いなので対象外のまま。
  */
 function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipelineEntry[] {
     const result: CompanyPipelineEntry[] = [];
-    candidates.filter(c => !c.isHidden).forEach(candidate => {
-        const best = getBestConfidenceApplication(candidate);
-        if (best) result.push({ candidate, application: best });
+    candidates.forEach(candidate => {
+        if (!candidate.isHidden) {
+            const best = getBestConfidenceApplication(candidate);
+            if (best) result.push({ candidate, application: best });
+            return;
+        }
+        const acceptedApp = candidate.applications.find(app => !app.isHidden && app.stage === '内定承諾');
+        if (acceptedApp) result.push({ candidate, application: acceptedApp });
     });
     return result;
 }
