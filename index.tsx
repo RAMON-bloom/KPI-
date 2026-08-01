@@ -688,9 +688,11 @@ interface UserData {
   // clobbered by re-applying this same saved value on every unrelated data change.
   allUsersSectionDefaults?: Partial<Record<Extract<SectionVisibilityKeys, `allUsers${string}`>, boolean>>;
   // 候補者パイプライン一覧の「選考フェーズで絞り込み」— 現在チェックしているフェーズを
-  // "現在の選択をデフォルトとして保存" で保存しておくと、次回このタブを開いた時に
-  // 選択済みの状態から始められる。未保存ならundefined（絞り込みなしから始まる、従来通り）。
-  pipelineStageFilterDefaults?: PipelineStage[];
+  // "現在の選択をデフォルトとして保存" で保存しておくと、次回このタブ（またはスコープ）を
+  // 開いた時に選択済みの状態から始められる。スコープ（自分/全ユーザー/チーム/ユーザー別）ごとに
+  // 別々の値を持てる — 自分タブとチームタブで見たい絞り込み条件が違うことが多いため。
+  // 未保存のスコープはundefined（絞り込みなしから始まる、従来通り）。
+  pipelineStageFilterDefaults?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -2995,6 +2997,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'パイプラインの並び替えから「氏名」「現職企業名」「現職年収」を削除し、「登録日」「意思決定時期」「確度」のみにした',
       '候補者一覧の絞り込み・並び替えの配置を整理。よく使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に、使用頻度の低い「自社面談状況」「表示対象」を右側にまとめて配置した',
       '「選考フェーズで絞り込み」に「現在の選択をデフォルトとして保存」を追加。よく使う絞り込み条件を保存しておくと、次回パイプラインを開いた時に自動でその状態から表示されるようにした',
+      '「選考フェーズで絞り込み」のデフォルト保存ボタンを、ドロップダウンの外（隣）に移動して開かなくても押せるようにした。また「自分」「全ユーザー」「チーム」「ユーザー別」のスコープごとに別々のデフォルトを保存・復元できるようにした（スコープを切り替えると、そのスコープ自身の保存内容に自動的に切り替わります）',
     ],
   },
   {
@@ -8135,6 +8138,15 @@ const PipelineCandidateCard: React.FC<{
   );
 };
 
+// パイプラインの表示スコープ切り替えボタンと同じ文言 — 「選考フェーズで絞り込み」のデフォルト
+// 保存ボタンに「どのスコープの設定を保存するか」を表示する際に使う。
+const PIPELINE_SCOPE_LABELS: Record<'personal' | 'all_users' | 'team' | 'user', string> = {
+  personal: '自分',
+  all_users: '全ユーザー',
+  team: 'チーム',
+  user: 'ユーザー別',
+};
+
 const CandidatePipelineView: React.FC<{
     candidates: Candidate[];
     allMedia: MediaEntry[];
@@ -8163,10 +8175,11 @@ const CandidatePipelineView: React.FC<{
     // 候補者オブジェクトを丸ごと渡す。
     onAddManagedCandidate: (targetEmail: string, candidate: Candidate) => void;
     // 「選考フェーズで絞り込み」の既定選択 — このユーザーが「現在の選択をデフォルトとして保存」
-    // した内容（UserData.pipelineStageFilterDefaults）。未保存ならundefined（従来通り絞り込み
-    // なしから始まる）。
-    defaultStageFilters?: PipelineStage[];
-    onSaveDefaultStageFilters: (stages: PipelineStage[]) => void;
+    // した内容（UserData.pipelineStageFilterDefaults）。スコープ（自分/全ユーザー/チーム/
+    // ユーザー別）ごとに別々の値を持つ。未保存のスコープはundefined（従来通り絞り込みなしから
+    // 始まる）。
+    defaultStageFilters?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
+    onSaveDefaultStageFilters: (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
@@ -8211,13 +8224,23 @@ const CandidatePipelineView: React.FC<{
     // A single specific calendar month (yyyy-MM, from <input type="month">) to filter 意思決定
     // 時期 by — '' means no filtering.
     const [decisionMonthFilter, setDecisionMonthFilter] = useState('');
-    // このユーザーが保存した既定値（defaultStageFilters）があればそこから始める — currentUserData
-    // は本コンポーネントが最初にマウントされる時点で既に読み込み済みなので（App側がロード完了
-    // まで本体を描画しないため）、useEffectでの後追い適用ではなくlazy initial stateで足りる。
-    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>(() => defaultStageFilters || []);
+    // このユーザーが保存した既定値（defaultStageFilters、スコープごと）があればそこから始める
+    // — currentUserDataは本コンポーネントが最初にマウントされる時点で既に読み込み済みなので
+    // （App側がロード完了まで本体を描画しないため）、初回表示分はlazy initial stateで足りる。
+    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>(() => defaultStageFilters?.[scope] || []);
+    // 「自分」「チーム」など、スコープを切り替えた時にそのスコープ自身の既定値（無ければ絞り込み
+    // なし）へ切り替える。保存直後（scopeは変わらずdefaultStageFiltersだけ更新される瞬間）に
+    // 選択中の内容を巻き戻してしまわないよう、scope自体が変化した時だけ発火させる。
+    const prevScopeForStageFilterRef = useRef(scope);
+    useEffect(() => {
+        if (prevScopeForStageFilterRef.current === scope) return;
+        prevScopeForStageFilterRef.current = scope;
+        setSelectedStageFilters(defaultStageFilters?.[scope] || []);
+    }, [scope, defaultStageFilters]);
     const [justSavedStageFilterDefaults, setJustSavedStageFilterDefaults] = useState(false);
+    const scopeLabelForStageFilterDefault = PIPELINE_SCOPE_LABELS[scope];
     const handleSaveStageFilterDefaultsClick = () => {
-        onSaveDefaultStageFilters(selectedStageFilters);
+        onSaveDefaultStageFilters(scope, selectedStageFilters);
         setJustSavedStageFilterDefaults(true);
         setTimeout(() => setJustSavedStageFilterDefaults(false), 2500);
     };
@@ -8972,14 +8995,14 @@ const CandidatePipelineView: React.FC<{
                                 クリア
                             </button>
                         )}
-                        <button type="button" onClick={handleSaveStageFilterDefaultsClick} className="secondary-action-button">
-                            現在の選択をデフォルトとして保存
-                        </button>
-                        {justSavedStageFilterDefaults && (
-                            <span className="section-defaults-saved-message">保存しました。次回以降この選択で表示されます。</span>
-                        )}
                       </div>
                     </details>
+                    <button type="button" onClick={handleSaveStageFilterDefaultsClick} className="secondary-action-button">
+                        {scopeLabelForStageFilterDefault}のデフォルトとして保存
+                    </button>
+                    {justSavedStageFilterDefaults && (
+                        <span className="section-defaults-saved-message">保存しました。次回「{scopeLabelForStageFilterDefault}」を開いた時にこの選択で表示されます。</span>
+                    )}
                   </div>
                   <div className="pipeline-sort-controls">
                     <span>並び替え:</span>
@@ -10669,10 +10692,15 @@ const App: React.FC = () => {
   };
 
   // 候補者パイプラインの「選考フェーズで絞り込み」— CandidatePipelineViewが現在チェックして
-  // いるフェーズをこのユーザーの既定値として保存する。上のhandleSaveAllUsersSectionDefaultsと
-  // 同じ「今の状態をそのままデフォルトとして保存」パターン。
-  const handleSavePipelineStageFilterDefaults = (stages: PipelineStage[]) => {
-    setCurrentUserData(prev => (prev ? { ...prev, pipelineStageFilterDefaults: stages } : prev));
+  // いるフェーズを、今表示中のスコープ（自分/全ユーザー/チーム/ユーザー別）ごとの既定値として
+  // 保存する。上のhandleSaveAllUsersSectionDefaultsと同じ「今の状態をそのままデフォルトとして
+  // 保存」パターンだが、スコープごとに見たい絞り込み条件が違うことが多いため、スコープ単位で
+  // 別々に保存できるようにしている。
+  const handleSavePipelineStageFilterDefaults = (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => {
+    setCurrentUserData(prev => (prev ? {
+      ...prev,
+      pipelineStageFilterDefaults: { ...(prev.pipelineStageFilterDefaults || {}), [scope]: stages },
+    } : prev));
   };
 
 
