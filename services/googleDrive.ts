@@ -163,7 +163,11 @@ export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
 
 export async function readFileContent<T = any>(fileId: string): Promise<T> {
   const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
-  if (!res.ok) throw new Error('Driveファイルの読み込みに失敗しました。');
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    console.error(`Failed to read Drive file ${fileId}: ${res.status} ${bodyText}`);
+    throw new Error(`Driveファイルの読み込みに失敗しました。(${res.status}${res.status === 403 ? ': 権限がありません' : ''})`);
+  }
   return res.json();
 }
 
@@ -235,7 +239,11 @@ export async function updateFileContent(fileId: string, content: unknown): Promi
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(content),
   });
-  if (!res.ok) throw new Error('Driveファイルの保存に失敗しました。');
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    console.error(`Failed to update Drive file ${fileId}: ${res.status} ${bodyText}`);
+    throw new Error(`Driveファイルの保存に失敗しました。(${res.status}${res.status === 403 ? ': 権限がありません' : ''})`);
+  }
 }
 
 /**

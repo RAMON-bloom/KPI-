@@ -758,6 +758,19 @@ const getFeedbackThreadMessages = (post: FeedbackPost): FeedbackThreadMessage[] 
 
 const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
+// 代理書き込み（ミドル/チーム編集者による他メンバーのDriveファイルへの書き込み）が失敗した際、
+// エラーメッセージに一言添える — 対象メンバーへの個別書き込み権限は本人のブラウザが一度アプリを
+// 開いて初めて反映される仕組みのため（syncIndividualWriterPermissions参照）、403（権限エラー）
+// はほぼ必ずこれが原因。「保存に失敗しました」とだけ表示するより、次に何を確認・依頼すればよいか
+// その場で分かるようにする。
+const describeTeammateDriveWriteError = (err: unknown): string => {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes('403')) {
+    return `${message}\n対象メンバーが一度もこのアプリを開いていない場合、書き込み権限がまだ反映されていない可能性があります。対象メンバーに一度アプリを開いてもらってから、再度お試しください。`;
+  }
+  return message;
+};
+
 // 重複候補者判定用: 前後の空白・全角/半角スペースの違いを無視して比較する（氏名・現職企業名）。
 const normalizeForDuplicateMatch = (value?: string): string =>
   (value || '').trim().replace(/[\s　]+/g, '').toLowerCase();
@@ -3000,6 +3013,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '「選考フェーズで絞り込み」のデフォルト保存ボタンを、ドロップダウンの外（隣）に移動して開かなくても押せるようにした。また「自分」「全ユーザー」「チーム」「ユーザー別」のスコープごとに別々のデフォルトを保存・復元できるようにした（スコープを切り替えると、そのスコープ自身の保存内容に自動的に切り替わります）',
       '【不具合修正】「選考フェーズで絞り込み」のデフォルト保存が、アプリを再読み込みすると消えてしまっていた不具合を修正（保存自体はDriveに届いていたが、読み込み時の処理でこの項目が見落とされ毎回消えていました）',
       '【不具合修正】チーム作成・編集権限保持者が、所属チームのメンバーの候補者を代理で非表示にしようとするとDriveへの書き込みに失敗することがある不具合を修正。メンバーのメールアドレスの大文字・小文字の表記がチーム設定と食い違っている場合に、そのメンバー自身がチームに所属していると正しく認識できず、書き込み権限が付与されていなかったのが原因でした',
+      'ミドル・チーム編集者による代理保存（実績入力・候補者の非表示切り替え・候補者情報編集・新規登録・スプレッドシート取込み・お問い合わせ返信）でDriveへの書き込みが失敗した際、エラーメッセージにHTTPステータスコードを表示するようにした。権限不足（403）の場合は「対象メンバーが一度アプリを開き直す必要がある可能性があります」という案内も表示され、原因を切り分けやすくなります',
     ],
   },
   {
@@ -11178,7 +11192,7 @@ const App: React.FC = () => {
       .then(() => {})
       .catch(err => {
         console.error('Failed to save feedback update to author Drive file', err);
-        alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+        alert(`保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
         throw err;
       });
   };
@@ -11554,7 +11568,7 @@ const App: React.FC = () => {
     }
     overwriteTeammateEntry<UserData>(targetFileId, date, newValues).catch(err => {
       console.error('Failed to save proxy entry to teammate Drive file', err);
-      alert(`実績の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`実績の保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
     });
   };
 
@@ -11591,7 +11605,7 @@ const App: React.FC = () => {
     }
     overwriteTeammateCandidateVisibility<UserData>(targetFileId, candidateId, nextIsHidden).catch(err => {
       console.error('Failed to save proxy candidate visibility to teammate Drive file', err);
-      alert(`非表示設定の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`非表示設定の保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
     });
   };
 
@@ -11633,7 +11647,7 @@ const App: React.FC = () => {
     }
     overwriteTeammateCandidatePatch<UserData>(targetFileId, candidateId, patch, computeStageAdvanceUpdate, todayStr).catch(err => {
       console.error('Failed to save proxy candidate edit to teammate Drive file', err);
-      alert(`候補者情報の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`候補者情報の保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
     });
   };
 
@@ -11670,7 +11684,7 @@ const App: React.FC = () => {
     }
     addTeammateCandidate<UserData>(targetFileId, sanitized, computeStageAdvanceUpdate, todayStr).catch(err => {
       console.error('Failed to save proxy new candidate to teammate Drive file', err);
-      alert(`候補者の登録に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`候補者の登録に失敗しました: ${describeTeammateDriveWriteError(err)}`);
     });
   };
 
@@ -11745,7 +11759,7 @@ const App: React.FC = () => {
     }
     overwriteTeammateEntries<UserData>(targetFileId, countsByDate).catch(err => {
       console.error('Failed to save proxy spreadsheet import to teammate Drive file', err);
-      alert(`${targetEmail}への実績の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      alert(`${targetEmail}への実績の保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
     });
   };
 
