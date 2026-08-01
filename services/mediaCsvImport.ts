@@ -33,8 +33,9 @@ export async function decodeCsvFile(file: File): Promise<string> {
 }
 
 // Minimal RFC4180-style parser: handles double-quoted fields (with "" as an escaped quote) and
-// both CRLF/LF line endings. Sufficient for these flat, single-line-per-row exports.
-function parseCsvRows(text: string): string[][] {
+// both CRLF/LF line endings. Sufficient for these flat, single-line-per-row exports. Exported so
+// other CSV-consuming importers (see spreadsheetKpiImport.ts) don't need their own copy.
+export function parseCsvRows(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';

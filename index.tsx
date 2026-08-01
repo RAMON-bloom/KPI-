@@ -16,10 +16,11 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
+import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError } from './services/googleTasks';
 
 ChartJS.register(
@@ -99,7 +100,30 @@ const MEDIA_KPI_SUFFIXES = [
   'initialInterviews', 'effectiveInitialInterviews',
 ] as const;
 
+const MEDIA_KPI_SUFFIX_LABELS: Record<typeof MEDIA_KPI_SUFFIXES[number], string> = {
+  scoutsSent: 'スカウト送信数',
+  scoutReplies: '返信数',
+  effectiveReplies: '有効返信数',
+  documentsCollected: '書類回収数',
+  effectiveDocumentsCollected: '有効書類回収数',
+  initialInterviews: '初回面談数',
+  effectiveInitialInterviews: '有効初回面談数',
+};
+
 type KpiKey = string;
+
+/**
+ * 取り込み対象になり得るKPI項目の一覧（key + 人間向けラベル）— スプレッドシート取込み機能で、
+ * AIへの列マッピング依頼プロンプトと、確認画面の対応先ドロップダウンの両方に使う。媒体は
+ * ユーザーごとに構成が違う（allMediaで渡される）ため、呼び出し時点の媒体一覧から都度組み立てる。
+ */
+const buildKpiFieldCatalog = (media: MediaEntry[]): { key: KpiKey; label: string }[] => [
+  ...Object.entries(GENERAL_KPIS).map(([key, cfg]) => ({ key: key as KpiKey, label: cfg.label })),
+  ...media.flatMap(m => MEDIA_KPI_SUFFIXES.map(suffix => ({
+    key: `${m.id}_${suffix}` as KpiKey,
+    label: `${m.name} ${MEDIA_KPI_SUFFIX_LABELS[suffix]}`,
+  }))),
+];
 
 /** Every KPI key that exists for a given media list: general KPIs plus 7 per media source. */
 const buildAllKpiKeys = (media: MediaEntry[]): KpiKey[] => [
@@ -2275,6 +2299,560 @@ const MediaCsvImportModal: React.FC<{
 };
 
 
+// 各チームがこれまで独自フォーマットで管理していたKPI実績スプレッドシートを取り込むための
+// 一度きりの移行用モーダル。列の意味（どの列が日付か、どの列がどのKPI項目か、チームメンバー分も
+// 含める場合はどの列が担当者か）はAIに判定させつつ、実際の数値の集計・日付の正規化は
+// computeKpiCountsByTarget（決定的なロジック）に任せる — AIの役割は「意味の対応付け」だけに
+// とどめ、数値そのものの読み違いリスクを避けるため。スプレッドシートはチーム単位（複数メンバー
+// 分がまとめて1枚）で作られていることが多いため、「自分のKPIのみ」と「担当者列で判定して
+// チームメンバー分もそれぞれのKPIに反映」を選べるようにしている。後者は対象メンバーのDrive
+// ファイルへの書き込み権限を持つミドルにのみ提供する（管理下メンバーがいない場合は選択肢自体を
+// 出さない）。MediaCsvImportModalと同じ「対応付けた項目だけを取り込んだ内容で上書きし、他の
+// 項目・他の日は変更しない」方式。
+const SpreadsheetKpiImportModal: React.FC<{
+  allMedia: MediaEntry[];
+  entriesByDate: Map<string, KpiTotals>;
+  currentUserEmail: string;
+  managedMembers: { email: string; label: string }[];
+  onApply: (countsByTarget: Record<string, Record<string, Record<string, number>>>) => void;
+  onClose: () => void;
+}> = ({ allMedia, entriesByDate, currentUserEmail, managedMembers, onApply, onClose }) => {
+  const kpiFieldCatalog = useMemo(() => buildKpiFieldCatalog(allMedia), [allMedia]);
+  const kpiLabelByKey = useMemo(() => new Map(kpiFieldCatalog.map(f => [f.key, f.label])), [kpiFieldCatalog]);
+  // 「自分」も含めた対応表 — 担当者列の値をどのメールアドレスに対応付けるか選ぶ際の選択肢一覧。
+  const roster = useMemo(() => [{ email: currentUserEmail, label: '自分' }, ...managedMembers], [currentUserEmail, managedMembers]);
+  const labelByEmail = useMemo(() => new Map(roster.map(r => [r.email, r.label])), [roster]);
+
+  const [importScope, setImportScope] = useState<'self' | 'team'>('self');
+  const [status, setStatus] = useState<'idle' | 'parsing' | 'analyzing' | 'ready' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  const [grid, setGrid] = useState<SpreadsheetGrid | null>(null);
+  const [dateColumnIndex, setDateColumnIndex] = useState(0);
+  // 列インデックス -> KPIキー（''は「取り込まない」）。AIの初期提案をユーザーが確認画面で上書き
+  // できるようにするため、確定値はここに持つ（AIの提案そのものはcolumnReasonsに理由だけ残す）。
+  const [columnKpiKeys, setColumnKpiKeys] = useState<Record<string, string>>({});
+  const [columnReasons, setColumnReasons] = useState<Record<string, string>>({});
+  const [fallbackYear, setFallbackYear] = useState(() => new Date().getFullYear());
+  // -1は「未選択」（チームメンバー分も取り込む場合、選ぶまでは誰の実績にも反映しない安全側の
+  // 初期値 — 選ぶ前に誤って全行を自分の実績として取り込んでしまわないようにするため）。
+  const [assigneeColumnIndex, setAssigneeColumnIndex] = useState<number>(-1);
+  // 担当者列に登場した値そのまま(rawValue) -> 対応するメンバーのメールアドレス（''は「取り込まない」）。
+  const [assigneeTargetByValue, setAssigneeTargetByValue] = useState<Record<string, string>>({});
+  const [assigneeReasonByValue, setAssigneeReasonByValue] = useState<Record<string, string>>({});
+  const [isSuggestingAssignees, setIsSuggestingAssignees] = useState(false);
+
+  // 取り込み対象の切り替えは列の意味付けが変わるため、選び直したら最初からやり直してもらう
+  // （中途半端に古い対応付けが残るより、ファイルの選び直しを促す方が安全）。
+  useEffect(() => {
+    setStatus('idle');
+    setMessage('');
+    setGrid(null);
+    setDateColumnIndex(0);
+    setColumnKpiKeys({});
+    setColumnReasons({});
+    setAssigneeColumnIndex(-1);
+    setAssigneeTargetByValue({});
+    setAssigneeReasonByValue({});
+  }, [importScope]);
+
+  // AIには見出し行と先頭数行のサンプルだけを渡す（列の意味を判定させるだけなので、行数が
+  // 何百あってもここのトークン量には影響しない）。実際の全行の数値集計はAIを介さず
+  // computeKpiCountsByTargetで行う。
+  const analyzeColumns = async (candidateGrid: SpreadsheetGrid) => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const sampleRows = candidateGrid.rows.slice(0, 5);
+    const tableText = [candidateGrid.header, ...sampleRows].map(r => r.join(' | ')).join('\n');
+    const catalogText = kpiFieldCatalog.map(f => `${f.key}: ${f.label}`).join('\n');
+
+    const instructionPart = {
+      text:
+        `以下は人材紹介会社のKPI実績を管理していたスプレッドシートの見出し行と、サンプルとして先頭数行のデータです（区切りは " | "）。\n\n` +
+        `【表】\n${tableText}\n\n` +
+        `【取り込み先のKPI項目一覧（key: ラベル）】\n${catalogText}\n\n` +
+        `この表のどの列が日付を表しているか、どの列が担当者（この行の実績が誰のものか）を表しているか、` +
+        `そしてそれ以外の各列が上記KPI項目一覧のどれに対応するかを判定してください。` +
+        `担当者列が無い（表全体が1人分の実績である）場合、assigneeColumnは空文字("")を返してください。` +
+        `候補者名・企業名・備考・累計・達成率など、上記一覧のどれにも該当しない列にはkpiKeyとして空文字("")を返してください。` +
+        `1つの列は上記一覧のうち最も近い1つのkeyにのみ対応付けてください（一覧に無いkeyを新しく作らないこと）。`,
+    };
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts: [instructionPart] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            dateColumn: {
+              type: Type.STRING,
+              description: '日付を表す列の見出し名（見出し行のテキストそのまま）',
+            },
+            assigneeColumn: {
+              type: Type.STRING,
+              description: '担当者(この行の実績が誰のものか)を表す列の見出し名。無ければ空文字',
+            },
+            columnMappings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  sourceColumn: { type: Type.STRING, description: '表の見出し名（日付列・担当者列以外の各列）' },
+                  kpiKey: { type: Type.STRING, description: '対応するKPI項目一覧のkey。該当なしは空文字' },
+                  reason: { type: Type.STRING, description: 'この対応付けにした理由を一言で' },
+                },
+                required: ['sourceColumn', 'kpiKey', 'reason'],
+              },
+            },
+          },
+          required: ['dateColumn', 'assigneeColumn', 'columnMappings'],
+        },
+      },
+    });
+
+    return JSON.parse(response.text.trim()) as {
+      dateColumn: string;
+      assigneeColumn: string;
+      columnMappings: { sourceColumn: string; kpiKey: string; reason: string }[];
+    };
+  };
+
+  // 担当者列に実際に登場した値（重複除去済み）を、ロスター（自分＋管理下メンバー）のメール
+  // アドレスに対応付ける小さめのAI呼び出し。列の意味判定（analyzeColumns）とは別呼び出しにして
+  // いるのは、担当者列が決まって初めて「実際にどんな値が登場するか」が分かるため。
+  const analyzeAssignees = async (values: string[]) => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const rosterText = roster.map(r => `${r.email}: ${r.label}`).join('\n');
+    const valuesText = values.map((v, i) => `${i + 1}. ${v}`).join('\n');
+
+    const instructionPart = {
+      text:
+        `スプレッドシートの「担当者」列に実際に登場した値の一覧です。それぞれが、以下のメンバー一覧のどのメールアドレスの実績にあたるかを判定してください。\n\n` +
+        `【メンバー一覧（メールアドレス: 表示名）】\n${rosterText}\n\n` +
+        `【担当者列に登場した値】\n${valuesText}\n\n` +
+        `姓のみ・ニックネーム・表記ゆれなども考慮して、最も近いメンバーのメールアドレスを選んでください。` +
+        `どのメンバーにも該当しない値（合計行・部署名など）はtargetEmailに空文字("")を返してください。`,
+    };
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts: [instructionPart] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            mappings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  rawValue: { type: Type.STRING, description: '担当者列に登場した値そのまま' },
+                  targetEmail: { type: Type.STRING, description: '対応するメンバーのメールアドレス。該当なしは空文字' },
+                  reason: { type: Type.STRING, description: 'この対応付けにした理由を一言で' },
+                },
+                required: ['rawValue', 'targetEmail', 'reason'],
+              },
+            },
+          },
+          required: ['mappings'],
+        },
+      },
+    });
+
+    return JSON.parse(response.text.trim()) as {
+      mappings: { rawValue: string; targetEmail: string; reason: string }[];
+    };
+  };
+
+  const extractDistinctAssigneeValues = (candidateGrid: SpreadsheetGrid, colIdx: number): string[] => {
+    const seen = new Set<string>();
+    const values: string[] = [];
+    candidateGrid.rows.forEach(row => {
+      const v = (row[colIdx] || '').trim();
+      if (v && !seen.has(v)) { seen.add(v); values.push(v); }
+    });
+    return values;
+  };
+
+  const applyAssigneeAnalysis = (values: string[], analysis: { mappings: { rawValue: string; targetEmail: string; reason: string }[] }) => {
+    const validEmails = new Set(roster.map(r => r.email));
+    const nextTargets: Record<string, string> = {};
+    const nextReasons: Record<string, string> = {};
+    analysis.mappings.forEach(m => {
+      nextTargets[m.rawValue] = validEmails.has(m.targetEmail) ? m.targetEmail : '';
+      nextReasons[m.rawValue] = m.reason || '';
+    });
+    // AIが値を1つでも取りこぼした場合に備え、未回答の値は空文字（取り込まない）で埋めておく
+    // — ダイアログ上は必ず全ての値がドロップダウンで選択できる状態になる。
+    values.forEach(v => { if (!(v in nextTargets)) nextTargets[v] = ''; });
+    setAssigneeTargetByValue(nextTargets);
+    setAssigneeReasonByValue(nextReasons);
+  };
+
+  const handleSuggestAssignees = async () => {
+    if (!grid || assigneeColumnIndex === -1) return;
+    const values = extractDistinctAssigneeValues(grid, assigneeColumnIndex);
+    if (values.length === 0) return;
+    setIsSuggestingAssignees(true);
+    try {
+      const analysis = await analyzeAssignees(values);
+      applyAssigneeAnalysis(values, analysis);
+    } catch (err) {
+      console.error('担当者の対応付け推定に失敗しました', err);
+      alert('AIによる担当者の対応付けに失敗しました。お手数ですが対応表を手動で選択してください。');
+    } finally {
+      setIsSuggestingAssignees(false);
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setStatus('parsing');
+    setMessage('');
+    setGrid(null);
+    setAssigneeColumnIndex(-1);
+    setAssigneeTargetByValue({});
+    setAssigneeReasonByValue({});
+    try {
+      const text = await decodeSpreadsheetCsvFile(file);
+      const parsedGrid = parseSpreadsheetGrid(text);
+      if (parsedGrid.header.length === 0 || parsedGrid.rows.length === 0) {
+        setStatus('error');
+        setMessage('見出し行またはデータ行が見つかりませんでした。CSVファイルの内容をご確認ください。');
+        return;
+      }
+      setGrid(parsedGrid);
+      setStatus('analyzing');
+      const analysis = await analyzeColumns(parsedGrid);
+
+      const validKeys = new Set(kpiFieldCatalog.map(f => f.key));
+      const dateIdx = parsedGrid.header.indexOf(analysis.dateColumn);
+      setDateColumnIndex(dateIdx !== -1 ? dateIdx : 0);
+
+      const nextKeys: Record<string, string> = {};
+      const nextReasons: Record<string, string> = {};
+      analysis.columnMappings.forEach(m => {
+        const idx = parsedGrid.header.indexOf(m.sourceColumn);
+        if (idx === -1) return;
+        nextKeys[idx] = validKeys.has(m.kpiKey) ? m.kpiKey : '';
+        nextReasons[idx] = m.reason || '';
+      });
+      setColumnKpiKeys(nextKeys);
+      setColumnReasons(nextReasons);
+
+      if (importScope === 'team') {
+        const assigneeIdx = parsedGrid.header.indexOf(analysis.assigneeColumn || '');
+        if (assigneeIdx !== -1) {
+          setAssigneeColumnIndex(assigneeIdx);
+          const values = extractDistinctAssigneeValues(parsedGrid, assigneeIdx);
+          if (values.length > 0) {
+            const assigneeAnalysis = await analyzeAssignees(values);
+            applyAssigneeAnalysis(values, assigneeAnalysis);
+          }
+        }
+      }
+      setStatus('ready');
+    } catch (err) {
+      console.error('スプレッドシート取込みの列判定に失敗しました', err);
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'ファイルの読み込みまたはAIによる列判定に失敗しました。');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const result: KpiImportByTargetResult | null = useMemo(() => {
+    if (!grid || status !== 'ready') return null;
+    const kpiKeyByColumnIndex = new Map<number, string>();
+    (Object.entries(columnKpiKeys) as [string, string][]).forEach(([idxStr, key]) => {
+      const idx = Number(idxStr);
+      if (idx === dateColumnIndex || idx === assigneeColumnIndex || !key) return;
+      kpiKeyByColumnIndex.set(idx, key);
+    });
+    const resolveTarget = importScope === 'team'
+      ? (assigneeColumnIndex === -1
+          ? () => null
+          : (row: string[]) => {
+              const raw = (row[assigneeColumnIndex] || '').trim();
+              return raw ? (assigneeTargetByValue[raw] || null) : null;
+            })
+      : () => currentUserEmail;
+    return computeKpiCountsByTarget(grid, dateColumnIndex, kpiKeyByColumnIndex, fallbackYear, resolveTarget);
+  }, [grid, status, dateColumnIndex, assigneeColumnIndex, columnKpiKeys, fallbackYear, importScope, assigneeTargetByValue, currentUserEmail]);
+
+  const mappedKeys = useMemo(() => {
+    if (!result) return [];
+    const keys = new Set<string>();
+    Object.values(result.countsByTarget).forEach(byDate =>
+      Object.values(byDate).forEach(bucket => Object.keys(bucket).forEach(k => keys.add(k)))
+    );
+    return Array.from(keys).sort();
+  }, [result]);
+
+  const previewByTarget = useMemo(() => {
+    if (!result) return [];
+    const targets = Object.keys(result.countsByTarget).sort((a, b) => {
+      if (a === currentUserEmail) return -1;
+      if (b === currentUserEmail) return 1;
+      return (labelByEmail.get(a) || a).localeCompare(labelByEmail.get(b) || b, 'ja');
+    });
+    return targets.map(target => {
+      const byDate = result.countsByTarget[target];
+      const isSelf = target === currentUserEmail;
+      const rows = Object.keys(byDate).sort().map(dateStr => {
+        const bucket = byDate[dateStr];
+        const existing = isSelf ? entriesByDate.get(dateStr) : undefined;
+        return {
+          dateStr,
+          values: mappedKeys.map(key => ({
+            key,
+            incoming: bucket[key] || 0,
+            current: existing ? (existing[key as KpiKey] || 0) : undefined,
+          })),
+        };
+      });
+      return { target, label: labelByEmail.get(target) || target, isSelf, rows };
+    });
+  }, [result, mappedKeys, entriesByDate, currentUserEmail, labelByEmail]);
+
+  const totalDatesCount = previewByTarget.reduce((sum, t) => sum + t.rows.length, 0);
+
+  const handleColumnMappingChange = (colIdx: number, kpiKey: string) => {
+    setColumnKpiKeys(prev => ({ ...prev, [colIdx]: kpiKey }));
+  };
+
+  const handleAssigneeTargetChange = (rawValue: string, targetEmail: string) => {
+    setAssigneeTargetByValue(prev => ({ ...prev, [rawValue]: targetEmail }));
+  };
+
+  const distinctAssigneeValuesForTable = grid && assigneeColumnIndex !== -1
+    ? extractDistinctAssigneeValues(grid, assigneeColumnIndex)
+    : [];
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="spreadsheet-kpi-modal-title">
+      <div className="modal-content spreadsheet-kpi-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="spreadsheet-kpi-modal-title">スプレッドシートからKPI実績を取り込む</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            これまで各チームが独自フォーマットで管理していたKPI実績スプレッドシートを取り込みます。
+            Googleスプレッドシート/Excelの場合は「ファイル&gt;ダウンロード&gt;カンマ区切り値（.csv）」で書き出してからアップロードしてください。
+            AIがどの列がどのKPI項目に対応するか自動判定しますが、必ず下の対応表と反映内容を確認してから反映してください。
+            対応付けた項目だけが取り込んだ内容で上書きされ、他の項目・他の日の実績は変更されません。
+          </p>
+
+          {managedMembers.length > 0 && (
+            <div className="form-group">
+              <label>取り込み対象</label>
+              <div className="stage-filter-checkbox" style={{ display: 'flex', gap: '1.5rem' }}>
+                <label>
+                  <input type="radio" checked={importScope === 'self'} onChange={() => setImportScope('self')} />
+                  自分のKPIのみ
+                </label>
+                <label>
+                  <input type="radio" checked={importScope === 'team'} onChange={() => setImportScope('team')} />
+                  チームメンバー分も含めて取り込む（担当者列で判定）
+                </label>
+              </div>
+            </div>
+          )}
+
+          <div className="gmail-scout-fetch-bar">
+            <input type="file" accept=".csv" onChange={handleFileChange} aria-label="KPIスプレッドシート(CSV)を選択" />
+            {status === 'parsing' && <span className="gmail-scout-message">読み込み中...</span>}
+            {status === 'analyzing' && <span className="gmail-scout-message">AIが列を判定しています...</span>}
+            {status === 'error' && message && <span className="gmail-scout-message is-error">{message}</span>}
+          </div>
+
+          {status === 'ready' && grid && (
+            <>
+              <div className="form-group">
+                <label htmlFor="spreadsheet-kpi-date-column">日付として使う列</label>
+                <select
+                  id="spreadsheet-kpi-date-column"
+                  value={dateColumnIndex}
+                  onChange={(e) => setDateColumnIndex(Number(e.target.value))}
+                >
+                  {grid.header.map((h, idx) => (
+                    <option key={idx} value={idx}>{h || `(${idx + 1}列目)`}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label htmlFor="spreadsheet-kpi-fallback-year">年が読み取れない日付（例: 6/1）に使う年</label>
+                <input
+                  id="spreadsheet-kpi-fallback-year"
+                  type="number"
+                  value={fallbackYear}
+                  onChange={(e) => setFallbackYear(Number(e.target.value) || fallbackYear)}
+                  style={{ width: '8rem' }}
+                />
+              </div>
+
+              {importScope === 'team' && (
+                <>
+                  <div className="form-group">
+                    <label htmlFor="spreadsheet-kpi-assignee-column">担当者（メンバー）を表す列</label>
+                    <select
+                      id="spreadsheet-kpi-assignee-column"
+                      value={assigneeColumnIndex}
+                      onChange={(e) => setAssigneeColumnIndex(Number(e.target.value))}
+                    >
+                      <option value={-1}>選択してください</option>
+                      {grid.header.map((h, idx) => {
+                        if (idx === dateColumnIndex) return null;
+                        return <option key={idx} value={idx}>{h || `(${idx + 1}列目)`}</option>;
+                      })}
+                    </select>
+                  </div>
+
+                  {assigneeColumnIndex === -1 ? (
+                    <p className="gmail-scout-message is-error">担当者を表す列を選択してください（選択するまで、どのメンバーの実績にも取り込まれません）。</p>
+                  ) : (
+                    <div className="gmail-scout-fetch-bar">
+                      <button type="button" onClick={handleSuggestAssignees} disabled={isSuggestingAssignees} className="secondary-action-button">
+                        {isSuggestingAssignees ? 'AIが推定中...' : 'AIに担当者との対応を推定させる'}
+                      </button>
+                      <div className="bulk-gmail-preview-table-container">
+                        <table className="bulk-gmail-preview-table">
+                          <thead>
+                            <tr><th>担当者列の値</th><th>AIの判定理由</th><th>対応するメンバー</th></tr>
+                          </thead>
+                          <tbody>
+                            {distinctAssigneeValuesForTable.map(v => (
+                              <tr key={v}>
+                                <td>{v}</td>
+                                <td>{assigneeReasonByValue[v] || ''}</td>
+                                <td>
+                                  <select
+                                    value={assigneeTargetByValue[v] || ''}
+                                    onChange={(e) => handleAssigneeTargetChange(v, e.target.value)}
+                                  >
+                                    <option value="">取り込まない</option>
+                                    {roster.map(r => (
+                                      <option key={r.email} value={r.email}>{r.label}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="bulk-gmail-preview-table-container">
+                <table className="bulk-gmail-preview-table">
+                  <thead>
+                    <tr><th>元の列名</th><th>サンプル値</th><th>AIの判定理由</th><th>取り込み先</th></tr>
+                  </thead>
+                  <tbody>
+                    {grid.header.map((h, idx) => {
+                      if (idx === dateColumnIndex || idx === assigneeColumnIndex) return null;
+                      return (
+                        <tr key={idx}>
+                          <td>{h || `(${idx + 1}列目)`}</td>
+                          <td>{grid.rows[0]?.[idx] ?? ''}</td>
+                          <td>{columnReasons[idx] || ''}</td>
+                          <td>
+                            <select
+                              value={columnKpiKeys[idx] || ''}
+                              onChange={(e) => handleColumnMappingChange(idx, e.target.value)}
+                            >
+                              <option value="">取り込まない</option>
+                              {kpiFieldCatalog.map(f => (
+                                <option key={f.key} value={f.key}>{f.label}</option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {result && (
+                <div className="bulk-gmail-preview">
+                  <p className="gmail-scout-message">
+                    {totalDatesCount}件（対象者×日付）を検出しました（{result.rowsSkipped}行は日付を判定できず、
+                    {result.rowsUnassigned}行は担当者を判定できずスキップ）。
+                  </p>
+                  {mappedKeys.length === 0 ? (
+                    <p className="gmail-scout-message is-error">取り込み先が1件も選ばれていません。上の対応表で列を選んでください。</p>
+                  ) : totalDatesCount === 0 ? (
+                    <p className="gmail-scout-message is-error">反映できるデータがありません。担当者の対応付けや日付列を確認してください。</p>
+                  ) : (
+                    previewByTarget.map(t => (
+                      <div key={t.target} style={{ marginTop: '1rem' }}>
+                        <p className="gmail-scout-message"><strong>{t.label}</strong>（{t.rows.length}日分）</p>
+                        <div className="bulk-gmail-preview-table-container">
+                          <table className="bulk-gmail-preview-table">
+                            <thead>
+                              <tr>
+                                <th rowSpan={t.isSelf ? 2 : 1}>日付</th>
+                                {mappedKeys.map(key => (
+                                  <th key={key} colSpan={t.isSelf ? 2 : 1}>{kpiLabelByKey.get(key) || key}</th>
+                                ))}
+                              </tr>
+                              {t.isSelf && (
+                                <tr>
+                                  {mappedKeys.map(key => (
+                                    <React.Fragment key={key}>
+                                      <th>取込む値</th>
+                                      <th>現在の値</th>
+                                    </React.Fragment>
+                                  ))}
+                                </tr>
+                              )}
+                            </thead>
+                            <tbody>
+                              {t.rows.map(row => (
+                                <tr key={row.dateStr}>
+                                  <td>{row.dateStr}</td>
+                                  {row.values.map(v => (
+                                    <React.Fragment key={v.key}>
+                                      <td>{v.incoming}</td>
+                                      {t.isSelf && (
+                                        <td className={v.incoming !== v.current ? 'is-changed' : ''}>{v.current}</td>
+                                      )}
+                                    </React.Fragment>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+          {status === 'ready' && result && mappedKeys.length > 0 && totalDatesCount > 0 && (
+            <button type="button" onClick={() => onApply(result.countsByTarget)} className="submit-button">
+              反映する（{previewByTarget.map(t => `${t.label}: ${t.rows.length}日`).join('、')}）
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 const getTotalFromLump = (lump: { [key: string]: number | undefined }, kpiSuffix: string, allMedia: MediaEntry[]): number => {
     if (!lump) return 0;
     return allMedia.reduce((acc, media) => {
@@ -2402,6 +2980,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       'ミドルの人が、パイプラインの「ユーザー別」表示で自分の所属チームのメンバーを選択している間、そのメンバーに代わって新規候補者を登録できるようにした（従来は本人の代理で既存候補者を編集することはできても、新規登録だけは本人の画面からしかできなかった）。登録した候補者は対象メンバー本人の候補者パイプラインに追加され、KPI実績も代理登録したミドルではなく対象メンバー本人に加算されます',
       'ミドルの人が新規候補者を登録する導線をわかりやすくするため、「ユーザー別」表示に切り替えなくても、「自分」タブ・「チーム」タブの「+ 新規候補者を追加」ボタンのそばに登録先メンバーを選ぶ欄を追加した。「自分」タブでは未選択なら自分自身、選ぶとそのメンバーの代理登録に切り替わる。「チーム」タブでは自分の管理下メンバーがいる場合のみ表示され、選んだメンバーに代わって登録できます',
+      '「自分」タブに「スプレッドシートからKPI実績を取り込む」を追加。これまで各チームが独自フォーマットで管理していたKPI実績スプレッドシートをCSVで書き出してアップロードすると、AIがどの列が日付でどの列がどのKPI項目（候補者推薦数・書類選考通過数・各媒体のスカウト送信数など）に対応するか自動判定します。取り込む前に対応表と反映内容を必ず画面で確認・修正でき、対応付けた項目だけが取り込んだ内容で上書きされます（他の項目・他の日の実績は変更されません）。まずは自分自身のKPI実績データの一度きりの移行を想定した機能です',
+      'スプレッドシート取込みは1枚のシートにチーム全員分がまとまっていることが多いため、ミドルの人には「自分のKPIのみ」か「チームメンバー分も含めて取り込む」かを選べるようにした。後者を選ぶと、どの列が担当者（誰の実績か）を表すかもAIが判定し、担当者列に実際に登場した値（氏名表記など）をどのメンバーに対応付けるかも自動推定します。担当者との対応も含め、必ず画面で確認・修正してから反映でき、各メンバー分はそのメンバー本人のKPI実績として反映されます（代理登録したミドルの実績にはなりません）',
     ],
   },
   {
@@ -9800,6 +10380,7 @@ const App: React.FC = () => {
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [isBulkGmailModalOpen, setIsBulkGmailModalOpen] = useState(false);
   const [isMediaCsvModalOpen, setIsMediaCsvModalOpen] = useState(false);
+  const [isSpreadsheetKpiModalOpen, setIsSpreadsheetKpiModalOpen] = useState(false);
 
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
@@ -10842,6 +11423,73 @@ const App: React.FC = () => {
     }
   };
 
+  // 各チームが独自フォーマットで管理していたKPI実績スプレッドシートの取込み（一度きりの移行用）
+  // 内、自分自身の分の反映 — handleApplyMediaCsvImportと同じ「対応付けたKPIキーだけを上書き、
+  // 他は変更しない」マージパターンだが、対応先が固定の2項目ではなく確認画面でユーザーが選んだ
+  // 任意のキー群になる。
+  const applySpreadsheetKpiCountsToSelf = (countsByDate: Record<string, Record<string, number>>) => {
+    if (!currentUserData) return;
+    const entriesByDateMap = new Map<string, KpiEntry>(currentUserData.entries.map(entry => [entry.date, entry] as [string, KpiEntry]));
+    let idOffset = 0;
+    Object.entries(countsByDate).forEach(([dateStr, counts]) => {
+      const existing = entriesByDateMap.get(dateStr);
+      const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+      Object.entries(counts).forEach(([kpiKey, count]) => {
+        values[kpiKey as KpiKey] = count;
+      });
+      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+    });
+    const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    const updatedData = { ...currentUserData, entries: updatedEntries };
+    setCurrentUserData(updatedData);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
+  // スプレッドシート取込みでチームメンバー分も対象にした場合の、対象メンバー1人分の反映 —
+  // persistTeammateCandidateEditと同じ「一括で楽観的ローカル更新→対象ファイルを都度再取得して
+  // 実際の書き込み」の形だが、日付1件ずつではなく複数日分をまとめて1回のDrive書き込みで反映する
+  // （overwriteTeammateEntries参照 — 取込みは数十〜数百日分に及ぶことがあるため）。
+  const persistTeammateEntriesBulk = (targetEmail: string, countsByDate: Record<string, Record<string, number>>) => {
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      const entriesByDateMap = new Map<string, KpiEntry>(target.entries.map(e => [e.date, e] as [string, KpiEntry]));
+      Object.entries(countsByDate).forEach(([dateStr, counts]) => {
+        const existing = entriesByDateMap.get(dateStr);
+        const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
+        Object.entries(counts).forEach(([kpiKey, count]) => { values[kpiKey as KpiKey] = count; });
+        entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now(), date: dateStr, values });
+      });
+      const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+      return { ...prev, [targetEmail]: { ...target, entries: updatedEntries } };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert(`対象メンバー（${targetEmail}）のデータファイルが見つかりませんでした。`);
+      return;
+    }
+    overwriteTeammateEntries<UserData>(targetFileId, countsByDate).catch(err => {
+      console.error('Failed to save proxy spreadsheet import to teammate Drive file', err);
+      alert(`${targetEmail}への実績の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
+  // スプレッドシート取込みモーダルからの反映本体 — 対象ごと(自分＋選んだチームメンバー)に
+  // 分かれたcountsByTargetを、自分の分は上のapplySpreadsheetKpiCountsToSelfへ、それ以外は
+  // persistTeammateEntriesBulkへ振り分ける。
+  const handleApplySpreadsheetKpiImport = (countsByTarget: Record<string, Record<string, Record<string, number>>>) => {
+    Object.entries(countsByTarget).forEach(([targetEmail, countsByDate]) => {
+      if (currentIdentity && normalizeEmail(targetEmail) === normalizeEmail(currentIdentity.email)) {
+        applySpreadsheetKpiCountsToSelf(countsByDate);
+      } else {
+        persistTeammateEntriesBulk(targetEmail, countsByDate);
+      }
+    });
+    setIsSpreadsheetKpiModalOpen(false);
+  };
+
   // Mirrors googleTaskIdsByApplicationId — kept in sync with state via the effect below, but
   // also written to directly (synchronously) inside the sync queue itself, so a second sync
   // queued right after the first always sees the first one's freshly-created task IDs instead
@@ -11256,6 +11904,12 @@ const App: React.FC = () => {
       });
       return Array.from(set);
     }, [teams, currentIdentity, isCurrentUserMiddle]);
+
+    // 表示名付きの管理下メンバー一覧 — スプレッドシート取込み（チームメンバー分も含める場合の
+    // 担当者マッピング選択肢）で使う。
+    const middleManagedMemberOptions = useMemo(() => (
+      middleManagedMemberEmails.map(email => ({ email, label: pipelineUserOptions.find(u => u.email === email)?.label || email }))
+    ), [middleManagedMemberEmails, pipelineUserOptions]);
 
     // Grants/revokes direct Drive write access to MY OWN data file for exactly the ミドル
     // accounts currently eligible to proxy-enter my KPI actuals (share a Team with me and hold
@@ -11710,6 +12364,16 @@ const App: React.FC = () => {
           onClose={() => setIsMediaCsvModalOpen(false)}
         />
       )}
+      {isSpreadsheetKpiModalOpen && (
+        <SpreadsheetKpiImportModal
+          allMedia={allMedia}
+          entriesByDate={entriesByDate}
+          currentUserEmail={currentIdentity?.email || ''}
+          managedMembers={isCurrentUserMiddle ? middleManagedMemberOptions : []}
+          onApply={handleApplySpreadsheetKpiImport}
+          onClose={() => setIsSpreadsheetKpiModalOpen(false)}
+        />
+      )}
 
       {hasSyncError && (
         <div className="sync-error-banner">
@@ -11836,6 +12500,9 @@ const App: React.FC = () => {
                  </button>
                  <button type="button" onClick={() => setIsMediaCsvModalOpen(true)} className="secondary-action-button">
                    媒体CSVから実績を取り込む
+                 </button>
+                 <button type="button" onClick={() => setIsSpreadsheetKpiModalOpen(true)} className="secondary-action-button">
+                   スプレッドシートからKPI実績を取り込む
                  </button>
                </span>
              </div>

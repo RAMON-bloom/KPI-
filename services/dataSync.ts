@@ -389,6 +389,31 @@ export async function overwriteTeammateEntry<T extends { entries: any[] } = any>
 }
 
 /**
+ * スプレッドシート取込み（チームメンバー分も含めて取込む場合）専用: overwriteTeammateEntry と
+ * 同じ「対象フィールドだけ上書き、他は変更しない」マージだが、日付1件ずつではなく
+ * `countsByDate`（複数日分）をまとめて1回のfetch+writeで反映する。取込みは数十〜数百日分に
+ * 及ぶことがあり、日付ごとに逐次overwriteTeammateEntryを呼ぶとDrive API呼び出しが同数発生して
+ * 遅く・失敗しやすくなるため、対象メンバー1人につき1回のDrive書き込みで済ませる。
+ */
+export async function overwriteTeammateEntries<T extends { entries: any[] } = any>(
+  driveFileId: string,
+  countsByDate: Record<string, Record<string, number>>
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const entriesByDateMap = new Map<string, any>((latest.entries || []).map((e: any) => [e.date, e]));
+  Object.entries(countsByDate).forEach(([dateStr, counts]) => {
+    const existing = entriesByDateMap.get(dateStr);
+    const values: Record<string, number> = existing ? { ...existing.values } : {};
+    Object.entries(counts).forEach(([key, count]) => { values[key] = count; });
+    entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now(), date: dateStr, values });
+  });
+  const updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const updated = { ...latest, entries: updatedEntries };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
  * チーム作成・編集権限保持者による代理での候補者「非表示」切り替え: fetches the target
  * teammate's LATEST data (same re-fetch-before-write pattern as overwriteTeammateEntry, to avoid
  * clobbering a concurrent save), flips isHidden on just the matching candidate, and writes the

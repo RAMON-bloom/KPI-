@@ -1862,6 +1862,9 @@ button.agent-interview-status-badge:focus-visible {
 .modal-content.application-modal {
   max-width: 500px;
 }
+.modal-content.spreadsheet-kpi-modal {
+  max-width: 960px;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
