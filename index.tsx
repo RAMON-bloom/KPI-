@@ -2982,6 +2982,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ミドルの人が新規候補者を登録する導線をわかりやすくするため、「ユーザー別」表示に切り替えなくても、「自分」タブ・「チーム」タブの「+ 新規候補者を追加」ボタンのそばに登録先メンバーを選ぶ欄を追加した。「自分」タブでは未選択なら自分自身、選ぶとそのメンバーの代理登録に切り替わる。「チーム」タブでは自分の管理下メンバーがいる場合のみ表示され、選んだメンバーに代わって登録できます',
       '「自分」タブに「スプレッドシートからKPI実績を取り込む」を追加。これまで各チームが独自フォーマットで管理していたKPI実績スプレッドシートをCSVで書き出してアップロードすると、AIがどの列が日付でどの列がどのKPI項目（候補者推薦数・書類選考通過数・各媒体のスカウト送信数など）に対応するか自動判定します。取り込む前に対応表と反映内容を必ず画面で確認・修正でき、対応付けた項目だけが取り込んだ内容で上書きされます（他の項目・他の日の実績は変更されません）。まずは自分自身のKPI実績データの一度きりの移行を想定した機能です',
       'スプレッドシート取込みは1枚のシートにチーム全員分がまとまっていることが多いため、ミドルの人には「自分のKPIのみ」か「チームメンバー分も含めて取り込む」かを選べるようにした。後者を選ぶと、どの列が担当者（誰の実績か）を表すかもAIが判定し、担当者列に実際に登場した値（氏名表記など）をどのメンバーに対応付けるかも自動推定します。担当者との対応も含め、必ず画面で確認・修正してから反映でき、各メンバー分はそのメンバー本人のKPI実績として反映されます（代理登録したミドルの実績にはなりません）',
+      '候補者パイプラインの「チーム」タブの想定粗利にも、チーム別タブと同様の「メンバー別想定粗利」の一覧表を追加。チーム合計だけでなく、メンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした（対象期間は合計と同じものを使用します）',
     ],
   },
   {
@@ -5918,7 +5919,12 @@ const GrossProfitSummary: React.FC<{
     allMedia: MediaEntry[];
     periodOverride?: { start: Date; end: Date } | null;
     periodLabel?: string;
-}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel }) => {
+    // メンバーごとの候補者一覧が渡された場合、合計の下に「メンバー別想定粗利」の表を追加表示
+    // する（例: パイプラインタブの「チーム」スコープ）。渡さなければ従来通り表示しない。
+    // 集計にはこのコンポーネントが（uncontrolledの場合は自前で）持っているperiodOverideを
+    // そのまま使うので、合計とメンバー別で対象期間がずれることはない。
+    memberBreakdown?: { key: string; label: string; candidates: Candidate[] }[];
+}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel, memberBreakdown }) => {
     const isControlled = externalPeriodOverride !== undefined;
     const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
     const toggleStageFilter = (stage: PipelineStage) => {
@@ -5983,6 +5989,25 @@ const GrossProfitSummary: React.FC<{
             profit: acc.profit + s.profit,
         }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
     }, [stageTotals, visibleStageTotals, selectedStageFilters]);
+
+    // メンバー別想定粗利 — 全ユーザー/チーム別ダッシュボードのperUserGrossProfitTotalsと同じ
+    // 「お見送り・選考辞退・内定承諾後辞退を除いた合計」を、メンバーごとに算出する。
+    const memberBreakdownTotals = useMemo(() => {
+        if (!memberBreakdown) return [];
+        return memberBreakdown.map(group => {
+            const groupStageTotals = computeGrossProfitByStage(group.candidates, allMedia, periodOverride);
+            const total = groupStageTotals
+                .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
+                .reduce((acc, s) => ({
+                    count: acc.count + s.count,
+                    estimableCount: acc.estimableCount + s.estimableCount,
+                    revenue: acc.revenue + s.revenue,
+                    cost: acc.cost + s.cost,
+                    profit: acc.profit + s.profit,
+                }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+            return { key: group.key, label: group.label, ...total };
+        });
+    }, [memberBreakdown, allMedia, periodOverride]);
 
     return (
         <div className="gross-profit-summary">
@@ -6064,6 +6089,35 @@ const GrossProfitSummary: React.FC<{
                     </div>
                 ))}
             </div>
+            {memberBreakdownTotals.length > 0 && (
+                <>
+                    <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{periodLabel}）</h3>
+                    <div className="all-users-table-container">
+                        <table className="weekly-summary-table">
+                            <thead>
+                                <tr>
+                                    <th>ユーザー</th>
+                                    <th>対象件数</th>
+                                    <th>想定紹介料</th>
+                                    <th>想定媒体手数料</th>
+                                    <th>想定粗利</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {memberBreakdownTotals.map(stat => (
+                                    <tr key={stat.key}>
+                                        <td>{stat.label}</td>
+                                        <td>{stat.count}件{stat.count > stat.estimableCount && `（うち算出可能 ${stat.estimableCount}件）`}</td>
+                                        <td>{formatManYen(stat.revenue)}</td>
+                                        <td>{formatManYen(stat.cost)}</td>
+                                        <td>{formatManYen(stat.profit)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </>
+            )}
         </div>
     );
 };
@@ -8069,6 +8123,21 @@ const CandidatePipelineView: React.FC<{
         ));
         return canonicalEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
     }, [scope, selectedTeamId, teams, canonicalEmailByLower, labelByEmailForPipeline]);
+    // スコープが「チーム」の時、想定粗利をメンバー別にも見られるようにするためのグルーピング —
+    // candidatesは既にownerEmail/ownerLabelタグ付き（App側のpipelineCandidatesで付与）なので、
+    // それをキーにまとめるだけで済む。他のスコープ（自分/全ユーザー/ユーザー別）では出さない
+    // ためundefinedを返す。
+    const teamGrossProfitMemberGroups = useMemo(() => {
+        if (scope !== 'team') return undefined;
+        const groups = new Map<string, { key: string; label: string; candidates: Candidate[] }>();
+        candidates.forEach(c => {
+            const key = c.ownerEmail || currentUserEmail;
+            const label = c.ownerLabel || labelByEmailForPipeline.get(key) || key;
+            const existing = groups.get(key);
+            if (existing) { existing.candidates.push(c); } else { groups.set(key, { key, label, candidates: [c] }); }
+        });
+        return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+    }, [scope, candidates, currentUserEmail, labelByEmailForPipeline]);
     // ミドルが「自分」タブ/「チーム」タブから新規候補者を登録する際に選べる代理登録先メンバー
     // 一覧 — 「自分」タブでは自分の管理下メンバー全員、「チーム」タブでは現在表示中のチームの
     // メンバーのうち自分の管理下にある人だけに絞る（表示されている一覧と選択肢を一致させるため）。
@@ -8616,7 +8685,7 @@ const CandidatePipelineView: React.FC<{
                     <span className={`toggle-icon ${isGrossProfitVisible ? 'open' : ''}`}>▼</span>
                 </h3>
                 <div id="gross-profit-content" className={`collapsible-content ${isGrossProfitVisible ? 'open' : ''}`}>
-                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} />
+                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} memberBreakdown={teamGrossProfitMemberGroups} />
                 </div>
             </div>
 
