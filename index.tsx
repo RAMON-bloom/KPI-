@@ -3014,6 +3014,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】「選考フェーズで絞り込み」のデフォルト保存が、アプリを再読み込みすると消えてしまっていた不具合を修正（保存自体はDriveに届いていたが、読み込み時の処理でこの項目が見落とされ毎回消えていました）',
       '【不具合修正】チーム作成・編集権限保持者が、所属チームのメンバーの候補者を代理で非表示にしようとするとDriveへの書き込みに失敗することがある不具合を修正。メンバーのメールアドレスの大文字・小文字の表記がチーム設定と食い違っている場合に、そのメンバー自身がチームに所属していると正しく認識できず、書き込み権限が付与されていなかったのが原因でした',
       'ミドル・チーム編集者による代理保存（実績入力・候補者の非表示切り替え・候補者情報編集・新規登録・スプレッドシート取込み・お問い合わせ返信）でDriveへの書き込みが失敗した際、エラーメッセージにHTTPステータスコードを表示するようにした。権限不足（403）の場合は「対象メンバーが一度アプリを開き直す必要がある可能性があります」という案内も表示され、原因を切り分けやすくなります',
+      'ヘッダーのボタン配置をブラッシュアップ。多くのユーザーが日常的に使う「個人実績」「候補者パイプライン」を一回り大きく強調し、使用頻度の低い「チーム管理」「媒体管理」「使い方」「更新履歴」「お問い合わせ」「ログアウト」は小さく控えめな見た目に変更した',
     ],
   },
   {
@@ -12689,10 +12690,10 @@ const App: React.FC = () => {
         </div>
         <div className="header-controls">
           <div className="view-switcher">
-            <button onClick={() => setView('personal_kpi')} disabled={view === 'personal_kpi'}>個人実績</button>
+            <button onClick={() => setView('personal_kpi')} disabled={view === 'personal_kpi'} className="view-switcher-primary">個人実績</button>
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
-            <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'}>候補者パイプライン</button>
+            <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
@@ -12753,12 +12754,12 @@ const App: React.FC = () => {
                 <option value="AC">AssetCareer</option>
               </select>
             )}
-            <button onClick={() => setIsTeamsModalOpen(true)}>チーム管理</button>
-            <button onClick={() => setIsMediaModalOpen(true)}>媒体管理</button>
-            <button onClick={() => setIsHelpModalOpen(true)}>使い方</button>
-            <button onClick={() => setIsChangelogModalOpen(true)}>更新履歴</button>
-            <button onClick={() => setIsFeedbackModalOpen(true)}>お問い合わせ</button>
-            <button onClick={handleLogout} className="logout-button">ログアウト</button>
+            <button onClick={() => setIsTeamsModalOpen(true)} className="header-utility-button">チーム管理</button>
+            <button onClick={() => setIsMediaModalOpen(true)} className="header-utility-button">媒体管理</button>
+            <button onClick={() => setIsHelpModalOpen(true)} className="header-utility-button">使い方</button>
+            <button onClick={() => setIsChangelogModalOpen(true)} className="header-utility-button">更新履歴</button>
+            <button onClick={() => setIsFeedbackModalOpen(true)} className="header-utility-button">お問い合わせ</button>
+            <button onClick={handleLogout} className="logout-button header-utility-button">ログアウト</button>
           </div>
         </div>
       </header>
