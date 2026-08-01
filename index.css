@@ -1806,17 +1806,28 @@ button.agent-interview-status-badge:focus-visible {
 }
 .candidate-key-info {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
 }
+/* label(小さく・グレー) を上、value(通常サイズ) を下に積む — .candidate-info-item（詳細展開後の
+   表示）と揃えた見た目にすることで、「ぱっと見」表示だけ項目数が増えて読みにくくなっていたのを
+   解消する。値側（Inline*Field/MaskedContactFieldの非編集表示）は既にinfo-valueクラスを持って
+   いるため、ここではラベル行の見た目だけ.info-labelに合わせれば揃う。 */
 .key-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
   font-size: 0.9rem;
   color: var(--text-color);
+  min-width: 0;
 }
 .key-info-item > span:first-child {
   color: var(--text-muted-color);
-  margin-right: 0.5em;
+  font-size: 0.78rem;
+  margin-right: 0;
 }
 
 .candidate-application-summary {

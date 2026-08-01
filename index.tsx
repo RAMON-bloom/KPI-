@@ -2985,6 +2985,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者パイプラインの「チーム」タブの想定粗利にも、チーム別タブと同様の「メンバー別想定粗利」の一覧表を追加。チーム合計だけでなく、メンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした（対象期間は合計と同じものを使用します）',
       '【不具合修正】想定粗利の集計で、内定承諾まで至った候補者を非表示（掘り起しリスト登録や成約後のアーカイブなど）にすると、その成約実績が集計から消えてしまっていた不具合を修正。非表示の候補者でも、内定承諾済みの選考は引き続き想定粗利に反映されます（内定承諾後辞退は従来通り対象外のままです）',
       '選考状況を「内定承諾」に変更して保存する際、この成約を今月扱いにするか別の月（過去月も選択可）の成約として扱うかを選ぶポップアップを表示するようにした。選んだ内容に合わせて意思決定時期が自動的に上書きされ、想定粗利の集計（意思決定時期＝見込み月ベース）に正しく反映されます。既に内定承諾になっている選考を編集しただけの場合（他の項目の変更など）はポップアップは出ません',
+      '内定承諾済みの選考がある候補者は、候補者カードの「ぱっと見」表示に「内定承諾時期」を追加し、選考情報の編集画面を開かずにその場で日付を修正できるようにした（成約月のポップアップで設定した意思決定時期を、後から直接調整したい場合に使えます）',
+      '候補者カードの「ぱっと見」表示（現職・学歴・年収・確度など）が項目数の増加で見づらくなっていたため、各項目をラベル（小さく・グレー）を上、値を下に並べる表示に統一し、詳細表示を開いた後の項目と見た目を揃えた。項目間の余白も広げ、選考状況の一覧との間に区切り線を追加した',
     ],
   },
   {
@@ -7057,6 +7059,10 @@ const PipelineCandidateCard: React.FC<{
   const activeMedia = allMedia.filter(m => !m.isArchived);
   const visibleApplications = c.applications.filter(app => !app.isHidden);
   const bestConfidenceApp = getBestConfidenceApplication(c);
+  // 内定承諾した選考の意思決定時期（成約月）— 通常はDecisionMonthPromptModalで内定承諾に
+  // 変更した瞬間に設定されるが、後から日付を直接修正できるようにサマリからも編集可能にする。
+  // 非表示（isHidden）の選考は対象外（pickBestApplicationPerCandidateの扱いと合わせる）。
+  const acceptedApplication = c.applications.find(app => !app.isHidden && app.stage === '内定承諾');
 
   const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
     onSave({ ...c, [field]: value });
@@ -7380,7 +7386,7 @@ const PipelineCandidateCard: React.FC<{
         <div className="candidate-card-body">
             <div className="candidate-key-info">
                 <div className="key-info-item">
-                    <span>現職:</span>
+                    <span>現職</span>
                     {candidateIsOwn ? (
                         <InlineTextField value={c.currentCompany || ''} onCommit={(v) => commitCandidateField('currentCompany', v)} placeholder="現職企業名" ariaLabel="現職企業名" />
                     ) : (
@@ -7388,7 +7394,7 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>学歴:</span>
+                    <span>学歴</span>
                     {candidateIsOwn ? (
                         <InlineTextField value={c.education || ''} onCommit={(v) => commitCandidateField('education', v)} placeholder="最終学歴" ariaLabel="最終学歴" />
                     ) : (
@@ -7396,7 +7402,7 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>現年収:</span>
+                    <span>現年収</span>
                     {candidateIsOwn ? (
                         <InlineSalaryField value={c.currentSalary} onCommit={(v) => commitCandidateField('currentSalary', v || 0)} placeholder="例: 5000000" ariaLabel="現職年収" />
                     ) : (
@@ -7404,15 +7410,15 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>想定年収:</span>
+                    <span>年齢</span>
                     {candidateIsOwn ? (
-                        <InlineSalaryField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 6000000" ariaLabel="想定年収" />
+                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} unit="歳" />
                     ) : (
-                        formatSalaryAsYen(c.expectedAnnualSalary) || 'N/A'
+                        c.age ? `${c.age}歳` : 'N/A'
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>媒体:</span>
+                    <span>媒体</span>
                     {candidateIsOwn ? (
                         <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={c.source} emptyText="N/A">
                             <option value="">選択してください</option>
@@ -7429,15 +7435,15 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>年齢:</span>
+                    <span>想定年収</span>
                     {candidateIsOwn ? (
-                        <InlineNumberField value={c.age} onCommit={(v) => commitCandidateField('age', v)} placeholder="例: 28" ariaLabel="年齢" min={0} unit="歳" />
+                        <InlineSalaryField value={c.expectedAnnualSalary} onCommit={(v) => commitCandidateField('expectedAnnualSalary', v)} placeholder="例: 6000000" ariaLabel="想定年収" />
                     ) : (
-                        c.age ? `${c.age}歳` : 'N/A'
+                        formatSalaryAsYen(c.expectedAnnualSalary) || 'N/A'
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>確度:</span>
+                    <span>確度</span>
                     {candidateIsOwn && bestConfidenceApp ? (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
                             <InlineSelectField
@@ -7465,7 +7471,7 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>職種:</span>
+                    <span>職種</span>
                     {candidateIsOwn ? (
                         <InlineTextField value={c.jobType || ''} onCommit={(v) => commitCandidateField('jobType', v)} placeholder="例: エンジニア" ariaLabel="職種" />
                     ) : (
@@ -7473,7 +7479,7 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>他社状況:</span>
+                    <span>他社状況</span>
                     {candidateIsOwn ? (
                         <InlineTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
                     ) : (
@@ -7481,7 +7487,7 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>入社希望:</span>
+                    <span>入社希望</span>
                     {candidateIsOwn ? (
                         <InlineDateField type="month" value={c.desiredJoinTiming} onCommit={(v) => commitCandidateField('desiredJoinTiming', v)} ariaLabel="入社希望時期" />
                     ) : (
@@ -7489,15 +7495,31 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>見込み月:</span>
+                    <span>見込み月</span>
                     {candidateIsOwn ? (
                         <InlineDateField type="month" value={c.expectedDecisionMonth} onCommit={(v) => commitCandidateField('expectedDecisionMonth', v)} ariaLabel="見込み月" />
                     ) : (
                         c.expectedDecisionMonth || 'N/A'
                     )}
                 </div>
+                {acceptedApplication && (
+                    <div className="key-info-item">
+                        <span>内定承諾時期</span>
+                        {candidateIsOwn ? (
+                            <InlineDateField
+                                value={acceptedApplication.expectedDecisionDate}
+                                onCommit={(v) => commitApplicationField(acceptedApplication.id, { expectedDecisionDate: v })}
+                                ariaLabel="内定承諾時期"
+                            />
+                        ) : (
+                            acceptedApplication.expectedDecisionDate
+                                ? new Date(acceptedApplication.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP')
+                                : 'N/A'
+                        )}
+                    </div>
+                )}
                 <div className="key-info-item">
-                    <span>電話番号:</span>
+                    <span>電話番号</span>
                     <MaskedContactField
                         value={c.phoneNumber}
                         revealed={isContactRevealed}
@@ -7509,7 +7531,7 @@ const PipelineCandidateCard: React.FC<{
                     />
                 </div>
                 <div className="key-info-item">
-                    <span>メール:</span>
+                    <span>メール</span>
                     <MaskedContactField
                         value={c.email}
                         revealed={isContactRevealed}
