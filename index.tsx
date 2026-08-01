@@ -2401,6 +2401,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-08-01',
     items: [
       'ミドルの人が、パイプラインの「ユーザー別」表示で自分の所属チームのメンバーを選択している間、そのメンバーに代わって新規候補者を登録できるようにした（従来は本人の代理で既存候補者を編集することはできても、新規登録だけは本人の画面からしかできなかった）。登録した候補者は対象メンバー本人の候補者パイプラインに追加され、KPI実績も代理登録したミドルではなく対象メンバー本人に加算されます',
+      'ミドルの人が新規候補者を登録する導線をわかりやすくするため、「ユーザー別」表示に切り替えなくても、「自分」タブ・「チーム」タブの「+ 新規候補者を追加」ボタンのそばに登録先メンバーを選ぶ欄を追加した。「自分」タブでは未選択なら自分自身、選ぶとそのメンバーの代理登録に切り替わる。「チーム」タブでは自分の管理下メンバーがいる場合のみ表示され、選んだメンバーに代わって登録できます',
     ],
   },
   {
@@ -7488,6 +7489,28 @@ const CandidatePipelineView: React.FC<{
         ));
         return canonicalEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
     }, [scope, selectedTeamId, teams, canonicalEmailByLower, labelByEmailForPipeline]);
+    // ミドルが「自分」タブ/「チーム」タブから新規候補者を登録する際に選べる代理登録先メンバー
+    // 一覧 — 「自分」タブでは自分の管理下メンバー全員、「チーム」タブでは現在表示中のチームの
+    // メンバーのうち自分の管理下にある人だけに絞る（表示されている一覧と選択肢を一致させるため）。
+    // 「ユーザー別」タブは既存の上部セレクタで対象を選ぶので、ここには含めない。
+    const addableManagedMembers = useMemo(() => {
+        if (!isCurrentUserMiddle || middleManagedMemberEmails.length === 0) return [];
+        if (scope === 'personal') {
+            return middleManagedMemberEmails.map(email => ({ email, label: labelByEmailForPipeline.get(email) || email }));
+        }
+        if (scope === 'team') {
+            return teamMemberOptions.filter(m => middleManagedMemberEmails.includes(m.email));
+        }
+        return [];
+    }, [isCurrentUserMiddle, middleManagedMemberEmails, scope, teamMemberOptions, labelByEmailForPipeline]);
+    // ''は「自分」タブでの自分自身。新規候補者の登録先をボタン押下前に選んでおくためのUI状態
+    // （addTargetEmailはモーダルが開いた瞬間の保存先を固定するためのもので役割が異なる）。
+    const [candidateAddTargetEmail, setCandidateAddTargetEmail] = useState<string>('');
+    useEffect(() => {
+        if (candidateAddTargetEmail && !addableManagedMembers.some(m => m.email === candidateAddTargetEmail)) {
+            setCandidateAddTargetEmail('');
+        }
+    }, [candidateAddTargetEmail, addableManagedMembers]);
     const [sortConfig, setSortConfig] = useState<{ key: PipelineSortKey; direction: 'asc' | 'desc' } | null>({ key: 'createdAt', direction: 'desc'});
     const [expandedCandidateId, setExpandedCandidateId] = useState<string | null>(null);
     const [isReportVisible, setIsReportVisible] = useState(false);
@@ -8046,23 +8069,76 @@ const CandidatePipelineView: React.FC<{
             </div>
 
             {(() => {
-                // ミドルが「ユーザー別」スコープで自分の管理下メンバーを選択している場合、その
-                // メンバーに代わって新規候補者を登録できるようにする（既存候補者の代理編集
-                // isManagedByMiddleと同じ対象範囲）。
-                const canAddForSelectedMember = scope === 'user' && !!selectedUserEmail
-                    && isCurrentUserMiddle && middleManagedMemberEmails.includes(selectedUserEmail);
-                if (scope !== 'personal' && !canAddForSelectedMember) return null;
-                const targetEmail = scope === 'personal' ? null : selectedUserEmail;
-                const buttonLabel = targetEmail
-                    ? `+ ${labelByEmailForPipeline.get(targetEmail) || targetEmail} さんの新規候補者を追加`
-                    : '+ 新規候補者を追加';
-                return (
-                    <div className="add-candidate-action-bar">
-                        <button onClick={() => handleAdd(targetEmail)} className="add-candidate-large-button">
-                            {buttonLabel}
-                        </button>
-                    </div>
-                );
+                if (scope === 'user') {
+                    // ミドルが「ユーザー別」スコープで自分の管理下メンバーを選択している場合、その
+                    // メンバーに代わって新規候補者を登録できるようにする（既存候補者の代理編集
+                    // isManagedByMiddleと同じ対象範囲）。対象は上部の「ユーザー別」セレクタで
+                    // 選ぶので、ここでは別途メンバー選択欄は出さない。
+                    const canAddForSelectedMember = !!selectedUserEmail
+                        && isCurrentUserMiddle && middleManagedMemberEmails.includes(selectedUserEmail);
+                    if (!canAddForSelectedMember) return null;
+                    const label = labelByEmailForPipeline.get(selectedUserEmail!) || selectedUserEmail;
+                    return (
+                        <div className="add-candidate-action-bar">
+                            <button onClick={() => handleAdd(selectedUserEmail)} className="add-candidate-large-button">
+                                {`+ ${label} さんの新規候補者を追加`}
+                            </button>
+                        </div>
+                    );
+                }
+                if (scope === 'personal') {
+                    // ミドルであれば、ボタンの手前に登録先メンバーを選ぶセレクタを出す（未選択=
+                    // 自分自身）。ミドルでない、または管理下メンバーがいない場合は従来通りボタン
+                    // だけを表示する。
+                    return (
+                        <div className="add-candidate-action-bar">
+                            {addableManagedMembers.length > 0 && (
+                                <select
+                                    value={candidateAddTargetEmail}
+                                    onChange={(e) => setCandidateAddTargetEmail(e.target.value)}
+                                    aria-label="候補者の登録先"
+                                    style={{ marginRight: '0.75rem' }}
+                                >
+                                    <option value="">自分の候補者として登録</option>
+                                    {addableManagedMembers.map(m => (
+                                        <option key={m.email} value={m.email}>{m.label} さんの候補者として登録</option>
+                                    ))}
+                                </select>
+                            )}
+                            <button onClick={() => handleAdd(candidateAddTargetEmail || null)} className="add-candidate-large-button">
+                                {candidateAddTargetEmail
+                                    ? `+ ${labelByEmailForPipeline.get(candidateAddTargetEmail) || candidateAddTargetEmail} さんの新規候補者を追加`
+                                    : '+ 新規候補者を追加'}
+                            </button>
+                        </div>
+                    );
+                }
+                if (scope === 'team' && addableManagedMembers.length > 0) {
+                    // 「チーム」タブには自分自身の候補者は含まれないので、「自分」タブと違い
+                    // 未選択状態は無い — 管理下メンバーがいれば常にその中の誰か(先頭を既定)を
+                    // 対象とする。
+                    const effectiveTarget = addableManagedMembers.some(m => m.email === candidateAddTargetEmail)
+                        ? candidateAddTargetEmail
+                        : addableManagedMembers[0].email;
+                    return (
+                        <div className="add-candidate-action-bar">
+                            <select
+                                value={effectiveTarget}
+                                onChange={(e) => setCandidateAddTargetEmail(e.target.value)}
+                                aria-label="候補者の登録先メンバー"
+                                style={{ marginRight: '0.75rem' }}
+                            >
+                                {addableManagedMembers.map(m => (
+                                    <option key={m.email} value={m.email}>{m.label}</option>
+                                ))}
+                            </select>
+                            <button onClick={() => handleAdd(effectiveTarget)} className="add-candidate-large-button">
+                                {`+ ${labelByEmailForPipeline.get(effectiveTarget) || effectiveTarget} さんの新規候補者を追加`}
+                            </button>
+                        </div>
+                    );
+                }
+                return null;
             })()}
 
              <div className="pipeline-list-controls">
