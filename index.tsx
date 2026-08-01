@@ -16,12 +16,13 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError } from './services/googleTasks';
+import { buildCandidateDraftsFromGrid, extractDistinctColumnValues, CANDIDATE_IMPORT_FIELD_CATALOG, CandidateImportFieldKey, BuildCandidateDraftsResult } from './services/pipelineSpreadsheetImport';
 
 ChartJS.register(
   CategoryScale,
@@ -2877,6 +2878,689 @@ const SpreadsheetKpiImportModal: React.FC<{
   );
 };
 
+const PipelineSpreadsheetImportModal: React.FC<{
+  allMedia: MediaEntry[];
+  currentUserEmail: string;
+  managedMembers: { email: string; label: string }[];
+  onApply: (candidatesByTarget: Record<string, Candidate[]>) => void;
+  onClose: () => void;
+}> = ({ allMedia, currentUserEmail, managedMembers, onApply, onClose }) => {
+  const roster = useMemo(() => [{ email: currentUserEmail, label: '自分' }, ...managedMembers], [currentUserEmail, managedMembers]);
+  const labelByEmail = useMemo(() => new Map(roster.map(r => [r.email, r.label])), [roster]);
+  const mediaOptions = useMemo(() => [...allMedia.map(m => ({ key: m.id, label: m.name })), { key: 'Other', label: 'その他/不明' }], [allMedia]);
+  const mediaLabelByKey = useMemo(() => new Map(mediaOptions.map(m => [m.key, m.label])), [mediaOptions]);
+
+  const [importScope, setImportScope] = useState<'self' | 'team'>('self');
+  const [status, setStatus] = useState<'idle' | 'parsing' | 'analyzing' | 'ready' | 'error'>('idle');
+  const [message, setMessage] = useState('');
+  const [grid, setGrid] = useState<SpreadsheetGrid | null>(null);
+  // 列インデックス -> 取込み先キー（''は「取り込まない」）。氏名・現職企業名・選考企業名・選考
+  // ステータスなど CANDIDATE_IMPORT_FIELD_CATALOG のいずれか。
+  const [fieldByColumnIndex, setFieldByColumnIndex] = useState<Record<string, string>>({});
+  const [fieldReasons, setFieldReasons] = useState<Record<string, string>>({});
+  const [fallbackYear, setFallbackYear] = useState(() => new Date().getFullYear());
+  const [assigneeColumnIndex, setAssigneeColumnIndex] = useState<number>(-1);
+  const [assigneeTargetByValue, setAssigneeTargetByValue] = useState<Record<string, string>>({});
+  const [assigneeReasonByValue, setAssigneeReasonByValue] = useState<Record<string, string>>({});
+  const [isSuggestingAssignees, setIsSuggestingAssignees] = useState(false);
+  // 選考ステータス列・経由媒体列に実際に登場した生の値 -> 取込み先キー（選考ステータス列なら
+  // PipelineStage、経由媒体列ならMediaEntry.idまたは'Other'。''は「取り込まない（この応募/この
+  // 項目は作らない）」）。
+  const [stageValueByRaw, setStageValueByRaw] = useState<Record<string, string>>({});
+  const [stageReasonByRaw, setStageReasonByRaw] = useState<Record<string, string>>({});
+  const [isSuggestingStages, setIsSuggestingStages] = useState(false);
+  const [sourceValueByRaw, setSourceValueByRaw] = useState<Record<string, string>>({});
+  const [sourceReasonByRaw, setSourceReasonByRaw] = useState<Record<string, string>>({});
+  const [isSuggestingSources, setIsSuggestingSources] = useState(false);
+
+  useEffect(() => {
+    setStatus('idle');
+    setMessage('');
+    setGrid(null);
+    setFieldByColumnIndex({});
+    setFieldReasons({});
+    setAssigneeColumnIndex(-1);
+    setAssigneeTargetByValue({});
+    setAssigneeReasonByValue({});
+    setStageValueByRaw({});
+    setStageReasonByRaw({});
+    setSourceValueByRaw({});
+    setSourceReasonByRaw({});
+  }, [importScope]);
+
+  const stageColumnIndex = useMemo(() => {
+    const entry = Object.entries(fieldByColumnIndex).find(([, key]) => key === 'stage');
+    return entry ? Number(entry[0]) : -1;
+  }, [fieldByColumnIndex]);
+  const sourceColumnIndex = useMemo(() => {
+    const entry = Object.entries(fieldByColumnIndex).find(([, key]) => key === 'source');
+    return entry ? Number(entry[0]) : -1;
+  }, [fieldByColumnIndex]);
+
+  const distinctStageValues = useMemo(
+    () => (grid && stageColumnIndex !== -1 ? extractDistinctColumnValues(grid, stageColumnIndex) : []),
+    [grid, stageColumnIndex]
+  );
+  const distinctSourceValues = useMemo(
+    () => (grid && sourceColumnIndex !== -1 ? extractDistinctColumnValues(grid, sourceColumnIndex) : []),
+    [grid, sourceColumnIndex]
+  );
+  const distinctAssigneeValues = useMemo(
+    () => (grid && assigneeColumnIndex !== -1 ? extractDistinctColumnValues(grid, assigneeColumnIndex) : []),
+    [grid, assigneeColumnIndex]
+  );
+
+  // 「列の見出し・サンプル値」→「選択肢一覧のkey」という同じ形の対応付けをAIに判定させる汎用
+  // ヘルパー — 担当者列の値・選考ステータスの値・経由媒体の値、いずれもこれ1つで賄う。
+  const analyzeValueMapping = async (
+    contextText: string,
+    distinctValues: string[],
+    targetsText: string
+  ): Promise<{ rawValue: string; targetKey: string; reason: string }[]> => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const valuesText = distinctValues.map((v, i) => `${i + 1}. ${v}`).join('\n');
+    const instructionPart = {
+      text:
+        `${contextText}\n\n【選択肢一覧（key: ラベル）】\n${targetsText}\n\n【判定対象の値】\n${valuesText}\n\n` +
+        `該当する選択肢がない場合はtargetKeyに空文字("")を返してください。`,
+    };
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts: [instructionPart] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            mappings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  rawValue: { type: Type.STRING, description: '判定対象の値そのまま' },
+                  targetKey: { type: Type.STRING, description: '対応する選択肢のkey。該当なしは空文字' },
+                  reason: { type: Type.STRING, description: 'この対応付けにした理由を一言で' },
+                },
+                required: ['rawValue', 'targetKey', 'reason'],
+              },
+            },
+          },
+          required: ['mappings'],
+        },
+      },
+    });
+    return (JSON.parse(response.text.trim()) as { mappings: { rawValue: string; targetKey: string; reason: string }[] }).mappings;
+  };
+
+  const analyzeColumns = async (candidateGrid: SpreadsheetGrid) => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const sampleRows = candidateGrid.rows.slice(0, 5);
+    const tableText = [candidateGrid.header, ...sampleRows].map(r => r.join(' | ')).join('\n');
+    const catalogText = CANDIDATE_IMPORT_FIELD_CATALOG.map(f => `${f.key}: ${f.label}`).join('\n');
+    const instructionPart = {
+      text:
+        `以下は人材紹介会社の候補者パイプライン（候補者一覧・選考状況）を管理していたスプレッドシートの見出し行と、サンプルとして先頭数行のデータです（区切りは " | "）。\n\n` +
+        `【表】\n${tableText}\n\n` +
+        `【取り込み先の項目一覧（key: ラベル）】\n${catalogText}\n\n` +
+        `この表の各列が、上記項目一覧のどれに対応するかを判定してください。1行が候補者1人分の表でも、` +
+        `1行が候補者×選考企業の組み合わせ1件分の表（同じ候補者が複数行に分かれ、行ごとに違う選考企業を持つ）でも構いません。` +
+        `いずれの形式でも、その行の選考企業名を表す列があればcompanyName、選考ステータス（書類選考中・1次面接など）を表す列があればstageに対応付けてください。` +
+        `担当者（この行の候補者が誰の担当か）を表す列が別にあれば、assigneeColumnにその見出し名を返してください（無ければ空文字）。` +
+        `どの項目にも該当しない列（連番・備考など）にはfieldKeyとして空文字("")を返してください。` +
+        `1つの列は上記一覧のうち最も近い1つのkeyにのみ対応付けてください（一覧に無いkeyを新しく作らないこと）。`,
+    };
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts: [instructionPart] },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            assigneeColumn: { type: Type.STRING, description: '担当者を表す列の見出し名。無ければ空文字' },
+            columnMappings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  sourceColumn: { type: Type.STRING, description: '表の見出し名' },
+                  fieldKey: { type: Type.STRING, description: '対応する項目一覧のkey。該当なしは空文字' },
+                  reason: { type: Type.STRING, description: 'この対応付けにした理由を一言で' },
+                },
+                required: ['sourceColumn', 'fieldKey', 'reason'],
+              },
+            },
+          },
+          required: ['assigneeColumn', 'columnMappings'],
+        },
+      },
+    });
+    return JSON.parse(response.text.trim()) as {
+      assigneeColumn: string;
+      columnMappings: { sourceColumn: string; fieldKey: string; reason: string }[];
+    };
+  };
+
+  const handleSuggestStages = async () => {
+    if (distinctStageValues.length === 0) return;
+    setIsSuggestingStages(true);
+    try {
+      const targetsText = PIPELINE_STAGES.map(s => `${s}: ${s}`).join('\n');
+      const mappings = await analyzeValueMapping(
+        '以下は人材紹介会社の候補者パイプラインの「選考ステータス」列に実際に登場した値の一覧です。それぞれが、以下の選考ステータスの選択肢のどれに最も近いかを判定してください。',
+        distinctStageValues,
+        targetsText
+      );
+      const validKeys = new Set<string>(PIPELINE_STAGES);
+      const nextValues: Record<string, string> = {};
+      const nextReasons: Record<string, string> = {};
+      mappings.forEach(m => {
+        nextValues[m.rawValue] = validKeys.has(m.targetKey) ? m.targetKey : '';
+        nextReasons[m.rawValue] = m.reason || '';
+      });
+      distinctStageValues.forEach(v => { if (!(v in nextValues)) nextValues[v] = ''; });
+      setStageValueByRaw(nextValues);
+      setStageReasonByRaw(nextReasons);
+    } catch (err) {
+      console.error('選考ステータスの対応付け推定に失敗しました', err);
+      alert('AIによる選考ステータスの対応付けに失敗しました。お手数ですが対応表を手動で選択してください。');
+    } finally {
+      setIsSuggestingStages(false);
+    }
+  };
+
+  const handleSuggestSources = async () => {
+    if (distinctSourceValues.length === 0) return;
+    setIsSuggestingSources(true);
+    try {
+      const targetsText = mediaOptions.map(m => `${m.key}: ${m.label}`).join('\n');
+      const mappings = await analyzeValueMapping(
+        '以下は人材紹介会社の候補者パイプラインの「経由媒体」列に実際に登場した値の一覧です。それぞれが、以下の媒体一覧のどれに対応するかを判定してください。どの媒体にも該当しない場合はtargetKeyに"Other"を返してください。',
+        distinctSourceValues,
+        targetsText
+      );
+      const validKeys = new Set(mediaOptions.map(m => m.key));
+      const nextValues: Record<string, string> = {};
+      const nextReasons: Record<string, string> = {};
+      mappings.forEach(m => {
+        nextValues[m.rawValue] = validKeys.has(m.targetKey) ? m.targetKey : '';
+        nextReasons[m.rawValue] = m.reason || '';
+      });
+      distinctSourceValues.forEach(v => { if (!(v in nextValues)) nextValues[v] = ''; });
+      setSourceValueByRaw(nextValues);
+      setSourceReasonByRaw(nextReasons);
+    } catch (err) {
+      console.error('経由媒体の対応付け推定に失敗しました', err);
+      alert('AIによる経由媒体の対応付けに失敗しました。お手数ですが対応表を手動で選択してください。');
+    } finally {
+      setIsSuggestingSources(false);
+    }
+  };
+
+  const handleSuggestAssignees = async () => {
+    if (distinctAssigneeValues.length === 0) return;
+    setIsSuggestingAssignees(true);
+    try {
+      const targetsText = roster.map(r => `${r.email}: ${r.label}`).join('\n');
+      const mappings = await analyzeValueMapping(
+        'スプレッドシートの「担当者」列に実際に登場した値の一覧です。それぞれが、以下のメンバー一覧のどのメールアドレスにあたるかを判定してください。姓のみ・ニックネーム・表記ゆれなども考慮して、最も近いメンバーのメールアドレスを選んでください。',
+        distinctAssigneeValues,
+        targetsText
+      );
+      const validEmails = new Set(roster.map(r => r.email));
+      const nextTargets: Record<string, string> = {};
+      const nextReasons: Record<string, string> = {};
+      mappings.forEach(m => {
+        nextTargets[m.rawValue] = validEmails.has(m.targetKey) ? m.targetKey : '';
+        nextReasons[m.rawValue] = m.reason || '';
+      });
+      distinctAssigneeValues.forEach(v => { if (!(v in nextTargets)) nextTargets[v] = ''; });
+      setAssigneeTargetByValue(nextTargets);
+      setAssigneeReasonByValue(nextReasons);
+    } catch (err) {
+      console.error('担当者の対応付け推定に失敗しました', err);
+      alert('AIによる担当者の対応付けに失敗しました。お手数ですが対応表を手動で選択してください。');
+    } finally {
+      setIsSuggestingAssignees(false);
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setStatus('parsing');
+    setMessage('');
+    setGrid(null);
+    setFieldByColumnIndex({});
+    setFieldReasons({});
+    setAssigneeColumnIndex(-1);
+    setAssigneeTargetByValue({});
+    setAssigneeReasonByValue({});
+    setStageValueByRaw({});
+    setStageReasonByRaw({});
+    setSourceValueByRaw({});
+    setSourceReasonByRaw({});
+    try {
+      const text = await decodeSpreadsheetCsvFile(file);
+      const parsedGrid = parseSpreadsheetGrid(text);
+      if (parsedGrid.header.length === 0 || parsedGrid.rows.length === 0) {
+        setStatus('error');
+        setMessage('見出し行またはデータ行が見つかりませんでした。CSVファイルの内容をご確認ください。');
+        return;
+      }
+      setGrid(parsedGrid);
+      setStatus('analyzing');
+      const analysis = await analyzeColumns(parsedGrid);
+
+      const validKeys = new Set(CANDIDATE_IMPORT_FIELD_CATALOG.map(f => f.key));
+      const nextFields: Record<string, string> = {};
+      const nextReasons: Record<string, string> = {};
+      analysis.columnMappings.forEach(m => {
+        const idx = parsedGrid.header.indexOf(m.sourceColumn);
+        if (idx === -1) return;
+        nextFields[idx] = validKeys.has(m.fieldKey as CandidateImportFieldKey) ? m.fieldKey : '';
+        nextReasons[idx] = m.reason || '';
+      });
+      setFieldByColumnIndex(nextFields);
+      setFieldReasons(nextReasons);
+
+      const stageIdx = Object.entries(nextFields).find(([, key]) => key === 'stage')?.[0];
+      if (stageIdx !== undefined) {
+        const values = extractDistinctColumnValues(parsedGrid, Number(stageIdx));
+        if (values.length > 0) {
+          const mappings = await analyzeValueMapping(
+            '以下は人材紹介会社の候補者パイプラインの「選考ステータス」列に実際に登場した値の一覧です。それぞれが、以下の選考ステータスの選択肢のどれに最も近いかを判定してください。',
+            values,
+            PIPELINE_STAGES.map(s => `${s}: ${s}`).join('\n')
+          );
+          const validStages = new Set<string>(PIPELINE_STAGES);
+          const nextValues: Record<string, string> = {};
+          const nextStageReasons: Record<string, string> = {};
+          mappings.forEach(m => {
+            nextValues[m.rawValue] = validStages.has(m.targetKey) ? m.targetKey : '';
+            nextStageReasons[m.rawValue] = m.reason || '';
+          });
+          values.forEach(v => { if (!(v in nextValues)) nextValues[v] = ''; });
+          setStageValueByRaw(nextValues);
+          setStageReasonByRaw(nextStageReasons);
+        }
+      }
+
+      const sourceIdx = Object.entries(nextFields).find(([, key]) => key === 'source')?.[0];
+      if (sourceIdx !== undefined) {
+        const values = extractDistinctColumnValues(parsedGrid, Number(sourceIdx));
+        if (values.length > 0) {
+          const mappings = await analyzeValueMapping(
+            '以下は人材紹介会社の候補者パイプラインの「経由媒体」列に実際に登場した値の一覧です。それぞれが、以下の媒体一覧のどれに対応するかを判定してください。どの媒体にも該当しない場合はtargetKeyに"Other"を返してください。',
+            values,
+            mediaOptions.map(m => `${m.key}: ${m.label}`).join('\n')
+          );
+          const validMediaKeys = new Set(mediaOptions.map(m => m.key));
+          const nextValues: Record<string, string> = {};
+          const nextSourceReasons: Record<string, string> = {};
+          mappings.forEach(m => {
+            nextValues[m.rawValue] = validMediaKeys.has(m.targetKey) ? m.targetKey : '';
+            nextSourceReasons[m.rawValue] = m.reason || '';
+          });
+          values.forEach(v => { if (!(v in nextValues)) nextValues[v] = ''; });
+          setSourceValueByRaw(nextValues);
+          setSourceReasonByRaw(nextSourceReasons);
+        }
+      }
+
+      if (importScope === 'team') {
+        const assigneeIdx = parsedGrid.header.indexOf(analysis.assigneeColumn || '');
+        if (assigneeIdx !== -1) {
+          setAssigneeColumnIndex(assigneeIdx);
+          const values = extractDistinctColumnValues(parsedGrid, assigneeIdx);
+          if (values.length > 0) {
+            const mappings = await analyzeValueMapping(
+              'スプレッドシートの「担当者」列に実際に登場した値の一覧です。それぞれが、以下のメンバー一覧のどのメールアドレスにあたるかを判定してください。姓のみ・ニックネーム・表記ゆれなども考慮して、最も近いメンバーのメールアドレスを選んでください。',
+              values,
+              roster.map(r => `${r.email}: ${r.label}`).join('\n')
+            );
+            const validEmails = new Set(roster.map(r => r.email));
+            const nextTargets: Record<string, string> = {};
+            const nextAssigneeReasons: Record<string, string> = {};
+            mappings.forEach(m => {
+              nextTargets[m.rawValue] = validEmails.has(m.targetKey) ? m.targetKey : '';
+              nextAssigneeReasons[m.rawValue] = m.reason || '';
+            });
+            values.forEach(v => { if (!(v in nextTargets)) nextTargets[v] = ''; });
+            setAssigneeTargetByValue(nextTargets);
+            setAssigneeReasonByValue(nextAssigneeReasons);
+          }
+        }
+      }
+
+      setStatus('ready');
+    } catch (err) {
+      console.error('候補者パイプラインスプレッドシート取込みの列判定に失敗しました', err);
+      setStatus('error');
+      setMessage(err instanceof Error ? err.message : 'ファイルの読み込みまたはAIによる列判定に失敗しました。');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const buildResult: BuildCandidateDraftsResult | null = useMemo(() => {
+    if (!grid || status !== 'ready') return null;
+    const fieldMap = new Map<number, CandidateImportFieldKey>();
+    Object.entries(fieldByColumnIndex).forEach(([idxStr, key]) => {
+      if (key) fieldMap.set(Number(idxStr), key as CandidateImportFieldKey);
+    });
+    const stageMap = new Map(Object.entries(stageValueByRaw) as [string, string][]);
+    const sourceMap = new Map(Object.entries(sourceValueByRaw) as [string, string][]);
+    const resolveTarget = importScope === 'team'
+      ? (assigneeColumnIndex === -1
+          ? () => null
+          : (row: string[]) => {
+              const raw = (row[assigneeColumnIndex] || '').trim();
+              return raw ? (assigneeTargetByValue[raw] || null) : null;
+            })
+      : () => currentUserEmail;
+    return buildCandidateDraftsFromGrid(grid, fieldMap, stageMap, sourceMap, fallbackYear, resolveTarget);
+  }, [grid, status, fieldByColumnIndex, stageValueByRaw, sourceValueByRaw, fallbackYear, importScope, assigneeColumnIndex, assigneeTargetByValue, currentUserEmail]);
+
+  const candidatesByTarget: Record<string, Candidate[]> | null = useMemo(() => {
+    if (!buildResult) return null;
+    const nowISO = new Date().toISOString();
+    const out: Record<string, Candidate[]> = {};
+    Object.entries(buildResult.draftsByTarget).forEach(([target, drafts]) => {
+      out[target] = drafts.map((d): Candidate => ({
+        id: generateCandidateId(),
+        name: d.name,
+        salary: d.salary ?? 0,
+        currentSalary: d.currentSalary ?? 0,
+        currentCompany: d.currentCompany ?? '',
+        education: d.education ?? '',
+        source: d.source ?? '',
+        usingOtherAgents: false,
+        applications: d.applications.map(a => ({
+          id: generateApplicationId(),
+          companyName: a.companyName,
+          stage: a.stage as PipelineStage,
+          nextAction: a.nextAction ?? '',
+          ...(a.scheduledDate ? { scheduledDate: a.scheduledDate } : {}),
+          ...(a.expectedDecisionDate ? { expectedDecisionDate: a.expectedDecisionDate } : {}),
+          stageHistory: [{ stage: a.stage as PipelineStage }],
+        })),
+        summary: '',
+        createdAt: nowISO,
+        ...(d.age !== undefined ? { age: d.age } : {}),
+        ...(d.jobType ? { jobType: d.jobType } : {}),
+        ...(d.phoneNumber ? { phoneNumber: d.phoneNumber } : {}),
+        ...(d.email ? { email: d.email } : {}),
+        ...(d.otherCompanyStatus ? { otherCompanyStatus: d.otherCompanyStatus } : {}),
+        ...(d.desiredJoinTiming ? { desiredJoinTiming: d.desiredJoinTiming } : {}),
+        ...(d.memo ? { memos: [{ id: generateApplicationId(), title: '取込みメモ', content: d.memo, updatedAt: nowISO }] } : {}),
+      }));
+    });
+    return out;
+  }, [buildResult]);
+
+  const totalCandidateCount = candidatesByTarget
+    ? Object.values(candidatesByTarget).reduce((sum, arr) => sum + arr.length, 0)
+    : 0;
+
+  const previewByTarget = useMemo(() => {
+    if (!candidatesByTarget) return [];
+    const targets = Object.keys(candidatesByTarget).sort((a, b) => {
+      if (a === currentUserEmail) return -1;
+      if (b === currentUserEmail) return 1;
+      return (labelByEmail.get(a) || a).localeCompare(labelByEmail.get(b) || b, 'ja');
+    });
+    return targets.map(target => ({
+      target,
+      label: labelByEmail.get(target) || target,
+      candidates: candidatesByTarget[target],
+    }));
+  }, [candidatesByTarget, currentUserEmail, labelByEmail]);
+
+  const handleFieldMappingChange = (colIdx: number, fieldKey: string) => {
+    setFieldByColumnIndex(prev => ({ ...prev, [colIdx]: fieldKey }));
+  };
+  const handleStageValueChange = (rawValue: string, targetKey: string) => {
+    setStageValueByRaw(prev => ({ ...prev, [rawValue]: targetKey }));
+  };
+  const handleSourceValueChange = (rawValue: string, targetKey: string) => {
+    setSourceValueByRaw(prev => ({ ...prev, [rawValue]: targetKey }));
+  };
+  const handleAssigneeTargetChange = (rawValue: string, targetEmail: string) => {
+    setAssigneeTargetByValue(prev => ({ ...prev, [rawValue]: targetEmail }));
+  };
+
+  const hasNameColumn = Object.values(fieldByColumnIndex).includes('name');
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="pipeline-spreadsheet-modal-title">
+      <div className="modal-content spreadsheet-kpi-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="pipeline-spreadsheet-modal-title">スプレッドシートから候補者パイプラインを取り込む</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            これまで各チームが独自フォーマットで管理していた候補者パイプラインのスプレッドシートを取り込みます。
+            Googleスプレッドシート/Excelの場合は「ファイル&gt;ダウンロード&gt;カンマ区切り値（.csv）」で書き出してからアップロードしてください。
+            AIがどの列がどの項目（氏名・選考企業・選考ステータス等）に対応するか自動判定しますが、必ず下の対応表と反映内容を確認してから反映してください。
+            1行が候補者1人分の表・候補者×選考企業の組み合わせ1件分の表（同じ候補者が複数行に分かれ、行ごとに違う選考企業を持つ）のどちらでも、氏名が一致する行は自動的に1人の候補者にまとめられます。
+            一度に反映できるのは「選考企業名」列1つ・「選考ステータス」列1つまでです（候補者ごとに企業を複数列で並べた表には対応していません）。
+            この取込みは一度きりの移行用です。反映後は新しく登録・編集した内容がこの操作で上書きされることはありません。
+          </p>
+
+          {managedMembers.length > 0 && (
+            <div className="form-group">
+              <label>取り込み対象</label>
+              <div className="stage-filter-checkbox" style={{ display: 'flex', gap: '1.5rem' }}>
+                <label>
+                  <input type="radio" checked={importScope === 'self'} onChange={() => setImportScope('self')} />
+                  自分の候補者のみ
+                </label>
+                <label>
+                  <input type="radio" checked={importScope === 'team'} onChange={() => setImportScope('team')} />
+                  チームメンバー分も含めて取り込む（担当者列で判定）
+                </label>
+              </div>
+            </div>
+          )}
+
+          <div className="gmail-scout-fetch-bar">
+            <input type="file" accept=".csv" onChange={handleFileChange} aria-label="候補者パイプラインスプレッドシート(CSV)を選択" />
+            {status === 'parsing' && <span className="gmail-scout-message">読み込み中...</span>}
+            {status === 'analyzing' && <span className="gmail-scout-message">AIが列を判定しています...</span>}
+            {status === 'error' && message && <span className="gmail-scout-message is-error">{message}</span>}
+          </div>
+
+          {status === 'ready' && grid && (
+            <>
+              <div className="form-group">
+                <label htmlFor="pipeline-import-fallback-year">年が読み取れない日付（例: 6/1）に使う年</label>
+                <input
+                  id="pipeline-import-fallback-year"
+                  type="number"
+                  value={fallbackYear}
+                  onChange={(e) => setFallbackYear(Number(e.target.value) || fallbackYear)}
+                  style={{ width: '8rem' }}
+                />
+              </div>
+
+              {importScope === 'team' && (
+                <>
+                  <div className="form-group">
+                    <label htmlFor="pipeline-import-assignee-column">担当者（メンバー）を表す列</label>
+                    <select
+                      id="pipeline-import-assignee-column"
+                      value={assigneeColumnIndex}
+                      onChange={(e) => setAssigneeColumnIndex(Number(e.target.value))}
+                    >
+                      <option value={-1}>選択してください</option>
+                      {grid.header.map((h, idx) => <option key={idx} value={idx}>{h || `(${idx + 1}列目)`}</option>)}
+                    </select>
+                  </div>
+
+                  {assigneeColumnIndex === -1 ? (
+                    <p className="gmail-scout-message is-error">担当者を表す列を選択してください（選択するまで、どのメンバーの候補者にも取り込まれません）。</p>
+                  ) : (
+                    <div className="gmail-scout-fetch-bar">
+                      <button type="button" onClick={handleSuggestAssignees} disabled={isSuggestingAssignees} className="secondary-action-button">
+                        {isSuggestingAssignees ? 'AIが推定中...' : 'AIに担当者との対応を推定させる'}
+                      </button>
+                      <div className="bulk-gmail-preview-table-container">
+                        <table className="bulk-gmail-preview-table">
+                          <thead><tr><th>担当者列の値</th><th>AIの判定理由</th><th>対応するメンバー</th></tr></thead>
+                          <tbody>
+                            {distinctAssigneeValues.map(v => (
+                              <tr key={v}>
+                                <td>{v}</td>
+                                <td>{assigneeReasonByValue[v] || ''}</td>
+                                <td>
+                                  <select value={assigneeTargetByValue[v] || ''} onChange={(e) => handleAssigneeTargetChange(v, e.target.value)}>
+                                    <option value="">取り込まない</option>
+                                    {roster.map(r => <option key={r.email} value={r.email}>{r.label}</option>)}
+                                  </select>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="bulk-gmail-preview-table-container">
+                <table className="bulk-gmail-preview-table">
+                  <thead><tr><th>元の列名</th><th>サンプル値</th><th>AIの判定理由</th><th>取り込み先</th></tr></thead>
+                  <tbody>
+                    {grid.header.map((h, idx) => {
+                      if (idx === assigneeColumnIndex) return null;
+                      return (
+                        <tr key={idx}>
+                          <td>{h || `(${idx + 1}列目)`}</td>
+                          <td>{grid.rows[0]?.[idx] ?? ''}</td>
+                          <td>{fieldReasons[idx] || ''}</td>
+                          <td>
+                            <select value={fieldByColumnIndex[idx] || ''} onChange={(e) => handleFieldMappingChange(idx, e.target.value)}>
+                              <option value="">取り込まない</option>
+                              {CANDIDATE_IMPORT_FIELD_CATALOG.map(f => (
+                                <option key={f.key} value={f.key}>{f.label}{f.required ? '（必須）' : ''}</option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {!hasNameColumn && (
+                <p className="gmail-scout-message is-error">「氏名」に対応する列を選択してください（選択するまで、どの行も取り込まれません）。</p>
+              )}
+
+              {stageColumnIndex !== -1 && distinctStageValues.length > 0 && (
+                <div className="gmail-scout-fetch-bar">
+                  <button type="button" onClick={handleSuggestStages} disabled={isSuggestingStages} className="secondary-action-button">
+                    {isSuggestingStages ? 'AIが推定中...' : 'AIに選考ステータスとの対応を再推定させる'}
+                  </button>
+                  <div className="bulk-gmail-preview-table-container">
+                    <table className="bulk-gmail-preview-table">
+                      <thead><tr><th>選考ステータス列の値</th><th>AIの判定理由</th><th>対応する選考ステータス</th></tr></thead>
+                      <tbody>
+                        {distinctStageValues.map(v => (
+                          <tr key={v}>
+                            <td>{v}</td>
+                            <td>{stageReasonByRaw[v] || ''}</td>
+                            <td>
+                              <select value={stageValueByRaw[v] || ''} onChange={(e) => handleStageValueChange(v, e.target.value)}>
+                                <option value="">この応募は取り込まない</option>
+                                {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {sourceColumnIndex !== -1 && distinctSourceValues.length > 0 && (
+                <div className="gmail-scout-fetch-bar">
+                  <button type="button" onClick={handleSuggestSources} disabled={isSuggestingSources} className="secondary-action-button">
+                    {isSuggestingSources ? 'AIが推定中...' : 'AIに経由媒体との対応を再推定させる'}
+                  </button>
+                  <div className="bulk-gmail-preview-table-container">
+                    <table className="bulk-gmail-preview-table">
+                      <thead><tr><th>経由媒体列の値</th><th>AIの判定理由</th><th>対応する媒体</th></tr></thead>
+                      <tbody>
+                        {distinctSourceValues.map(v => (
+                          <tr key={v}>
+                            <td>{v}</td>
+                            <td>{sourceReasonByRaw[v] || ''}</td>
+                            <td>
+                              <select value={sourceValueByRaw[v] || ''} onChange={(e) => handleSourceValueChange(v, e.target.value)}>
+                                <option value="">この項目は取り込まない</option>
+                                {mediaOptions.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {buildResult && hasNameColumn && (
+                <div className="bulk-gmail-preview">
+                  <p className="gmail-scout-message">
+                    {totalCandidateCount}名の候補者を検出しました（{buildResult.rowsSkippedNoName}行は氏名を判定できず、
+                    {buildResult.rowsUnassigned}行は担当者を判定できずスキップ）。
+                  </p>
+                  {totalCandidateCount === 0 ? (
+                    <p className="gmail-scout-message is-error">反映できる候補者がありません。列の対応付けや担当者の対応付けを確認してください。</p>
+                  ) : (
+                    previewByTarget.map(t => (
+                      <div key={t.target} style={{ marginTop: '1rem' }}>
+                        <p className="gmail-scout-message"><strong>{t.label}</strong>（{t.candidates.length}名）</p>
+                        <div className="bulk-gmail-preview-table-container">
+                          <table className="bulk-gmail-preview-table">
+                            <thead><tr><th>氏名</th><th>現職企業</th><th>選考企業（ステータス）</th></tr></thead>
+                            <tbody>
+                              {t.candidates.map(c => (
+                                <tr key={c.id}>
+                                  <td>{c.name}</td>
+                                  <td>{c.currentCompany}</td>
+                                  <td>{c.applications.map(a => `${a.companyName}（${a.stage}）`).join('、') || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+          {status === 'ready' && candidatesByTarget && hasNameColumn && totalCandidateCount > 0 && (
+            <button type="button" onClick={() => onApply(candidatesByTarget)} className="submit-button">
+              反映する（{previewByTarget.map(t => `${t.label}: ${t.candidates.length}名`).join('、')}）
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 const getTotalFromLump = (lump: { [key: string]: number | undefined }, kpiSuffix: string, allMedia: MediaEntry[]): number => {
     if (!lump) return 0;
@@ -3024,6 +3708,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '月別パフォーマンストレンドの「媒体で切り替え」から、アーカイブ済みの媒体を選択肢として表示しないようにした（「全媒体合計」自体には従来通り過去の実績が含まれます）',
       '個人実績タブの表示順を変更し、「本日の進捗」を「実績カレンダー」の下に表示するようにした',
       '候補者パイプラインの「非表示」を「非表示（選考終了）」に表記変更し、掘り起しリスト（後で見直す保留）とは違い、選考が終了した候補者を対象にする機能であることが分かりやすいようにした（切り替えボタン・絞り込み・CSV出力パターン・使い方ガイドの表記に反映）',
+      '候補者パイプラインに「スプレッドシートから候補者パイプラインを取り込む」を追加。これまで各チームが独自フォーマットで管理していた候補者パイプラインのスプレッドシートをCSVで書き出してアップロードすると、AIがどの列が氏名・現職企業・選考企業・選考ステータスなどに対応するか自動判定します。候補者ごとに選考企業が複数行に分かれている表・1行にまとまっている表のどちらでも、氏名が一致する行は自動的に1人の候補者にまとめられます。選考ステータスや経由媒体の表記ゆれもAIが選択肢に対応付け、取り込む前に対応表と反映内容を必ず画面で確認・修正できます。ミドルの人は「スプレッドシートからKPI実績を取り込む」と同様、自分の分だけかチームメンバー分も含めて取り込むかを選べます。一度きりの移行を想定した機能で、以後は通常通りアプリ上で新規候補者を登録していく運用になります',
     ],
   },
   {
@@ -10662,6 +11347,7 @@ const App: React.FC = () => {
   const [isBulkGmailModalOpen, setIsBulkGmailModalOpen] = useState(false);
   const [isMediaCsvModalOpen, setIsMediaCsvModalOpen] = useState(false);
   const [isSpreadsheetKpiModalOpen, setIsSpreadsheetKpiModalOpen] = useState(false);
+  const [isPipelineSpreadsheetImportModalOpen, setIsPipelineSpreadsheetImportModalOpen] = useState(false);
 
   // UI state
   const [viewDate, setViewDate] = useState(new Date());
@@ -11787,6 +12473,81 @@ const App: React.FC = () => {
     setIsSpreadsheetKpiModalOpen(false);
   };
 
+  // 候補者パイプラインのスプレッドシート取込み（自分の分）— handleSaveCandidateの新規登録時と
+  // 同じcomputeStageAdvanceUpdate(undefined, ...)の扱い（historicalな一括移行でKPI実績が不当に
+  // 計上されないよう、新規登録扱いのまま複数件をまとめて追加する）。
+  const applyPipelineCandidatesToSelf = (newCandidates: Candidate[]) => {
+    if (!currentUserData) return;
+    const todayStr = new Date().toLocaleDateString('sv-SE');
+    let updatedEntries = currentUserData.entries;
+    const finalCandidates: Candidate[] = [];
+    newCandidates.forEach(candidateData => {
+      const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(undefined, candidateData, todayStr);
+      finalCandidates.push(finalCandidate);
+      if (Object.keys(kpiDeltas).length > 0) {
+        const entriesByDateMap = new Map<string, KpiEntry>(updatedEntries.map(e => [e.date, e] as [string, KpiEntry]));
+        const existingEntry = entriesByDateMap.get(todayStr);
+        const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
+        Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
+        entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+        updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+      }
+    });
+    const updatedData = { ...currentUserData, candidates: [...currentUserData.candidates, ...finalCandidates], entries: updatedEntries };
+    setCurrentUserData(updatedData);
+    if (currentIdentity) {
+      forceSyncNow(currentIdentity.email, driveFileId, updatedData, setDriveFileId);
+    }
+  };
+
+  // 候補者パイプラインのスプレッドシート取込み（チームメンバー分）— persistTeammateEntriesBulkと
+  // 同じ「複数件まとめて1回のDrive書き込み」の形（addTeammateCandidatesBulk参照。1件ずつ
+  // addTeammateCandidateを呼ぶと後続の書き込みが直前の追加を再取得する前に走り、先に追加した
+  // 候補者が消えてしまう競合が起きうるため）。
+  const persistTeammateCandidatesBulk = (targetEmail: string, newCandidates: Candidate[]) => {
+    const todayStr = new Date().toLocaleDateString('sv-SE');
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      let updatedEntries = target.entries;
+      const finalCandidates: Candidate[] = [];
+      newCandidates.forEach(candidateData => {
+        const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(undefined, candidateData, todayStr);
+        finalCandidates.push(finalCandidate);
+        if (Object.keys(kpiDeltas).length > 0) {
+          const entriesByDateMap = new Map<string, KpiEntry>(updatedEntries.map(e => [e.date, e] as [string, KpiEntry]));
+          const existingEntry = entriesByDateMap.get(todayStr);
+          const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
+          Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
+          entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+          updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+        }
+      });
+      return { ...prev, [targetEmail]: { ...target, candidates: [...target.candidates, ...finalCandidates], entries: updatedEntries } };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert(`対象メンバー（${targetEmail}）のデータファイルが見つかりませんでした。`);
+      return;
+    }
+    addTeammateCandidatesBulk<UserData>(targetFileId, newCandidates, computeStageAdvanceUpdate, todayStr).catch(err => {
+      console.error('Failed to save proxy pipeline import to teammate Drive file', err);
+      alert(`${targetEmail}への候補者の保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
+    });
+  };
+
+  const handleApplyPipelineSpreadsheetImport = (candidatesByTarget: Record<string, Candidate[]>) => {
+    Object.entries(candidatesByTarget).forEach(([targetEmail, newCandidates]) => {
+      if (newCandidates.length === 0) return;
+      if (currentIdentity && normalizeEmail(targetEmail) === normalizeEmail(currentIdentity.email)) {
+        applyPipelineCandidatesToSelf(newCandidates);
+      } else {
+        persistTeammateCandidatesBulk(targetEmail, newCandidates);
+      }
+    });
+    setIsPipelineSpreadsheetImportModalOpen(false);
+  };
+
   // Mirrors googleTaskIdsByApplicationId — kept in sync with state via the effect below, but
   // also written to directly (synchronously) inside the sync queue itself, so a second sync
   // queued right after the first always sees the first one's freshly-created task IDs instead
@@ -12679,6 +13440,15 @@ const App: React.FC = () => {
           onClose={() => setIsSpreadsheetKpiModalOpen(false)}
         />
       )}
+      {isPipelineSpreadsheetImportModalOpen && (
+        <PipelineSpreadsheetImportModal
+          allMedia={allMedia}
+          currentUserEmail={currentIdentity?.email || ''}
+          managedMembers={isCurrentUserMiddle ? middleManagedMemberOptions : []}
+          onApply={handleApplyPipelineSpreadsheetImport}
+          onClose={() => setIsPipelineSpreadsheetImportModalOpen(false)}
+        />
+      )}
 
       {hasSyncError && (
         <div className="sync-error-banner">
@@ -13464,6 +14234,9 @@ const App: React.FC = () => {
                     {tasksSyncMessage}
                   </span>
                 )}
+                <button type="button" onClick={() => setIsPipelineSpreadsheetImportModalOpen(true)} className="secondary-action-button">
+                  スプレッドシートから候補者パイプラインを取り込む
+                </button>
               </div>
             </div>
             <CandidatePipelineView

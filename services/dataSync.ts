@@ -510,6 +510,39 @@ export async function addTeammateCandidate<T extends { candidates: any[]; entrie
 }
 
 /**
+ * 候補者パイプラインのスプレッドシート取込み（チームメンバー分も含めて取込む場合）専用:
+ * addTeammateCandidate と同じ「新規登録」の扱いだが、1件ずつ都度fetch+writeするのではなく
+ * `candidatesData`（取込みで生成された複数件の新規候補者）をまとめて1回のfetch+writeで反映する。
+ * 1件ずつ呼ぶと後続の書き込みが直前の書き込みを再取得する前に走り、先に追加した候補者が消えて
+ * しまう競合が起きうるため、対象メンバー1人につき1回のDrive書き込みで済ませる。
+ */
+export async function addTeammateCandidatesBulk<T extends { candidates: any[]; entries: any[] } = any>(
+  driveFileId: string,
+  candidatesData: Record<string, any>[],
+  computeUpdate: (prevCandidate: any, nextCandidate: any, todayStr: string) => { candidate: any; kpiDeltas: Record<string, number> },
+  todayStr: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updatedCandidates = [...(latest.candidates || [])];
+  let updatedEntries = latest.entries || [];
+  const entriesByDateMap = new Map<string, any>(updatedEntries.map((e: any) => [e.date, e]));
+  candidatesData.forEach(candidateData => {
+    const { candidate: finalCandidate, kpiDeltas } = computeUpdate(undefined, candidateData, todayStr);
+    updatedCandidates.push(finalCandidate);
+    if (Object.keys(kpiDeltas).length > 0) {
+      const existingEntry = entriesByDateMap.get(todayStr);
+      const values: Record<string, number> = existingEntry ? { ...existingEntry.values } : {};
+      Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key] = (values[key] || 0) + delta; });
+      entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+    }
+  });
+  updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  const updated = { ...latest, candidates: updatedCandidates, entries: updatedEntries };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
  * 開発者（TEAMS_ADMIN_EMAIL）による、他ユーザーの「お問い合わせ」投稿への返信・ステータス
  * 変更・削除: fetches the target user's LATEST data (same re-fetch-before-write pattern as
  * overwriteTeammateEntry/overwriteTeammateCandidateVisibility, to avoid clobbering a concurrent
