@@ -2984,6 +2984,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'スプレッドシート取込みは1枚のシートにチーム全員分がまとまっていることが多いため、ミドルの人には「自分のKPIのみ」か「チームメンバー分も含めて取り込む」かを選べるようにした。後者を選ぶと、どの列が担当者（誰の実績か）を表すかもAIが判定し、担当者列に実際に登場した値（氏名表記など）をどのメンバーに対応付けるかも自動推定します。担当者との対応も含め、必ず画面で確認・修正してから反映でき、各メンバー分はそのメンバー本人のKPI実績として反映されます（代理登録したミドルの実績にはなりません）',
       '候補者パイプラインの「チーム」タブの想定粗利にも、チーム別タブと同様の「メンバー別想定粗利」の一覧表を追加。チーム合計だけでなく、メンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした（対象期間は合計と同じものを使用します）',
       '【不具合修正】想定粗利の集計で、内定承諾まで至った候補者を非表示（掘り起しリスト登録や成約後のアーカイブなど）にすると、その成約実績が集計から消えてしまっていた不具合を修正。非表示の候補者でも、内定承諾済みの選考は引き続き想定粗利に反映されます（内定承諾後辞退は従来通り対象外のままです）',
+      '選考状況を「内定承諾」に変更して保存する際、この成約を今月扱いにするか別の月（過去月も選択可）の成約として扱うかを選ぶポップアップを表示するようにした。選んだ内容に合わせて意思決定時期が自動的に上書きされ、想定粗利の集計（意思決定時期＝見込み月ベース）に正しく反映されます。既に内定承諾になっている選考を編集しただけの場合（他の項目の変更など）はポップアップは出ません',
     ],
   },
   {
@@ -5296,6 +5297,10 @@ const ApplicationModal: React.FC<{
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
+    // 選考状況を「内定承諾」に変更して保存しようとした瞬間だけ、この保存内容を一旦ここに
+    // 保持して成約月の確認ポップアップ（DecisionMonthPromptModal）を挟む。ポップアップで
+    // 選ばれた月を反映したexpectedDecisionDateに上書きしてから実際のonSaveを呼ぶ。
+    const [pendingSaveApplication, setPendingSaveApplication] = useState<CompanyApplication | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -5344,11 +5349,31 @@ const ApplicationModal: React.FC<{
             alert('企業名は必須です。');
             return;
         }
+        // 選考状況が「内定承諾」に変わった瞬間（既に内定承諾だったものの再保存は対象外）だけ、
+        // 成約月の確認ポップアップを挟む。意思決定時期はそこでの選択で上書きするので、ここでは
+        // まだonSaveを呼ばない。
+        if (application.stage === '内定承諾' && initialData?.stage !== '内定承諾') {
+            setPendingSaveApplication(application);
+            return;
+        }
         onSave(application);
         onClose();
     };
 
     const modalTitle = `${candidateName}さん - ${initialData && initialData.companyName ? '選考情報を編集' : '選考情報を追加'}`;
+
+    if (pendingSaveApplication) {
+        return (
+            <DecisionMonthPromptModal
+                onConfirm={(decisionDateISO) => {
+                    onSave({ ...pendingSaveApplication, expectedDecisionDate: decisionDateISO });
+                    setPendingSaveApplication(null);
+                    onClose();
+                }}
+                onCancel={() => setPendingSaveApplication(null)}
+            />
+        );
+    }
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -5507,6 +5532,78 @@ const ApplicationModal: React.FC<{
     );
 };
 
+/**
+ * 選考状況が「内定承諾」に変わった瞬間にApplicationModalから割り込むポップアップ — 想定粗利の
+ * 集計は意思決定時期（見込み月）ベースなので、この成約を今月扱いにするか、別の月（過去月も
+ * 含む）の成約として計上するかをここで明示的に選んでもらう。選択結果に応じてexpectedDecisionDate
+ * を上書きした上で、呼び出し元（ApplicationModal）が実際の保存を行う。
+ */
+const DecisionMonthPromptModal: React.FC<{
+    onConfirm: (decisionDateISO: string) => void;
+    onCancel: () => void;
+}> = ({ onConfirm, onCancel }) => {
+    const thisMonthStr = useMemo(() => {
+        const now = new Date();
+        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }, []);
+    const [choice, setChoice] = useState<'thisMonth' | 'otherMonth'>('thisMonth');
+    const [otherMonth, setOtherMonth] = useState(thisMonthStr);
+
+    const handleConfirm = () => {
+        if (choice === 'thisMonth') {
+            // 実際に内定承諾を記録した「今日」の日付を使う（月内のどの日でも今月判定は
+            // 変わらないが、いつ記録したかがそのまま残るようにするため月初日には丸めない）。
+            onConfirm(new Date().toLocaleDateString('sv-SE'));
+            return;
+        }
+        if (!otherMonth) {
+            alert('成約月を選択してください。');
+            return;
+        }
+        onConfirm(`${otherMonth}-01`);
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onCancel} role="dialog" aria-modal="true" aria-labelledby="decision-month-modal-title">
+            <div className="modal-content" style={{ maxWidth: '440px' }} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h3 id="decision-month-modal-title">内定承諾の成約月</h3>
+                    <button onClick={onCancel} className="close-button" aria-label="閉じる">&times;</button>
+                </div>
+                <div className="modal-body">
+                    <p className="modal-description">
+                        この内定承諾を、想定粗利の集計上どの月の成約として扱いますか？選んだ内容に合わせて、この選考の意思決定時期が上書きされます。
+                    </p>
+                    <div className="form-group">
+                        <label>
+                            <input type="radio" name="decisionMonthChoice" checked={choice === 'thisMonth'} onChange={() => setChoice('thisMonth')} />
+                            {' '}今月の成約として登録
+                        </label>
+                    </div>
+                    <div className="form-group">
+                        <label>
+                            <input type="radio" name="decisionMonthChoice" checked={choice === 'otherMonth'} onChange={() => setChoice('otherMonth')} />
+                            {' '}別の月の成約として登録
+                        </label>
+                        {choice === 'otherMonth' && (
+                            <input
+                                type="month"
+                                value={otherMonth}
+                                onChange={(e) => setOtherMonth(e.target.value)}
+                                aria-label="成約月"
+                                style={{ marginTop: '0.5rem', display: 'block' }}
+                            />
+                        )}
+                    </div>
+                </div>
+                <div className="modal-footer">
+                    <button type="button" onClick={onCancel} className="cancel-button">キャンセル</button>
+                    <button type="button" onClick={handleConfirm} className="submit-button">この内容で保存</button>
+                </div>
+            </div>
+        </div>
+    );
+};
 
 /**
  * Registers or edits a candidate's 掘り起しリスト entry — a candidate-level (not per-
