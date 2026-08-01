@@ -1496,13 +1496,20 @@ section {
 .pipeline-list-controls {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: 1rem;
   margin-bottom: 1.5rem;
   padding: 1rem;
   background-color: #f8f9fa;
   border-radius: var(--border-radius);
+}
+/* メインで使う絞り込み・並び替え（左）と、使用頻度の低いフィルター（右）をそれぞれ1つの
+   グループとしてまとめる — 折り返し時にも左右のグループごとにまとまって崩れないようにする。 */
+.pipeline-list-controls-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 .pipeline-sort-controls {
   display: flex;

@@ -2989,6 +2989,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者カードの「ぱっと見」表示（現職・学歴・年収・確度など）が項目数の増加で見づらくなっていたため、各項目をラベル（小さく・グレー）を上、値を下に並べる表示に統一し、詳細表示を開いた後の項目と見た目を揃えた。項目間の余白も広げ、選考状況の一覧との間に区切り線を追加した',
       '【不具合修正】パイプラインの「見込み月で絞り込み」にある「クリア」ボタンが、白背景に白文字で表示され読めなくなっていた不具合を修正',
       'パイプラインの並び替えから「氏名」「現職企業名」「現職年収」を削除し、「登録日」「意思決定時期」「確度」のみにした',
+      '候補者一覧の絞り込み・並び替えの配置を整理。よく使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に、使用頻度の低い「自社面談状況」「表示対象」を右側にまとめて配置した',
     ],
   },
   {
@@ -8920,94 +8921,102 @@ const CandidatePipelineView: React.FC<{
             })()}
 
              <div className="pipeline-list-controls">
-                <div className="pipeline-sort-controls">
-                  <details
-                    ref={stageFilterDetailsRef}
-                    className="stage-filter-dropdown"
-                    open={isStageFilterOpen}
-                    onToggle={(e) => setIsStageFilterOpen((e.currentTarget as HTMLDetailsElement).open)}
-                  >
-                    <summary>
-                      選考フェーズで絞り込み{selectedStageFilters.length > 0 ? `（${selectedStageFilters.length}件選択中）` : ''}
-                      <span className="toggle-icon">▼</span>
-                    </summary>
-                    <div className="stage-filter-dropdown-panel">
-                      {PIPELINE_STAGES.map(stage => (
-                        <label key={stage} className="stage-filter-checkbox">
-                          <input
-                            type="checkbox"
-                            checked={selectedStageFilters.includes(stage)}
-                            onChange={() => toggleStageFilter(stage)}
-                          />
-                          {stage}
-                        </label>
-                      ))}
-                      {selectedStageFilters.length > 0 && (
-                          <button type="button" onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
-                              クリア
-                          </button>
-                      )}
-                    </div>
-                  </details>
+                {/* メインで使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に
+                    まとめ、使用頻度の低い「自社面談状況」「表示対象」は右側にまとめる。単純に
+                    横並びのままだと折り返した時に左右の意図した並びが崩れるため、それぞれを
+                    ひとつのグループとしてラップしてから左右に配置する（.pipeline-list-controls-group）。 */}
+                <div className="pipeline-list-controls-group">
+                  <div className="pipeline-sort-controls">
+                    <details
+                      ref={stageFilterDetailsRef}
+                      className="stage-filter-dropdown"
+                      open={isStageFilterOpen}
+                      onToggle={(e) => setIsStageFilterOpen((e.currentTarget as HTMLDetailsElement).open)}
+                    >
+                      <summary>
+                        選考フェーズで絞り込み{selectedStageFilters.length > 0 ? `（${selectedStageFilters.length}件選択中）` : ''}
+                        <span className="toggle-icon">▼</span>
+                      </summary>
+                      <div className="stage-filter-dropdown-panel">
+                        {PIPELINE_STAGES.map(stage => (
+                          <label key={stage} className="stage-filter-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={selectedStageFilters.includes(stage)}
+                              onChange={() => toggleStageFilter(stage)}
+                            />
+                            {stage}
+                          </label>
+                        ))}
+                        {selectedStageFilters.length > 0 && (
+                            <button type="button" onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
+                                クリア
+                            </button>
+                        )}
+                      </div>
+                    </details>
+                  </div>
+                  <div className="pipeline-sort-controls">
+                    <span>並び替え:</span>
+                    {sortOptions.map(opt => (
+                       <button
+                          key={opt.key}
+                          onClick={() => requestSort(opt.key)}
+                          className={sortConfig?.key === opt.key ? 'active' : ''}
+                        >
+                          {opt.label}{getSortIndicator(opt.key)}
+                        </button>
+                    ))}
+                  </div>
+                  <div className="pipeline-sort-controls">
+                    <span>見込み月で絞り込み:</span>
+                    <input
+                      type="month"
+                      value={decisionMonthFilter}
+                      onChange={(e) => setDecisionMonthFilter(e.target.value)}
+                      aria-label="見込み月で絞り込み"
+                    />
+                    {decisionMonthFilter && (
+                        <button onClick={() => setDecisionMonthFilter('')} className="secondary-action-button">
+                            クリア
+                        </button>
+                    )}
+                  </div>
                 </div>
-                <div className="pipeline-sort-controls">
-                  <span>自社面談状況:</span>
-                  <button onClick={() => setAgentInterviewStatusFilter('all')} className={agentInterviewStatusFilter === 'all' ? 'active' : ''}>
-                    すべて
-                  </button>
-                  <button onClick={() => setAgentInterviewStatusFilter('未面談')} className={agentInterviewStatusFilter === '未面談' ? 'active' : ''}>
-                    未面談
-                  </button>
-                  <button onClick={() => setAgentInterviewStatusFilter('面談済み')} className={agentInterviewStatusFilter === '面談済み' ? 'active' : ''}>
-                    面談済み
-                  </button>
-                </div>
-                <div className="pipeline-sort-controls">
-                  <span>並び替え:</span>
-                  {sortOptions.map(opt => (
-                     <button
-                        key={opt.key}
-                        onClick={() => requestSort(opt.key)}
-                        className={sortConfig?.key === opt.key ? 'active' : ''}
-                      >
-                        {opt.label}{getSortIndicator(opt.key)}
-                      </button>
-                  ))}
-                </div>
-                <div className="pipeline-sort-controls">
-                  <span>表示対象:</span>
-                  <button onClick={() => setVisibilityFilter('active')} className={visibilityFilter === 'active' ? 'active' : ''}>
-                    表示中の候補者
-                  </button>
-                  <button onClick={() => setVisibilityFilter('revival')} className={visibilityFilter === 'revival' ? 'active' : ''}>
-                    掘り起しリスト
-                  </button>
-                  <button onClick={() => setVisibilityFilter('hidden')} className={visibilityFilter === 'hidden' ? 'active' : ''}>
-                    非表示（その他）
-                  </button>
-                </div>
-                {visibilityFilter === 'revival' && (
-                <div className="pipeline-sort-controls">
-                  <button
-                    onClick={() => setBulkRevivalContactsRevealed(v => !v)}
-                    className={bulkRevivalContactsRevealed ? 'active' : ''}
-                  >
-                    {bulkRevivalContactsRevealed ? '電話番号・メールを一括で隠す' : '電話番号・メールを一括表示'}
-                  </button>
-                </div>
-                )}
-                <div className="pipeline-sort-controls">
-                  <span>見込み月で絞り込み:</span>
-                  <input
-                    type="month"
-                    value={decisionMonthFilter}
-                    onChange={(e) => setDecisionMonthFilter(e.target.value)}
-                    aria-label="見込み月で絞り込み"
-                  />
-                  {decisionMonthFilter && (
-                      <button onClick={() => setDecisionMonthFilter('')} className="secondary-action-button">
-                          クリア
-                      </button>
+                <div className="pipeline-list-controls-group">
+                  <div className="pipeline-sort-controls">
+                    <span>自社面談状況:</span>
+                    <button onClick={() => setAgentInterviewStatusFilter('all')} className={agentInterviewStatusFilter === 'all' ? 'active' : ''}>
+                      すべて
+                    </button>
+                    <button onClick={() => setAgentInterviewStatusFilter('未面談')} className={agentInterviewStatusFilter === '未面談' ? 'active' : ''}>
+                      未面談
+                    </button>
+                    <button onClick={() => setAgentInterviewStatusFilter('面談済み')} className={agentInterviewStatusFilter === '面談済み' ? 'active' : ''}>
+                      面談済み
+                    </button>
+                  </div>
+                  <div className="pipeline-sort-controls">
+                    <span>表示対象:</span>
+                    <button onClick={() => setVisibilityFilter('active')} className={visibilityFilter === 'active' ? 'active' : ''}>
+                      表示中の候補者
+                    </button>
+                    <button onClick={() => setVisibilityFilter('revival')} className={visibilityFilter === 'revival' ? 'active' : ''}>
+                      掘り起しリスト
+                    </button>
+                    <button onClick={() => setVisibilityFilter('hidden')} className={visibilityFilter === 'hidden' ? 'active' : ''}>
+                      非表示（その他）
+                    </button>
+                  </div>
+                  {visibilityFilter === 'revival' && (
+                  <div className="pipeline-sort-controls">
+                    <button
+                      onClick={() => setBulkRevivalContactsRevealed(v => !v)}
+                      className={bulkRevivalContactsRevealed ? 'active' : ''}
+                    >
+                      {bulkRevivalContactsRevealed ? '電話番号・メールを一括で隠す' : '電話番号・メールを一括表示'}
+                    </button>
+                  </div>
                   )}
                 </div>
             </div>
