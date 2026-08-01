@@ -2998,6 +2998,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者一覧の絞り込み・並び替えの配置を整理。よく使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に、使用頻度の低い「自社面談状況」「表示対象」を右側にまとめて配置した',
       '「選考フェーズで絞り込み」に「現在の選択をデフォルトとして保存」を追加。よく使う絞り込み条件を保存しておくと、次回パイプラインを開いた時に自動でその状態から表示されるようにした',
       '「選考フェーズで絞り込み」のデフォルト保存ボタンを、ドロップダウンの外（隣）に移動して開かなくても押せるようにした。また「自分」「全ユーザー」「チーム」「ユーザー別」のスコープごとに別々のデフォルトを保存・復元できるようにした（スコープを切り替えると、そのスコープ自身の保存内容に自動的に切り替わります）',
+      '【不具合修正】「選考フェーズで絞り込み」のデフォルト保存が、アプリを再読み込みすると消えてしまっていた不具合を修正（保存自体はDriveに届いていたが、読み込み時の処理でこの項目が見落とされ毎回消えていました）',
+      '【不具合修正】チーム作成・編集権限保持者が、所属チームのメンバーの候補者を代理で非表示にしようとするとDriveへの書き込みに失敗することがある不具合を修正。メンバーのメールアドレスの大文字・小文字の表記がチーム設定と食い違っている場合に、そのメンバー自身がチームに所属していると正しく認識できず、書き込み権限が付与されていなかったのが原因でした',
     ],
   },
   {
@@ -10764,6 +10766,10 @@ const App: React.FC = () => {
       // 次回ログイン時に反映されない（保存自体はDriveへ届くが、再読み込み時にnormalize()で
       // 毎回消えていたため、適用エフェクトが常に「保存済みデフォルトなし」と見えていた）。
       allUsersSectionDefaults: d.allUsersSectionDefaults,
+      // 同じ理由でここに列挙し忘れていた不具合修正: 「選考フェーズで絞り込み」のスコープ別
+      // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
+      // 消えて見えていた。
+      pipelineStageFilterDefaults: d.pipelineStageFilterDefaults,
     });
 
     const cached = readLocalCache<UserData>(email);
@@ -12194,14 +12200,22 @@ const App: React.FC = () => {
     const lastSyncedMiddlePermsKeyRef = useRef<string>('');
     useEffect(() => {
       if (!currentIdentity || !driveFileId || !teamsConfigLoaded) return;
+      // team.memberEmailsは自由入力のため、実際のサインインメールと大文字小文字が食い違って
+      // いることがある（他所でcanonicalEmailByLower等が対処しているのと同じ問題）。ここで
+      // 生の.includes()のまま比較すると、「自分は本当はチームに所属しているのに大小文字の
+      // 違いだけでiBelongToATeamがfalseになり、チーム編集者に書き込み権限が一切付与されない
+      // （＝チーム編集者がこの人の候補者を非表示にしようとするとDrive書き込みが403で失敗する）」
+      // という不具合になるため、normalizeEmailで正規化してから比較する。
+      const myEmailNormalized = normalizeEmail(currentIdentity.email);
+      const isMemberOf = (team: Team, email: string) => team.memberEmails.some(e => normalizeEmail(e) === normalizeEmail(email));
       const middleDesired = middleEmails
-        .filter(email => email !== currentIdentity.email)
-        .filter(email => teams.some(team => team.memberEmails.includes(email) && team.memberEmails.includes(currentIdentity.email)));
-      const iBelongToATeam = teams.some(team => team.memberEmails.includes(currentIdentity.email));
+        .filter(email => normalizeEmail(email) !== myEmailNormalized)
+        .filter(email => teams.some(team => isMemberOf(team, email) && isMemberOf(team, currentIdentity.email)));
+      const iBelongToATeam = teams.some(team => isMemberOf(team, currentIdentity.email));
       const teamEditorDesired = iBelongToATeam
-        ? teamsAuthorizedEditors.filter(email => email !== currentIdentity.email && email !== TEAMS_ADMIN_EMAIL)
+        ? teamsAuthorizedEditors.filter(email => normalizeEmail(email) !== myEmailNormalized && normalizeEmail(email) !== normalizeEmail(TEAMS_ADMIN_EMAIL))
         : [];
-      const adminDesired = currentIdentity.email === TEAMS_ADMIN_EMAIL ? [] : [TEAMS_ADMIN_EMAIL];
+      const adminDesired = myEmailNormalized === normalizeEmail(TEAMS_ADMIN_EMAIL) ? [] : [TEAMS_ADMIN_EMAIL];
       const desired = Array.from(new Set([...middleDesired, ...teamEditorDesired, ...adminDesired]));
       const key = `${driveFileId}:${desired.slice().sort().join(',')}`;
       if (lastSyncedMiddlePermsKeyRef.current === key) return;
