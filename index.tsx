@@ -3023,6 +3023,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ヘッダーのボタン配置をブラッシュアップ。多くのユーザーが日常的に使う「個人実績」「候補者パイプライン」を一回り大きく強調し、使用頻度の低い「チーム管理」「媒体管理」「使い方」「更新履歴」「お問い合わせ」「ログアウト」は小さく控えめな見た目に変更した',
       '月別パフォーマンストレンドの「媒体で切り替え」から、アーカイブ済みの媒体を選択肢として表示しないようにした（「全媒体合計」自体には従来通り過去の実績が含まれます）',
       '個人実績タブの表示順を変更し、「本日の進捗」を「実績カレンダー」の下に表示するようにした',
+      '候補者パイプラインの「非表示」を「非表示（選考終了）」に表記変更し、掘り起しリスト（後で見直す保留）とは違い、選考が終了した候補者を対象にする機能であることが分かりやすいようにした（切り替えボタン・絞り込み・CSV出力パターン・使い方ガイドの表記に反映）',
     ],
   },
   {
@@ -3298,7 +3299,7 @@ const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[
         '候補者カードの「+ 選考追加」で応募企業を追加し、進捗状況（打診〜内定承諾・内定承諾後辞退・お見送り・選考辞退）を更新します。',
         '報酬形態は「料率(%) × 想定年収」か「固定報酬（万円）」のどちらかを選べます。企業によっては年収に関係なく固定額の紹介料になる場合に対応しています。',
         '選考予定日時を入れるとパイプラインカレンダーに表示され、選考トラックでこれまでの経緯（いつどのフェーズに進んだか）を確認できます。',
-        '見送りたくない候補者は「非表示」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
+        '見送りたくない候補者は「非表示（選考終了）」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
       ],
     },
     {
@@ -3350,7 +3351,7 @@ const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[
     {
       title: 'チーム作成・編集権限保持者の権限',
       items: [
-        'ミドルではなくても、チーム作成・編集権限を持つユーザーは、所属メンバーの候補者の「非表示」切り替えだけは代理で行えます（それ以外の項目の編集はミドルのみ）。',
+        'ミドルではなくても、チーム作成・編集権限を持つユーザーは、所属メンバーの候補者の「非表示（選考終了）」切り替えだけは代理で行えます（それ以外の項目の編集はミドルのみ）。',
       ],
     },
     {
@@ -5926,7 +5927,7 @@ const CSV_EXPORT_PATTERN_LABELS: Record<CsvExportPattern, string> = {
     current: '現在表示設定中のもの',
     active: '表示中の候補者（フィルター無視）',
     revival: '掘り起しリストのみ',
-    hidden: '非表示（その他）のみ',
+    hidden: '非表示（選考終了）のみ',
     all: 'すべての候補者（非表示を含む全員）',
 };
 
@@ -7385,7 +7386,7 @@ const PipelineCandidateCard: React.FC<{
                       <>
                           <button onClick={() => onOpenRevivalModal(c)} className="edit-user-button">編集</button>
                           <button onClick={() => onRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
-                          <button onClick={() => onMoveRevivalToHidden(c)} className="delete-user-button">非表示に登録</button>
+                          <button onClick={() => onMoveRevivalToHidden(c)} className="delete-user-button">非表示（選考終了）に登録</button>
                       </>
                   ) : (
                       <>
@@ -7397,7 +7398,7 @@ const PipelineCandidateCard: React.FC<{
                               onClick={() => (isManagedByMiddle ? onSave({ ...c, isHidden: !c.isHidden }) : onToggleVisibility(c.id))}
                               className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}
                           >
-                              {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
+                              {visibilityFilter === 'hidden' ? '再表示' : '非表示（選考終了）'}
                           </button>
                       </>
                   )}
@@ -7409,7 +7410,7 @@ const PipelineCandidateCard: React.FC<{
                       onClick={() => onToggleTeammateVisibility(c.ownerEmail!, c.id, !c.isHidden)}
                       className={visibilityFilter === 'hidden' ? "secondary-action-button" : "delete-user-button"}
                   >
-                      {visibilityFilter === 'hidden' ? '再表示' : '非表示'}
+                      {visibilityFilter === 'hidden' ? '再表示' : '非表示（選考終了）'}
                   </button>
               </div>
           )}
@@ -9078,7 +9079,7 @@ const CandidatePipelineView: React.FC<{
                       掘り起しリスト
                     </button>
                     <button onClick={() => setVisibilityFilter('hidden')} className={visibilityFilter === 'hidden' ? 'active' : ''}>
-                      非表示（その他）
+                      非表示（選考終了）
                     </button>
                   </div>
                   {visibilityFilter === 'revival' && (
