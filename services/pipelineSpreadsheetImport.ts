@@ -116,16 +116,29 @@ export function buildCandidateDraftsFromGrid(
   fallbackYear: number,
   resolveTarget: (row: string[]) => string | null
 ): BuildCandidateDraftsResult {
+  // companyName・stageは、候補者ごとに企業を複数列で並べた表（例: 企業1名/ステータス1、企業2名/
+  // ステータス2…）にも対応できるよう、複数列への割り当てを許す — それ以外の項目は1列のみ（最初に
+  // 見つかった列を採用）。
   const colIdxByField = new Map<CandidateImportFieldKey, number>();
-  fieldByColumnIndex.forEach((field, idx) => { if (!colIdxByField.has(field)) colIdxByField.set(field, idx); });
+  const companyIdxs: number[] = [];
+  const stageIdxs: number[] = [];
+  Array.from(fieldByColumnIndex.entries())
+    .sort((a, b) => a[0] - b[0])
+    .forEach(([idx, field]) => {
+      if (field === 'companyName') { companyIdxs.push(idx); return; }
+      if (field === 'stage') { stageIdxs.push(idx); return; }
+      if (!colIdxByField.has(field)) colIdxByField.set(field, idx);
+    });
 
   const nameIdx = colIdxByField.get('name');
-  const companyIdx = colIdxByField.get('companyName');
-  const stageIdx = colIdxByField.get('stage');
   const sourceIdx = colIdxByField.get('source');
   const nextActionIdx = colIdxByField.get('nextAction');
   const scheduledDateIdx = colIdxByField.get('scheduledDate');
   const expectedDecisionDateIdx = colIdxByField.get('expectedDecisionDate');
+  // 選考企業の列（＝組）が2組以上ある行では、次のアクション・次回予定日・決定見込み日をどの企業に
+  // 紐付けるべきか曖昧になるため取り込まない。組が1つ（またはstage列だけ複数あるような想定外の
+  // 構成）の場合のみ、その唯一の応募に反映する。
+  const singleApplicationPairMode = companyIdxs.length <= 1;
 
   const draftsMapByTarget = new Map<string, Map<string, ImportedCandidateDraft>>();
   let rowsParsed = 0;
@@ -168,34 +181,36 @@ export function buildCandidateDraftsFromGrid(
       }
     }
 
-    if (companyIdx !== undefined) {
-      const companyName = (row[companyIdx] || '').trim();
-      if (companyName) {
-        // stage列が無ければ「打診」を初期ステータスとする。stage列はあるが、その行の生の値が
-        // 対応表で「取り込まない」("")、または対応表に無い未知の値の場合はこの行の応募自体を
-        // 作らない（候補者本体の情報はそのまま取り込む）。
-        const stage = stageIdx === undefined
-          ? '打診'
-          : (stageValueMap.get((row[stageIdx] || '').trim()) || null);
-        if (stage) {
-          const nextAction = nextActionIdx !== undefined ? (row[nextActionIdx] || '').trim() : '';
-          const scheduledDateRaw = scheduledDateIdx !== undefined ? (row[scheduledDateIdx] || '').trim() : '';
-          const expectedDecisionDateRaw = expectedDecisionDateIdx !== undefined ? (row[expectedDecisionDateIdx] || '').trim() : '';
-          const scheduledDate = scheduledDateRaw ? parseFlexibleDate(scheduledDateRaw, fallbackYear) ?? undefined : undefined;
-          const expectedDecisionDate = expectedDecisionDateRaw ? parseFlexibleDate(expectedDecisionDateRaw, fallbackYear) ?? undefined : undefined;
-          const alreadyExists = draft.applications.some(a => a.companyName === companyName && a.stage === stage);
-          if (!alreadyExists) {
-            draft.applications.push({
-              companyName,
-              stage,
-              ...(nextAction ? { nextAction } : {}),
-              ...(scheduledDate ? { scheduledDate } : {}),
-              ...(expectedDecisionDate ? { expectedDecisionDate } : {}),
-            });
-          }
-        }
+    // 企業名列・ステータス列は列の並び順で1組目どうし・2組目どうし…とペアリングする（例: 企業1名
+    // 列は1組目のステータス列と組む）。ステータス列の数が企業名列より少ない組は「打診」を初期
+    // ステータスとする。
+    companyIdxs.forEach((cIdx, pairIndex) => {
+      const companyName = (row[cIdx] || '').trim();
+      if (!companyName) return;
+      const sIdx = stageIdxs[pairIndex];
+      // stage列が無ければ「打診」を初期ステータスとする。stage列はあるが、その行の生の値が
+      // 対応表で「取り込まない」("")、または対応表に無い未知の値の場合はこの行の応募自体を
+      // 作らない（候補者本体の情報はそのまま取り込む）。
+      const stage = sIdx === undefined
+        ? '打診'
+        : (stageValueMap.get((row[sIdx] || '').trim()) || null);
+      if (!stage) return;
+      const nextAction = singleApplicationPairMode && nextActionIdx !== undefined ? (row[nextActionIdx] || '').trim() : '';
+      const scheduledDateRaw = singleApplicationPairMode && scheduledDateIdx !== undefined ? (row[scheduledDateIdx] || '').trim() : '';
+      const expectedDecisionDateRaw = singleApplicationPairMode && expectedDecisionDateIdx !== undefined ? (row[expectedDecisionDateIdx] || '').trim() : '';
+      const scheduledDate = scheduledDateRaw ? parseFlexibleDate(scheduledDateRaw, fallbackYear) ?? undefined : undefined;
+      const expectedDecisionDate = expectedDecisionDateRaw ? parseFlexibleDate(expectedDecisionDateRaw, fallbackYear) ?? undefined : undefined;
+      const alreadyExists = draft.applications.some(a => a.companyName === companyName && a.stage === stage);
+      if (!alreadyExists) {
+        draft.applications.push({
+          companyName,
+          stage,
+          ...(nextAction ? { nextAction } : {}),
+          ...(scheduledDate ? { scheduledDate } : {}),
+          ...(expectedDecisionDate ? { expectedDecisionDate } : {}),
+        });
       }
-    }
+    });
 
     rowsParsed += 1;
   });

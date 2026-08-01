@@ -2928,19 +2928,29 @@ const PipelineSpreadsheetImportModal: React.FC<{
     setSourceReasonByRaw({});
   }, [importScope]);
 
-  const stageColumnIndex = useMemo(() => {
-    const entry = Object.entries(fieldByColumnIndex).find(([, key]) => key === 'stage');
-    return entry ? Number(entry[0]) : -1;
-  }, [fieldByColumnIndex]);
+  // 選考企業を複数列で並べた表（企業1名/ステータス1、企業2名/ステータス2…）に対応するため、
+  // 選考ステータスは複数列への割り当てを許す（列の並び順で企業名の列とペアリングされる —
+  // services/pipelineSpreadsheetImport.tsのbuildCandidateDraftsFromGrid参照）。
+  const stageColumnIndices = useMemo(() => (
+    Object.entries(fieldByColumnIndex)
+      .filter(([, key]) => key === 'stage')
+      .map(([idx]) => Number(idx))
+      .sort((a, b) => a - b)
+  ), [fieldByColumnIndex]);
   const sourceColumnIndex = useMemo(() => {
     const entry = Object.entries(fieldByColumnIndex).find(([, key]) => key === 'source');
     return entry ? Number(entry[0]) : -1;
   }, [fieldByColumnIndex]);
 
-  const distinctStageValues = useMemo(
-    () => (grid && stageColumnIndex !== -1 ? extractDistinctColumnValues(grid, stageColumnIndex) : []),
-    [grid, stageColumnIndex]
-  );
+  const distinctStageValues = useMemo(() => {
+    if (!grid || stageColumnIndices.length === 0) return [];
+    const seen = new Set<string>();
+    const values: string[] = [];
+    stageColumnIndices.forEach(idx => {
+      extractDistinctColumnValues(grid, idx).forEach(v => { if (!seen.has(v)) { seen.add(v); values.push(v); } });
+    });
+    return values;
+  }, [grid, stageColumnIndices]);
   const distinctSourceValues = useMemo(
     () => (grid && sourceColumnIndex !== -1 ? extractDistinctColumnValues(grid, sourceColumnIndex) : []),
     [grid, sourceColumnIndex]
@@ -3005,6 +3015,7 @@ const PipelineSpreadsheetImportModal: React.FC<{
         `この表の各列が、上記項目一覧のどれに対応するかを判定してください。1行が候補者1人分の表でも、` +
         `1行が候補者×選考企業の組み合わせ1件分の表（同じ候補者が複数行に分かれ、行ごとに違う選考企業を持つ）でも構いません。` +
         `いずれの形式でも、その行の選考企業名を表す列があればcompanyName、選考ステータス（書類選考中・1次面接など）を表す列があればstageに対応付けてください。` +
+        `1行の中に「企業1名・ステータス1・企業2名・ステータス2…」のように選考企業を複数列で並べた表の場合は、企業名を表す列すべてにcompanyNameを、ステータスを表す列すべてにstageを対応付けてください（列の並び順で1組目どうし・2組目どうしとして扱われます）。` +
         `担当者（この行の候補者が誰の担当か）を表す列が別にあれば、assigneeColumnにその見出し名を返してください（無ければ空文字）。` +
         `どの項目にも該当しない列（連番・備考など）にはfieldKeyとして空文字("")を返してください。` +
         `1つの列は上記一覧のうち最も近い1つのkeyにのみ対応付けてください（一覧に無いkeyを新しく作らないこと）。`,
@@ -3164,9 +3175,13 @@ const PipelineSpreadsheetImportModal: React.FC<{
       setFieldByColumnIndex(nextFields);
       setFieldReasons(nextReasons);
 
-      const stageIdx = Object.entries(nextFields).find(([, key]) => key === 'stage')?.[0];
-      if (stageIdx !== undefined) {
-        const values = extractDistinctColumnValues(parsedGrid, Number(stageIdx));
+      const stageIdxs = Object.entries(nextFields).filter(([, key]) => key === 'stage').map(([idx]) => Number(idx));
+      if (stageIdxs.length > 0) {
+        const seenStageValues = new Set<string>();
+        const values: string[] = [];
+        stageIdxs.forEach(idx => {
+          extractDistinctColumnValues(parsedGrid, idx).forEach(v => { if (!seenStageValues.has(v)) { seenStageValues.add(v); values.push(v); } });
+        });
         if (values.length > 0) {
           const mappings = await analyzeValueMapping(
             '以下は人材紹介会社の候補者パイプラインの「選考ステータス」列に実際に登場した値の一覧です。それぞれが、以下の選考ステータスの選択肢のどれに最も近いかを判定してください。',
@@ -3345,7 +3360,8 @@ const PipelineSpreadsheetImportModal: React.FC<{
             Googleスプレッドシート/Excelの場合は「ファイル&gt;ダウンロード&gt;カンマ区切り値（.csv）」で書き出してからアップロードしてください。
             AIがどの列がどの項目（氏名・選考企業・選考ステータス等）に対応するか自動判定しますが、必ず下の対応表と反映内容を確認してから反映してください。
             1行が候補者1人分の表・候補者×選考企業の組み合わせ1件分の表（同じ候補者が複数行に分かれ、行ごとに違う選考企業を持つ）のどちらでも、氏名が一致する行は自動的に1人の候補者にまとめられます。
-            一度に反映できるのは「選考企業名」列1つ・「選考ステータス」列1つまでです（候補者ごとに企業を複数列で並べた表には対応していません）。
+            「選考企業名」「選考ステータス」はそれぞれ複数の列を選ぶこともでき、列の並び順で1組目どうし・2組目どうしとして組み合わされます（例: 企業1名／ステータス1、企業2名／ステータス2…）。
+            ただし次のアクション・次回選考予定日・決定見込み日は、選考企業の列が1組だけの場合にのみ反映されます（複数組ある行ではどの企業のものか曖昧になるため取り込みません）。
             この取込みは一度きりの移行用です。反映後は新しく登録・編集した内容がこの操作で上書きされることはありません。
           </p>
 
@@ -3460,7 +3476,7 @@ const PipelineSpreadsheetImportModal: React.FC<{
                 <p className="gmail-scout-message is-error">「氏名」に対応する列を選択してください（選択するまで、どの行も取り込まれません）。</p>
               )}
 
-              {stageColumnIndex !== -1 && distinctStageValues.length > 0 && (
+              {stageColumnIndices.length > 0 && distinctStageValues.length > 0 && (
                 <div className="gmail-scout-fetch-bar">
                   <button type="button" onClick={handleSuggestStages} disabled={isSuggestingStages} className="secondary-action-button">
                     {isSuggestingStages ? 'AIが推定中...' : 'AIに選考ステータスとの対応を再推定させる'}
@@ -3708,7 +3724,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '月別パフォーマンストレンドの「媒体で切り替え」から、アーカイブ済みの媒体を選択肢として表示しないようにした（「全媒体合計」自体には従来通り過去の実績が含まれます）',
       '個人実績タブの表示順を変更し、「本日の進捗」を「実績カレンダー」の下に表示するようにした',
       '候補者パイプラインの「非表示」を「非表示（選考終了）」に表記変更し、掘り起しリスト（後で見直す保留）とは違い、選考が終了した候補者を対象にする機能であることが分かりやすいようにした（切り替えボタン・絞り込み・CSV出力パターン・使い方ガイドの表記に反映）',
-      '候補者パイプラインに「スプレッドシートから候補者パイプラインを取り込む」を追加。これまで各チームが独自フォーマットで管理していた候補者パイプラインのスプレッドシートをCSVで書き出してアップロードすると、AIがどの列が氏名・現職企業・選考企業・選考ステータスなどに対応するか自動判定します。候補者ごとに選考企業が複数行に分かれている表・1行にまとまっている表のどちらでも、氏名が一致する行は自動的に1人の候補者にまとめられます。選考ステータスや経由媒体の表記ゆれもAIが選択肢に対応付け、取り込む前に対応表と反映内容を必ず画面で確認・修正できます。ミドルの人は「スプレッドシートからKPI実績を取り込む」と同様、自分の分だけかチームメンバー分も含めて取り込むかを選べます。一度きりの移行を想定した機能で、以後は通常通りアプリ上で新規候補者を登録していく運用になります',
+      '候補者パイプラインに「スプレッドシートから候補者パイプラインを取り込む」を追加。これまで各チームが独自フォーマットで管理していた候補者パイプラインのスプレッドシートをCSVで書き出してアップロードすると、AIがどの列が氏名・現職企業・選考企業・選考ステータスなどに対応するか自動判定します。候補者ごとに選考企業が複数行に分かれている表・1行にまとまっている表・1行に企業を複数列で並べた表（企業1名／ステータス1、企業2名／ステータス2…）のいずれでも、氏名が一致する行は自動的に1人の候補者にまとめられます。選考ステータスや経由媒体の表記ゆれもAIが選択肢に対応付け、取り込む前に対応表と反映内容を必ず画面で確認・修正できます。ミドルの人は「スプレッドシートからKPI実績を取り込む」と同様、自分の分だけかチームメンバー分も含めて取り込むかを選べます。一度きりの移行を想定した機能で、以後は通常通りアプリ上で新規候補者を登録していく運用になります',
     ],
   },
   {
