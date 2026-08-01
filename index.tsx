@@ -2988,6 +2988,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '内定承諾済みの選考がある候補者は、候補者カードの「ぱっと見」表示に「内定承諾時期」を追加し、選考情報の編集画面を開かずにその場で日付を修正できるようにした（成約月のポップアップで設定した意思決定時期を、後から直接調整したい場合に使えます）',
       '候補者カードの「ぱっと見」表示（現職・学歴・年収・確度など）が項目数の増加で見づらくなっていたため、各項目をラベル（小さく・グレー）を上、値を下に並べる表示に統一し、詳細表示を開いた後の項目と見た目を揃えた。項目間の余白も広げ、選考状況の一覧との間に区切り線を追加した',
       '【不具合修正】パイプラインの「見込み月で絞り込み」にある「クリア」ボタンが、白背景に白文字で表示され読めなくなっていた不具合を修正',
+      'パイプラインの並び替えから「氏名」「現職企業名」「現職年収」を削除し、「登録日」「意思決定時期」「確度」のみにした',
     ],
   },
   {
@@ -8687,9 +8688,6 @@ const CandidatePipelineView: React.FC<{
 
     const sortOptions: { key: PipelineSortKey, label: string }[] = [
       { key: 'createdAt', label: '登録日' },
-      { key: 'name', label: '氏名' },
-      { key: 'currentCompany', label: '現職企業名' },
-      { key: 'currentSalary', label: '現職年収' },
       { key: 'nearestExpectedDecisionDate', label: '意思決定時期' },
       { key: 'confidence', label: '確度' },
     ];
