@@ -687,6 +687,10 @@ interface UserData {
   // sign-in (see the seeding effect near sectionVisibility) so later in-session toggles aren't
   // clobbered by re-applying this same saved value on every unrelated data change.
   allUsersSectionDefaults?: Partial<Record<Extract<SectionVisibilityKeys, `allUsers${string}`>, boolean>>;
+  // 候補者パイプライン一覧の「選考フェーズで絞り込み」— 現在チェックしているフェーズを
+  // "現在の選択をデフォルトとして保存" で保存しておくと、次回このタブを開いた時に
+  // 選択済みの状態から始められる。未保存ならundefined（絞り込みなしから始まる、従来通り）。
+  pipelineStageFilterDefaults?: PipelineStage[];
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -2990,6 +2994,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】パイプラインの「見込み月で絞り込み」にある「クリア」ボタンが、白背景に白文字で表示され読めなくなっていた不具合を修正',
       'パイプラインの並び替えから「氏名」「現職企業名」「現職年収」を削除し、「登録日」「意思決定時期」「確度」のみにした',
       '候補者一覧の絞り込み・並び替えの配置を整理。よく使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に、使用頻度の低い「自社面談状況」「表示対象」を右側にまとめて配置した',
+      '「選考フェーズで絞り込み」に「現在の選択をデフォルトとして保存」を追加。よく使う絞り込み条件を保存しておくと、次回パイプラインを開いた時に自動でその状態から表示されるようにした',
     ],
   },
   {
@@ -8157,11 +8162,16 @@ const CandidatePipelineView: React.FC<{
     // 保存先。既存候補者の代理編集(onSaveManagedCandidate)とは別経路 — 差分パッチではなく
     // 候補者オブジェクトを丸ごと渡す。
     onAddManagedCandidate: (targetEmail: string, candidate: Candidate) => void;
+    // 「選考フェーズで絞り込み」の既定選択 — このユーザーが「現在の選択をデフォルトとして保存」
+    // した内容（UserData.pipelineStageFilterDefaults）。未保存ならundefined（従来通り絞り込み
+    // なしから始まる）。
+    defaultStageFilters?: PipelineStage[];
+    onSaveDefaultStageFilters: (stages: PipelineStage[]) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
-    onAddManagedCandidate,
+    onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
@@ -8201,7 +8211,16 @@ const CandidatePipelineView: React.FC<{
     // A single specific calendar month (yyyy-MM, from <input type="month">) to filter 意思決定
     // 時期 by — '' means no filtering.
     const [decisionMonthFilter, setDecisionMonthFilter] = useState('');
-    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
+    // このユーザーが保存した既定値（defaultStageFilters）があればそこから始める — currentUserData
+    // は本コンポーネントが最初にマウントされる時点で既に読み込み済みなので（App側がロード完了
+    // まで本体を描画しないため）、useEffectでの後追い適用ではなくlazy initial stateで足りる。
+    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>(() => defaultStageFilters || []);
+    const [justSavedStageFilterDefaults, setJustSavedStageFilterDefaults] = useState(false);
+    const handleSaveStageFilterDefaultsClick = () => {
+        onSaveDefaultStageFilters(selectedStageFilters);
+        setJustSavedStageFilterDefaults(true);
+        setTimeout(() => setJustSavedStageFilterDefaults(false), 2500);
+    };
     // 自社（エージェント）側の初回面談状況での絞り込み — 企業ごとのPIPELINE_STAGES用の
     // selectedStageFiltersとは独立した、別軸のフィルター。
     const [agentInterviewStatusFilter, setAgentInterviewStatusFilter] = useState<'all' | '未面談' | '面談済み'>('all');
@@ -8952,6 +8971,12 @@ const CandidatePipelineView: React.FC<{
                             <button type="button" onClick={() => setSelectedStageFilters([])} className="secondary-action-button">
                                 クリア
                             </button>
+                        )}
+                        <button type="button" onClick={handleSaveStageFilterDefaultsClick} className="secondary-action-button">
+                            現在の選択をデフォルトとして保存
+                        </button>
+                        {justSavedStageFilterDefaults && (
+                            <span className="section-defaults-saved-message">保存しました。次回以降この選択で表示されます。</span>
                         )}
                       </div>
                     </details>
@@ -10641,6 +10666,13 @@ const App: React.FC = () => {
     const { allUsersProgress, allUsersDayOfWeekRate, allUsersWeeklySummary, allUsersMemberWeeklySummary, allUsersGrossProfit, allUsersMonthlyTrend } = sectionVisibility;
     const allUsersSectionDefaults = { allUsersProgress, allUsersDayOfWeekRate, allUsersWeeklySummary, allUsersMemberWeeklySummary, allUsersGrossProfit, allUsersMonthlyTrend };
     setCurrentUserData(prev => (prev ? { ...prev, allUsersSectionDefaults } : prev));
+  };
+
+  // 候補者パイプラインの「選考フェーズで絞り込み」— CandidatePipelineViewが現在チェックして
+  // いるフェーズをこのユーザーの既定値として保存する。上のhandleSaveAllUsersSectionDefaultsと
+  // 同じ「今の状態をそのままデフォルトとして保存」パターン。
+  const handleSavePipelineStageFilterDefaults = (stages: PipelineStage[]) => {
+    setCurrentUserData(prev => (prev ? { ...prev, pipelineStageFilterDefaults: stages } : prev));
   };
 
 
@@ -13389,6 +13421,8 @@ const App: React.FC = () => {
                 middleManagedMemberEmails={middleManagedMemberEmails}
                 onSaveManagedCandidate={persistTeammateCandidateEdit}
                 onAddManagedCandidate={persistTeammateCandidateAdd}
+                defaultStageFilters={currentUserData?.pipelineStageFilterDefaults}
+                onSaveDefaultStageFilters={handleSavePipelineStageFilterDefaults}
             />
           </>
         )}
