@@ -985,6 +985,12 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
         setSelectedKeys(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
     };
 
+    // 「媒体で切り替え」の選択肢としては、既にスカウトに使っていないアーカイブ済み媒体は
+    // 出さない（選ぶ意味がほぼ無いため）。ただし「全媒体合計」自体は従来通りallMediaのまま —
+    // 過去にアーカイブ済み媒体経由であった実績を、月別トレンドの合計から消してしまわないため
+    // （他のKPI実績集計と同じ「実績＝アーカイブ済みも含む、対象の選択肢＝アクティブのみ」という
+    // 考え方に合わせている）。
+    const selectableMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
     const mediaScope = useMemo(
         () => (selectedMediaId === 'all' ? allMedia : allMedia.filter(m => m.id === selectedMediaId)),
         [selectedMediaId, allMedia]
@@ -1102,14 +1108,14 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
                 >
                     全媒体合計
                 </button>
-                {allMedia.map(m => (
+                {selectableMedia.map(m => (
                     <button
                         key={m.id}
                         type="button"
                         className={selectedMediaId === m.id ? 'active' : ''}
                         onClick={() => setSelectedMediaId(m.id)}
                     >
-                        {m.name}{m.isArchived ? '（アーカイブ済み）' : ''}
+                        {m.name}
                     </button>
                 ))}
             </div>
@@ -3015,6 +3021,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】チーム作成・編集権限保持者が、所属チームのメンバーの候補者を代理で非表示にしようとするとDriveへの書き込みに失敗することがある不具合を修正。メンバーのメールアドレスの大文字・小文字の表記がチーム設定と食い違っている場合に、そのメンバー自身がチームに所属していると正しく認識できず、書き込み権限が付与されていなかったのが原因でした',
       'ミドル・チーム編集者による代理保存（実績入力・候補者の非表示切り替え・候補者情報編集・新規登録・スプレッドシート取込み・お問い合わせ返信）でDriveへの書き込みが失敗した際、エラーメッセージにHTTPステータスコードを表示するようにした。権限不足（403）の場合は「対象メンバーが一度アプリを開き直す必要がある可能性があります」という案内も表示され、原因を切り分けやすくなります',
       'ヘッダーのボタン配置をブラッシュアップ。多くのユーザーが日常的に使う「個人実績」「候補者パイプライン」を一回り大きく強調し、使用頻度の低い「チーム管理」「媒体管理」「使い方」「更新履歴」「お問い合わせ」「ログアウト」は小さく控えめな見た目に変更した',
+      '月別パフォーマンストレンドの「媒体で切り替え」から、アーカイブ済みの媒体を選択肢として表示しないようにした（「全媒体合計」自体には従来通り過去の実績が含まれます）',
     ],
   },
   {
