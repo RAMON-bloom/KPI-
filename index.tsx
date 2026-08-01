@@ -3022,6 +3022,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ミドル・チーム編集者による代理保存（実績入力・候補者の非表示切り替え・候補者情報編集・新規登録・スプレッドシート取込み・お問い合わせ返信）でDriveへの書き込みが失敗した際、エラーメッセージにHTTPステータスコードを表示するようにした。権限不足（403）の場合は「対象メンバーが一度アプリを開き直す必要がある可能性があります」という案内も表示され、原因を切り分けやすくなります',
       'ヘッダーのボタン配置をブラッシュアップ。多くのユーザーが日常的に使う「個人実績」「候補者パイプライン」を一回り大きく強調し、使用頻度の低い「チーム管理」「媒体管理」「使い方」「更新履歴」「お問い合わせ」「ログアウト」は小さく控えめな見た目に変更した',
       '月別パフォーマンストレンドの「媒体で切り替え」から、アーカイブ済みの媒体を選択肢として表示しないようにした（「全媒体合計」自体には従来通り過去の実績が含まれます）',
+      '個人実績タブの表示順を変更し、「本日の進捗」を「実績カレンダー」の下に表示するようにした',
     ],
   },
   {
@@ -12774,22 +12775,6 @@ const App: React.FC = () => {
       <main>
         {view === 'personal_kpi' && (
           <>
-            <section aria-labelledby="daily-progress-title">
-                <h2 
-                  id="daily-progress-title"
-                  className="section-title collapsible-header"
-                  onClick={() => toggleSection('dailyProgress')}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('dailyProgress'); } }}
-                  role="button" tabIndex={0} aria-expanded={sectionVisibility.dailyProgress} aria-controls="daily-progress-content"
-                >
-                  <span>本日の進捗</span>
-                  <span className={`toggle-icon ${sectionVisibility.dailyProgress ? 'open' : ''}`}>▼</span>
-                </h2>
-                <div id="daily-progress-content" className={`collapsible-content ${sectionVisibility.dailyProgress ? 'open' : ''}`}>
-                   <DailyProgress activeMedia={activeMedia} todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
-                </div>
-            </section>
-            
              <div className="sync-status-bar">
                <span>
                  最終同期: {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString('ja-JP') : '未同期'}
@@ -12855,7 +12840,23 @@ const App: React.FC = () => {
                 />
               </div>
             </section>
-            
+
+            <section aria-labelledby="daily-progress-title">
+                <h2
+                  id="daily-progress-title"
+                  className="section-title collapsible-header"
+                  onClick={() => toggleSection('dailyProgress')}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('dailyProgress'); } }}
+                  role="button" tabIndex={0} aria-expanded={sectionVisibility.dailyProgress} aria-controls="daily-progress-content"
+                >
+                  <span>本日の進捗</span>
+                  <span className={`toggle-icon ${sectionVisibility.dailyProgress ? 'open' : ''}`}>▼</span>
+                </h2>
+                <div id="daily-progress-content" className={`collapsible-content ${sectionVisibility.dailyProgress ? 'open' : ''}`}>
+                   <DailyProgress activeMedia={activeMedia} todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
+                </div>
+            </section>
+
             <section aria-labelledby="weekly-summary-title">
               <h2 
                 id="weekly-summary-title"
