@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, overwriteTeammateFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -2397,6 +2397,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-08-01',
+    items: [
+      'ミドルの人が、パイプラインの「ユーザー別」表示で自分の所属チームのメンバーを選択している間、そのメンバーに代わって新規候補者を登録できるようにした（従来は本人の代理で既存候補者を編集することはできても、新規登録だけは本人の画面からしかできなかった）。登録した候補者は対象メンバー本人の候補者パイプラインに追加され、KPI実績も代理登録したミドルではなく対象メンバー本人に加算されます',
+    ],
+  },
   {
     date: '2026-07-30',
     items: [
@@ -7379,10 +7385,15 @@ const CandidatePipelineView: React.FC<{
     isCurrentUserMiddle: boolean;
     middleManagedMemberEmails: string[];
     onSaveManagedCandidate: (targetEmail: string, candidateId: string, patch: Partial<Candidate>) => void;
+    // ミドルが「ユーザー別」スコープで選択中のチームメンバーに代わって新規候補者を登録する際の
+    // 保存先。既存候補者の代理編集(onSaveManagedCandidate)とは別経路 — 差分パッチではなく
+    // 候補者オブジェクトを丸ごと渡す。
+    onAddManagedCandidate: (targetEmail: string, candidate: Candidate) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
+    onAddManagedCandidate,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
@@ -7499,7 +7510,13 @@ const CandidatePipelineView: React.FC<{
     // State for the 掘り起しリスト registration/edit modal
     const [revivalModalCandidate, setRevivalModalCandidate] = useState<Candidate | null>(null);
 
-    const handleAdd = () => {
+    // nullなら自分自身の新規候補者登録。非nullなら、ミドルが「ユーザー別」スコープで選択中の
+    // チームメンバーに代わって登録する対象メールアドレス — CandidateModalのonSaveをどちらの
+    // 保存先（onSave本体 or onAddManagedCandidate）に振り分けるかだけに使う。
+    const [addTargetEmail, setAddTargetEmail] = useState<string | null>(null);
+
+    const handleAdd = (targetEmail: string | null = null) => {
+        setAddTargetEmail(targetEmail);
         setEditingCandidate(null);
         setIsModalOpen(true);
     };
@@ -7878,8 +7895,14 @@ const CandidatePipelineView: React.FC<{
         <section className="pipeline-container" aria-labelledby="pipeline-title">
             {isModalOpen && (
               <CandidateModal
-                  onSave={onSave}
-                  onClose={() => setIsModalOpen(false)}
+                  onSave={(candidateData) => {
+                      if (addTargetEmail) {
+                          onAddManagedCandidate(addTargetEmail, candidateData);
+                      } else {
+                          onSave(candidateData);
+                      }
+                  }}
+                  onClose={() => { setIsModalOpen(false); setAddTargetEmail(null); }}
                   initialData={editingCandidate}
                   allMedia={allMedia}
                   currentUserEmail={currentUserEmail}
@@ -8022,13 +8045,25 @@ const CandidatePipelineView: React.FC<{
                 </div>
             </div>
 
-            {scope === 'personal' && (
-            <div className="add-candidate-action-bar">
-                <button onClick={handleAdd} className="add-candidate-large-button">
-                    + 新規候補者を追加
-                </button>
-            </div>
-            )}
+            {(() => {
+                // ミドルが「ユーザー別」スコープで自分の管理下メンバーを選択している場合、その
+                // メンバーに代わって新規候補者を登録できるようにする（既存候補者の代理編集
+                // isManagedByMiddleと同じ対象範囲）。
+                const canAddForSelectedMember = scope === 'user' && !!selectedUserEmail
+                    && isCurrentUserMiddle && middleManagedMemberEmails.includes(selectedUserEmail);
+                if (scope !== 'personal' && !canAddForSelectedMember) return null;
+                const targetEmail = scope === 'personal' ? null : selectedUserEmail;
+                const buttonLabel = targetEmail
+                    ? `+ ${labelByEmailForPipeline.get(targetEmail) || targetEmail} さんの新規候補者を追加`
+                    : '+ 新規候補者を追加';
+                return (
+                    <div className="add-candidate-action-bar">
+                        <button onClick={() => handleAdd(targetEmail)} className="add-candidate-large-button">
+                            {buttonLabel}
+                        </button>
+                    </div>
+                );
+            })()}
 
              <div className="pipeline-list-controls">
                 <div className="pipeline-sort-controls">
@@ -10672,6 +10707,43 @@ const App: React.FC = () => {
     });
   };
 
+  // ミドルによる代理での候補者新規登録 — persistTeammateCandidateEdit と同じ
+  // optimistic-local-update-then-fire-and-forget-Drive-write の形だが、既存候補者へのpatchでは
+  // なく対象メンバーの候補者一覧に丸ごと新規追加する。computeStageAdvanceUpdate(undefined, ...)
+  // を使うのは、本人自身が新規登録する際のhandleSaveCandidateとまったく同じ「新規登録」の扱い
+  // （初期選考企業が既に入力されていればその分のKPI実績も計上）にするため。KPI実績の加算先は
+  // 対象メンバー(targetEmail)のentries。Googleタスク同期は代理編集では意図的に呼ばない（本人が
+  // 次に編集した際に追従する）。
+  const persistTeammateCandidateAdd = (targetEmail: string, candidateData: Candidate) => {
+    const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
+    const todayStr = new Date().toLocaleDateString('sv-SE');
+    const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(undefined, sanitized, todayStr);
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      const updatedCandidates = [...target.candidates, finalCandidate];
+      let updatedEntries = target.entries;
+      if (Object.keys(kpiDeltas).length > 0) {
+        const entriesByDateMap = new Map<string, KpiEntry>(target.entries.map(e => [e.date, e] as [string, KpiEntry]));
+        const existingEntry = entriesByDateMap.get(todayStr);
+        const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
+        Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
+        entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+        updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+      }
+      return { ...prev, [targetEmail]: { ...target, candidates: updatedCandidates, entries: updatedEntries } };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert('対象メンバーのデータファイルが見つかりませんでした。');
+      return;
+    }
+    addTeammateCandidate<UserData>(targetFileId, sanitized, computeStageAdvanceUpdate, todayStr).catch(err => {
+      console.error('Failed to save proxy new candidate to teammate Drive file', err);
+      alert(`候補者の登録に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+
   // Same merge pattern as handleApplyBulkGmailImport, but for a single media's CSV import,
   // writing both scoutsSent and scoutReplies for that one media per date.
   const handleApplyMediaCsvImport = (mediaId: ScoutCsvMediaId, countsByDate: Record<string, ScoutCsvDayCounts>) => {
@@ -12366,6 +12438,7 @@ const App: React.FC = () => {
                 isCurrentUserMiddle={isCurrentUserMiddle}
                 middleManagedMemberEmails={middleManagedMemberEmails}
                 onSaveManagedCandidate={persistTeammateCandidateEdit}
+                onAddManagedCandidate={persistTeammateCandidateAdd}
             />
           </>
         )}

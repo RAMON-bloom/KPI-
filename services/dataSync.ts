@@ -452,6 +452,39 @@ export async function overwriteTeammateCandidatePatch<T extends { candidates: an
 }
 
 /**
+ * ミドルによる代理での候補者新規登録: fetches the target teammate's LATEST data (same
+ * re-fetch-before-write pattern as overwriteTeammateCandidatePatch above), computes the new
+ * candidate AND any KPI actuals its initial state triggers (via the caller's
+ * computeStageAdvanceUpdate, called with `undefined` as the previous candidate — same "brand
+ * new" path the候補者本人's own registration flow uses) against that FRESH copy, appends it to
+ * `candidates`, merges the KPI deltas into `entries`, and writes the result back. Requires this
+ * fileId to already have been granted direct 'writer' access to the signed-in account (see
+ * syncIndividualWriterPermissions) — otherwise the underlying Drive write fails with 403.
+ */
+export async function addTeammateCandidate<T extends { candidates: any[]; entries: any[] } = any>(
+  driveFileId: string,
+  candidateData: Record<string, any>,
+  computeUpdate: (prevCandidate: any, nextCandidate: any, todayStr: string) => { candidate: any; kpiDeltas: Record<string, number> },
+  todayStr: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const { candidate: finalCandidate, kpiDeltas } = computeUpdate(undefined, candidateData, todayStr);
+  const updatedCandidates = [...(latest.candidates || []), finalCandidate];
+  let updatedEntries = latest.entries || [];
+  if (Object.keys(kpiDeltas).length > 0) {
+    const entriesByDateMap = new Map<string, any>(updatedEntries.map((e: any) => [e.date, e]));
+    const existingEntry = entriesByDateMap.get(todayStr);
+    const values: Record<string, number> = existingEntry ? { ...existingEntry.values } : {};
+    Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key] = (values[key] || 0) + delta; });
+    entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+    updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
+  }
+  const updated = { ...latest, candidates: updatedCandidates, entries: updatedEntries };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
  * 開発者（TEAMS_ADMIN_EMAIL）による、他ユーザーの「お問い合わせ」投稿への返信・ステータス
  * 変更・削除: fetches the target user's LATEST data (same re-fetch-before-write pattern as
  * overwriteTeammateEntry/overwriteTeammateCandidateVisibility, to avoid clobbering a concurrent
