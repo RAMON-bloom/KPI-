@@ -737,6 +737,12 @@ const normalizeForDuplicateMatch = (value?: string): string =>
 // タイムスタンプのみ（candidate_${Date.now()}）だと、別のユーザーが同じミリ秒に新規登録した
 // 場合にIDが衝突し、Reactのkey重複により一方が画面に表示されなくなる（「たまに特定の候補者が
 // 表示されない」不具合の原因）。ランダムな接尾辞を足すことで実質的に衝突しないようにする。
+// ただし、この対策は新規作成分にしか効かず、対策より前に作られた既存データ同士は依然として
+// 衝突し得る — そのため、複数ユーザー分を1つの配列に平坦化して描画する箇所
+// （CandidatePipelineView本体の一覧、CompanyPipelineView、GrossProfitSummary、
+// PipelineDateScheduleModalの候補者選択）では、key自体もc.id単体ではなく
+// `${ownerEmail}:${c.id}` のような複合キーにし、IDが衝突していてもReactのkey重複で
+// どちらかが消えることがないようにしている。
 const generateCandidateId = (): string => `candidate_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 // 同じ理由（CompanyPipelineViewなど、複数ユーザー分のapplicationsを1つのkey={application.id}
@@ -2403,6 +2409,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ヘッダーに「使い方」を追加。アプリの機能を「メンバー向け」「マネージャー向け」の2つの視点で切り替えて確認できるガイドをアプリ内から見られるようにした',
       '想定粗利を、意思決定時期（見込み月）が今月に該当する選考をデフォルトで集計するように変更し、前月/次月ボタンやカスタム期間指定で過去月・任意期間の想定粗利も確認できるようにした（パイプラインタブ・チーム別タブの両方に適用。全ユーザータブは従来通り想定粗利セクションを表示しません）',
       'チーム別タブの進捗表示に「メンバー別想定粗利」の一覧表を追加し、チーム合計だけでなくメンバーごとの想定紹介料・想定媒体手数料・想定粗利を確認できるようにした',
+      '【不具合修正】チーム別/全ユーザー/特定ユーザー表示で、候補者や選考企業を1つの一覧に平坦化して描画する箇所（候補者パイプライン本体・企業別パイプライン・想定粗利・日程調整モーダルの候補者選択）のkeyを、IDのみではなく登録者のメールアドレスも含めた複合キーに変更。別ユーザーの候補者/選考企業のIDが偶然重複していた場合に、Reactのkey重複で一方が画面から消えてしまう不具合を修正',
     ],
   },
   {
@@ -5025,7 +5032,7 @@ const PipelineDateScheduleModal: React.FC<{
                                     autoFocus
                                 >
                                     <option value="">選択してください</option>
-                                    {ownCandidates.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    {ownCandidates.map(c => <option key={c.ownerEmail ? `${c.ownerEmail}:${c.id}` : c.id} value={c.id}>{c.name}</option>)}
                                 </select>
                             </div>
                             {selectedCandidate && (
@@ -5458,7 +5465,7 @@ const GrossProfitSummary: React.FC<{
                         {s.entries.length > 0 && (
                             <div className="company-pipeline-entries" style={{ marginTop: '0.75rem' }}>
                                 {s.entries.map(({ candidate, application }) => (
-                                    <div key={application.id} className="company-pipeline-entry">
+                                    <div key={`${candidate.ownerEmail || ''}:${candidate.id}:${application.id}`} className="company-pipeline-entry">
                                         <span className="company-pipeline-entry-name">
                                             {candidate.name} - {application.companyName}
                                             {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
@@ -5714,7 +5721,7 @@ const CompanyPipelineView: React.FC<{
                             {group.entries.map(({ candidate, application }) => {
                                 const candidateIsOwn = !candidate.ownerEmail || candidate.ownerEmail === currentUserEmail;
                                 return (
-                                    <div key={application.id} className="company-pipeline-entry">
+                                    <div key={`${candidate.ownerEmail || ''}:${candidate.id}:${application.id}`} className="company-pipeline-entry">
                                         <span className="company-pipeline-entry-name">
                                             {candidate.name}
                                             {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
@@ -8143,7 +8150,7 @@ const CandidatePipelineView: React.FC<{
             <div className="candidate-list">
                 {sortedCandidates.length > 0 ? sortedCandidates.map(c => (
                     <PipelineCandidateCard
-                        key={c.id}
+                        key={c.ownerEmail ? `${c.ownerEmail}:${c.id}` : c.id}
                         candidate={c}
                         allMedia={allMedia}
                         candidateIsOwn={isOwn(c) || isManagedByMiddle(c)}
