@@ -843,6 +843,20 @@ const getStartOfWeek = (date: Date): Date => {
   return d;
 };
 
+// 全ユーザー/チーム別タブの各カード（進捗・想定粗利・曜日別返信率）が個別に持つ「前月/次月」
+// ナビゲーション用 — offset=0は「今月」（他の箇所と同じくnullを返し、目標・達成率の表示など
+// 「今月扱い」の分岐をそのまま活かす）、それ以外は現在の月を基準にoffsetヶ月分ずらした
+// カレンダー月まるごとを返す。
+const getMonthRangeOverride = (offsetMonths: number): { start: Date; end: Date } | null => {
+  if (offsetMonths === 0) return null;
+  const now = new Date();
+  const targetMonth = now.getMonth() + offsetMonths;
+  const start = new Date(now.getFullYear(), targetMonth, 1);
+  const end = new Date(now.getFullYear(), targetMonth + 1, 0);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+};
+
 
 const chartOptions = {
     responsive: true,
@@ -3700,6 +3714,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-08-02',
+    items: [
+      '全ユーザー/チームタブの「全ユーザーの進捗」「想定粗利（パイプライン合計）」「全ユーザー曜日別返信率」の各カードに、カードごとに独立した「前月」「次月」ボタンを追加した。他のカードやCSV出力の期間には一切影響せず、そのカードだけを個別に前後の月へ移動して確認できます（「週間サマリー」「メンバー別週間サマリー」は従来から前週/次週ボタンで独立に移動できていたため変更なし）。ページ上部の「表示・出力期間」バーは、歩留まり分析とCSV出力の期間指定として引き続き利用できます',
+    ],
+  },
   {
     date: '2026-08-01',
     items: [
@@ -10513,8 +10533,27 @@ const AllUsersDashboard: React.FC<{
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
   onSaveSectionDefaults: () => void;
   showGrossProfit?: boolean;
-  periodOverride?: { start: Date; end: Date } | null;
-}> = ({ users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true, periodOverride = null }) => {
+  // 歩留まり分析（FunnelAnalysisSection）・CSV出力と連動する、ページ上部の共有「表示・出力期間」
+  // バー由来の期間。以下3つの独立ナビゲーションとは別物。
+  funnelPeriodOverride?: { start: Date; end: Date } | null;
+  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは、それぞれ単独の前月/次月ボタンで
+  // 他のカード・CSV出力に影響を与えずに期間を移動できる（カードごとに独立したnull=今月/期間指定）。
+  progressPeriodOverride: { start: Date; end: Date } | null;
+  onPrevProgressMonth: () => void;
+  onNextProgressMonth: () => void;
+  grossProfitPeriodOverride: { start: Date; end: Date } | null;
+  onPrevGrossProfitMonth: () => void;
+  onNextGrossProfitMonth: () => void;
+  dowPeriodOverride: { start: Date; end: Date } | null;
+  onPrevDowMonth: () => void;
+  onNextDowMonth: () => void;
+}> = ({
+  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
+  funnelPeriodOverride = null,
+  progressPeriodOverride, onPrevProgressMonth, onNextProgressMonth,
+  grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
+  dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
+}) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
   const handleSaveSectionDefaultsClick = () => {
     onSaveSectionDefaults();
@@ -10522,7 +10561,12 @@ const AllUsersDashboard: React.FC<{
     setTimeout(() => setJustSavedSectionDefaults(false), 2500);
   };
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
-  const periodLabel = periodOverride ? `${formatPeriodDate(periodOverride.start)}〜${formatPeriodDate(periodOverride.end)}` : '今月';
+  // 歩留まり分析（periodOverride=funnelPeriodOverride）専用のラベル。進捗・想定粗利・曜日別
+  // 返信率はそれぞれ自分専用のラベル（下記）を使う。
+  const periodLabel = funnelPeriodOverride ? `${formatPeriodDate(funnelPeriodOverride.start)}〜${formatPeriodDate(funnelPeriodOverride.end)}` : '今月';
+  const progressPeriodLabel = progressPeriodOverride ? `${formatPeriodDate(progressPeriodOverride.start)}〜${formatPeriodDate(progressPeriodOverride.end)}` : '今月';
+  const grossProfitPeriodLabel = grossProfitPeriodOverride ? `${formatPeriodDate(grossProfitPeriodOverride.start)}〜${formatPeriodDate(grossProfitPeriodOverride.end)}` : '今月';
+  const dowPeriodLabel = dowPeriodOverride ? `${formatPeriodDate(dowPeriodOverride.start)}〜${formatPeriodDate(dowPeriodOverride.end)}` : '今月';
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
     () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
     [users, allUsersData, activeMedia, weekStartDate]
@@ -10544,8 +10588,8 @@ const AllUsersDashboard: React.FC<{
     [users, allUsersData]
   );
   const grossProfitStageTotals = useMemo(
-    () => (showGrossProfit ? computeGrossProfitByStage(candidatesAcrossUsers, allMedia, periodOverride) : undefined),
-    [showGrossProfit, candidatesAcrossUsers, allMedia, periodOverride]
+    () => (showGrossProfit ? computeGrossProfitByStage(candidatesAcrossUsers, allMedia, grossProfitPeriodOverride) : undefined),
+    [showGrossProfit, candidatesAcrossUsers, allMedia, grossProfitPeriodOverride]
   );
   // メンバー別想定粗利 — 全体合計だけでなく個人単位でも確認できるように、ユーザーごとに同じ
   // computeGrossProfitByStageを回して合計行（お見送り・選考辞退・内定承諾後辞退を除く）だけ
@@ -10554,7 +10598,7 @@ const AllUsersDashboard: React.FC<{
     if (!showGrossProfit) return [];
     return users.map(user => {
       const displayName = allUsersData[user]?.displayName || user;
-      const stageTotals = computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, periodOverride);
+      const stageTotals = computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, grossProfitPeriodOverride);
       const total = stageTotals
         .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
         .reduce((acc, s) => ({
@@ -10566,7 +10610,7 @@ const AllUsersDashboard: React.FC<{
         }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
       return { user, displayName, ...total };
     });
-  }, [showGrossProfit, users, allUsersData, allMedia, periodOverride]);
+  }, [showGrossProfit, users, allUsersData, allMedia, grossProfitPeriodOverride]);
 
   // Hoisted out of the table's render loop so the same per-user period totals can also be
   // handed to the AI panel as context, instead of duplicating this calculation twice.
@@ -10574,8 +10618,8 @@ const AllUsersDashboard: React.FC<{
     const userData = allUsersData[user];
     if (!userData) return { user, displayName: user, userData: null as null };
     const displayName = userData.displayName || user;
-    const totals = periodOverride
-      ? calculateTotalsForRange(userData.entries || [], allMedia, periodOverride.start, periodOverride.end)
+    const totals = progressPeriodOverride
+      ? calculateTotalsForRange(userData.entries || [], allMedia, progressPeriodOverride.start, progressPeriodOverride.end)
       : calculateMonthlyTotals(userData.entries || [], allMedia);
     const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
 
@@ -10609,7 +10653,7 @@ const AllUsersDashboard: React.FC<{
       initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
       generalKpis,
     };
-  }), [users, allUsersData, allMedia, activeMedia, periodOverride]);
+  }), [users, allUsersData, allMedia, activeMedia, progressPeriodOverride]);
 
   return (
     <>
@@ -10630,11 +10674,16 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.progress}
             aria-controls="all-users-progress-content"
         >
-          <span>全ユーザーの進捗（{periodLabel}）</span>
+          <span>全ユーザーの進捗（{progressPeriodLabel}）</span>
           <span className={`toggle-icon ${visibility.progress ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
-          {periodOverride && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <button type="button" onClick={onPrevProgressMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
+            <span className="gmail-scout-message" style={{ margin: 0 }}>{progressPeriodLabel}</span>
+            <button type="button" onClick={onNextProgressMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
+          </div>
+          {progressPeriodOverride && (
             <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
           )}
           <div className="all-users-table-container">
@@ -10686,24 +10735,24 @@ const AllUsersDashboard: React.FC<{
                         <small>({effectiveReplies}/{replies})</small>
                       </td>
                       <td className="progress-cell">
-                          <span>{documentsCollected}{!periodOverride && ` / ${documentsCollectedTarget}`}</span>
-                          {!periodOverride && (
+                          <span>{documentsCollected}{!progressPeriodOverride && ` / ${documentsCollectedTarget}`}</span>
+                          {!progressPeriodOverride && (
                             <div className="mini-progress-bar">
                                 <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
                             </div>
                           )}
                       </td>
                        <td className="progress-cell">
-                          <span>{effectiveDocumentsCollected}{!periodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
-                          {!periodOverride && (
+                          <span>{effectiveDocumentsCollected}{!progressPeriodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
+                          {!progressPeriodOverride && (
                             <div className="mini-progress-bar">
                                 <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
                             </div>
                           )}
                       </td>
                       <td className="progress-cell">
-                          <span>{initialInterviews}{!periodOverride && ` / ${initialInterviewsTarget}`}</span>
-                          {!periodOverride && (
+                          <span>{initialInterviews}{!progressPeriodOverride && ` / ${initialInterviewsTarget}`}</span>
+                          {!progressPeriodOverride && (
                             <div className="mini-progress-bar">
                                 <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
                             </div>
@@ -10720,8 +10769,8 @@ const AllUsersDashboard: React.FC<{
                           const progress = target > 0 ? Math.min((value / target) * 100, 100) : 0;
                           return (
                               <td key={key} className="progress-cell">
-                                  <span>{value}{!periodOverride && ` / ${target}`}</span>
-                                  {!periodOverride && (
+                                  <span>{value}{!progressPeriodOverride && ` / ${target}`}</span>
+                                  {!progressPeriodOverride && (
                                     <div className="mini-progress-bar">
                                         <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
                                     </div>
@@ -10755,12 +10804,17 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.grossProfit}
           aria-controls="all-users-gross-profit-content"
         >
-          <span>想定粗利（パイプライン合計）</span>
+          <span>想定粗利（パイプライン合計・{grossProfitPeriodLabel}）</span>
           <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
-          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} />
-          <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{periodLabel}）</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <button type="button" onClick={onPrevGrossProfitMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
+            <span className="gmail-scout-message" style={{ margin: 0 }}>{grossProfitPeriodLabel}</span>
+            <button type="button" onClick={onNextGrossProfitMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
+          </div>
+          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} />
+          <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{grossProfitPeriodLabel}）</h3>
           <div className="all-users-table-container">
             <table className="weekly-summary-table">
               <thead>
@@ -10865,7 +10919,7 @@ const AllUsersDashboard: React.FC<{
         users={users}
         allUsersData={allUsersData}
         allMedia={allMedia}
-        periodOverride={periodOverride}
+        periodOverride={funnelPeriodOverride}
         periodLabel={periodLabel}
         perUserProgressStats={perUserProgressStats}
         grossProfitStageTotals={grossProfitStageTotals}
@@ -10873,8 +10927,8 @@ const AllUsersDashboard: React.FC<{
 
       {dayOfWeekReplyRateData && (
         <section aria-labelledby="all-users-dow-title">
-          <h2 
-            id="all-users-dow-title" 
+          <h2
+            id="all-users-dow-title"
             className="section-title collapsible-header"
             onClick={() => toggleSection('allUsersDayOfWeekRate')}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('allUsersDayOfWeekRate'); } }}
@@ -10883,10 +10937,15 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.dowRate}
             aria-controls="all-users-dow-content"
           >
-            <span>全ユーザー 曜日別返信率（{periodLabel}）</span>
+            <span>全ユーザー 曜日別返信率（{dowPeriodLabel}）</span>
             <span className={`toggle-icon ${visibility.dowRate ? 'open' : ''}`}>▼</span>
           </h2>
           <div id="all-users-dow-content" className={`collapsible-content ${visibility.dowRate ? 'open' : ''}`}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+              <button type="button" onClick={onPrevDowMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
+              <span className="gmail-scout-message" style={{ margin: 0 }}>{dowPeriodLabel}</span>
+              <button type="button" onClick={onNextDowMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            </div>
             <DayOfWeekReplyRateChart data={dayOfWeekReplyRateData} />
           </div>
         </section>
@@ -11273,15 +11332,30 @@ const App: React.FC = () => {
   const [customExportStartDate, setCustomExportStartDate] = useState('');
   const [customExportEndDate, setCustomExportEndDate] = useState('');
   // Reuses the same start/end fields the custom-period CSV export already had: once explicitly
-  // enabled (below), the 全ユーザー/チーム別 progress dashboard switches from "this month" to
-  // this range too, instead of needing a second, separate period picker. Requires an explicit
-  // enable step rather than auto-activating whenever both dates happen to be filled in, so
-  // typing dates doesn't change the dashboard out from under the user before they're ready.
+  // enabled (below), 歩留まり分析（FunnelAnalysisSection）とCSV出力がこの範囲に切り替わる。
+  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは、それぞれ専用の前月/次月ボタンで
+  // 独立に動く別の状態（progressMonthOffset等、下記）を使うため、このバーの影響を受けない。
+  // Requires an explicit enable step rather than auto-activating whenever both dates happen to be
+  // filled in, so typing dates doesn't change the funnel/CSV period out from under the user
+  // before they're ready.
   const [isPeriodFilterEnabled, setIsPeriodFilterEnabled] = useState(false);
   const dashboardPeriodOverride = useMemo(() => {
     if (!isPeriodFilterEnabled || !customExportStartDate || !customExportEndDate) return null;
     return { start: new Date(customExportStartDate + 'T00:00:00'), end: new Date(customExportEndDate + 'T23:59:59') };
   }, [isPeriodFilterEnabled, customExportStartDate, customExportEndDate]);
+
+  // 全ユーザー/チーム別タブの「全ユーザーの進捗」「想定粗利」「曜日別返信率」カードそれぞれが持つ、
+  // 独立した前月/次月ナビゲーション用の状態（0=今月、±1=前月/次月…）。上のcustomExportStartDate
+  // 系（歩留まり分析・CSV出力用）や、週間サマリー用のviewWeekStartDate（下記）とは別物 — カード
+  // ごとに他へ影響を与えずに期間を移動できるようにするため、それぞれ独立したstateを持つ。タブを
+  // 切り替えても状態を保つ（週間サマリーのviewWeekStartDateと同じ扱い）ため、AllUsersDashboardの
+  // ローカルstateではなくここに置く。
+  const [progressMonthOffset, setProgressMonthOffset] = useState(0);
+  const [grossProfitMonthOffset, setGrossProfitMonthOffset] = useState(0);
+  const [dowMonthOffset, setDowMonthOffset] = useState(0);
+  const progressPeriodOverride = useMemo(() => getMonthRangeOverride(progressMonthOffset), [progressMonthOffset]);
+  const grossProfitPeriodOverride = useMemo(() => getMonthRangeOverride(grossProfitMonthOffset), [grossProfitMonthOffset]);
+  const dowPeriodOverride = useMemo(() => getMonthRangeOverride(dowMonthOffset), [dowMonthOffset]);
   const handleTogglePeriodFilter = () => {
     if (dashboardPeriodOverride) {
       setIsPeriodFilterEnabled(false);
@@ -11300,13 +11374,14 @@ const App: React.FC = () => {
   const formatDateInputValue = (d: Date): string =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-  // Steps the 全ユーザー/チーム別 dashboards a whole calendar month forward/back with one click,
-  // instead of needing to type both dates by hand every time. Shifts relative to whichever
-  // month is currently selected (so repeated clicks keep walking further back/forward), or from
-  // today's month if the period filter isn't enabled yet. Also moves 週間サマリー (which has its
-  // own independent 前週/次週 navigation) to the week containing this month's 1st, so it doesn't
-  // silently stay stuck on a week from a different month while everything else moved — the
-  // weekly nav remains usable afterwards for fine-tuning within/around that month.
+  // Steps 歩留まり分析（FunnelAnalysisSection）とCSV出力の対象期間を一括で一ヶ月分前後させる
+  // （「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは各自の独立したナビゲーションを
+  // 持つため、これには影響されない）。Shifts relative to whichever month is currently selected
+  // (so repeated clicks keep walking further back/forward), or from today's month if the period
+  // filter isn't enabled yet. Also moves 週間サマリー (which has its own independent 前週/次週
+  // navigation) to the week containing this month's 1st, so it doesn't silently stay stuck on a
+  // week from a different month while everything else moved — the weekly nav remains usable
+  // afterwards for fine-tuning within/around that month.
   const handleShiftDashboardMonth = (offset: number) => {
     const reference = customExportStartDate ? new Date(customExportStartDate + 'T00:00:00') : new Date();
     const targetYear = reference.getFullYear();
@@ -11318,6 +11393,12 @@ const App: React.FC = () => {
     setIsPeriodFilterEnabled(true);
     setViewWeekStartDate(getStartOfWeek(monthStart));
   };
+
+  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」各カード専用の前月/次月ボタン — 他のカードや
+  // 歩留まり分析・CSV出力には一切影響しない、カード単独のナビゲーション。
+  const handleShiftProgressMonth = (offset: number) => setProgressMonthOffset(prev => prev + offset);
+  const handleShiftGrossProfitMonth = (offset: number) => setGrossProfitMonthOffset(prev => prev + offset);
+  const handleShiftDowMonth = (offset: number) => setDowMonthOffset(prev => prev + offset);
 
   // Independent period control for 個人実績's own 曜日別累積返信率 chart — separate from the
   // 全ユーザー/チーム別 dashboards' period fields above, since a period picked for one's own
@@ -13194,13 +13275,14 @@ const App: React.FC = () => {
       ? Object.entries(displayedAllUsersData).filter(([email]) => selectedTeamMemberEmails.includes(email)).flatMap(([, d]: [string, UserData]) => d.entries)
       : entries;
 
-    // 全ユーザー/チーム別タブでは月次進捗・ファネル分析と同じ期間（カスタム指定時はその範囲、未指定
-    // 時は今月）に絞り込む。個人実績タブは独立した期間指定（未指定時は全期間、従来通り）。
+    // 全ユーザー/チーム別タブでは、この曜日別返信率カード専用の前月/次月ナビゲーション
+    // （dowPeriodOverride、未指定時は今月）に絞り込む。個人実績タブは独立した期間指定
+    // （未指定時は全期間、従来通り）。
     const periodFilteredEntries = view === 'all_users_kpi' || view === 'team_kpi'
       ? allEntries.filter(entry => {
           const entryTime = new Date(entry.date).getTime();
-          if (dashboardPeriodOverride) {
-            return entryTime >= dashboardPeriodOverride.start.getTime() && entryTime <= dashboardPeriodOverride.end.getTime();
+          if (dowPeriodOverride) {
+            return entryTime >= dowPeriodOverride.start.getTime() && entryTime <= dowPeriodOverride.end.getTime();
           }
           const entryDate = new Date(entry.date);
           const now = new Date();
@@ -13236,7 +13318,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dashboardPeriodOverride, personalDowPeriodOverride]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dowPeriodOverride, personalDowPeriodOverride]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -14134,7 +14216,16 @@ const App: React.FC = () => {
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
                   showGrossProfit={false}
-                  periodOverride={dashboardPeriodOverride}
+                  funnelPeriodOverride={dashboardPeriodOverride}
+                  progressPeriodOverride={progressPeriodOverride}
+                  onPrevProgressMonth={() => handleShiftProgressMonth(-1)}
+                  onNextProgressMonth={() => handleShiftProgressMonth(1)}
+                  grossProfitPeriodOverride={grossProfitPeriodOverride}
+                  onPrevGrossProfitMonth={() => handleShiftGrossProfitMonth(-1)}
+                  onNextGrossProfitMonth={() => handleShiftGrossProfitMonth(1)}
+                  dowPeriodOverride={dowPeriodOverride}
+                  onPrevDowMonth={() => handleShiftDowMonth(-1)}
+                  onNextDowMonth={() => handleShiftDowMonth(1)}
               />
             </>
           )
@@ -14222,7 +14313,16 @@ const App: React.FC = () => {
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
-                  periodOverride={dashboardPeriodOverride}
+                  funnelPeriodOverride={dashboardPeriodOverride}
+                  progressPeriodOverride={progressPeriodOverride}
+                  onPrevProgressMonth={() => handleShiftProgressMonth(-1)}
+                  onNextProgressMonth={() => handleShiftProgressMonth(1)}
+                  grossProfitPeriodOverride={grossProfitPeriodOverride}
+                  onPrevGrossProfitMonth={() => handleShiftGrossProfitMonth(-1)}
+                  onNextGrossProfitMonth={() => handleShiftGrossProfitMonth(1)}
+                  dowPeriodOverride={dowPeriodOverride}
+                  onPrevDowMonth={() => handleShiftDowMonth(-1)}
+                  onNextDowMonth={() => handleShiftDowMonth(1)}
               />
             )}
           </div>
