@@ -3717,7 +3717,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-08-02',
     items: [
-      '全ユーザー/チームタブの「全ユーザーの進捗」「想定粗利（パイプライン合計）」「全ユーザー曜日別返信率」の各カードに、カードごとに独立した「前月」「次月」ボタンを追加した。他のカードやCSV出力の期間には一切影響せず、そのカードだけを個別に前後の月へ移動して確認できます（「週間サマリー」「メンバー別週間サマリー」は従来から前週/次週ボタンで独立に移動できていたため変更なし）。ページ上部の「表示・出力期間」バーは、歩留まり分析とCSV出力の期間指定として引き続き利用できます',
+      '全ユーザー/チームタブの「全ユーザーの進捗」「想定粗利（パイプライン合計）」「全ユーザー曜日別返信率」の各カードに、カードごとに独立した「前月」「次月」ボタンを追加した。他のカードやCSV出力の期間には一切影響せず、そのカードだけを個別に前後の月へ移動して確認できます（「週間サマリー」は従来から前週/次週ボタンで独立に移動できていたため変更なし）。ページ上部の「表示・出力期間」バーは、歩留まり分析とCSV出力の期間指定として引き続き利用できます',
+      '「メンバー別週間サマリー」にも独立した「前の週」「次の週」ボタンを追加。従来は「週間サマリー（合計）」と同じ週を共有していましたが、それぞれ別々の週を表示できるようにしました',
     ],
   },
   {
@@ -10529,6 +10530,11 @@ const AllUsersDashboard: React.FC<{
   weekStartDate: Date;
   onPrevWeek: () => void;
   onNextWeek: () => void;
+  // メンバー別週間サマリーは「週間サマリー（合計）」とは別に、自分専用の週送りを持つ（他方に
+  // 影響を与えない）。
+  memberWeekStartDate: Date;
+  onPrevMemberWeek: () => void;
+  onNextMemberWeek: () => void;
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean; monthlyTrend: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
   onSaveSectionDefaults: () => void;
@@ -10548,7 +10554,7 @@ const AllUsersDashboard: React.FC<{
   onPrevDowMonth: () => void;
   onNextDowMonth: () => void;
 }> = ({
-  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
+  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
   funnelPeriodOverride = null,
   progressPeriodOverride, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
@@ -10575,10 +10581,18 @@ const AllUsersDashboard: React.FC<{
     () => users.map(user => ({
       user,
       displayName: allUsersData[user]?.displayName || user,
-      ...computeAggregateWeeklyData([user], allUsersData, activeMedia, weekStartDate),
+      ...computeAggregateWeeklyData([user], allUsersData, activeMedia, memberWeekStartDate),
     })),
-    [users, allUsersData, activeMedia, weekStartDate]
+    [users, allUsersData, activeMedia, memberWeekStartDate]
   );
+  const memberWeeklyEndDate = useMemo(() => {
+    const d = new Date(memberWeekStartDate);
+    d.setDate(memberWeekStartDate.getDate() + 6);
+    return d;
+  }, [memberWeekStartDate]);
+  const formatMemberWeekDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
+  const memberWeekRange = `${formatMemberWeekDate(memberWeekStartDate)} - ${formatMemberWeekDate(memberWeeklyEndDate)}`;
+  const isMemberWeekThisWeek = getStartOfWeek(new Date()).getTime() === memberWeekStartDate.getTime();
   const candidatesAcrossUsers = useMemo(
     () => users.flatMap(user => allUsersData[user]?.candidates || []),
     [users, allUsersData]
@@ -10882,10 +10896,17 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.memberWeeklySummary}
           aria-controls="all-users-member-weekly-summary-content"
         >
-          <span>メンバー別 週間サマリー</span>
+          <span>メンバー別 週間サマリー（{memberWeekRange}）</span>
           <span className={`toggle-icon ${visibility.memberWeeklySummary ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-member-weekly-summary-content" className={`collapsible-content ${visibility.memberWeeklySummary ? 'open' : ''}`}>
+          <div className="weekly-summary-header" style={{ marginBottom: '0.75rem' }}>
+            <h3 style={{ margin: 0 }}>{memberWeekRange}</h3>
+            <div>
+              <button onClick={onPrevMemberWeek} aria-label="前の週へ">&lt; 前の週</button>
+              <button onClick={onNextMemberWeek} disabled={isMemberWeekThisWeek} aria-label="次の週へ">次の週 &gt;</button>
+            </div>
+          </div>
           {perMemberWeeklyData.length === 0 && <p className="no-data-message">表示するユーザーがいません。</p>}
           {perMemberWeeklyData.map(({ user, displayName, data, weeklyKpiTargets }) => (
             <div key={user} className="member-weekly-summary-item weekly-summary-container">
@@ -11450,6 +11471,9 @@ const App: React.FC = () => {
   const [viewDate, setViewDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [viewWeekStartDate, setViewWeekStartDate] = useState(getStartOfWeek(new Date()));
+  // 全ユーザー/チームタブの「メンバー別週間サマリー」専用の週送り — 「週間サマリー（合計）」
+  // （viewWeekStartDate）とは独立に動かせる。
+  const [memberWeeklyWeekStartDate, setMemberWeeklyWeekStartDate] = useState(getStartOfWeek(new Date()));
   const [sectionVisibility, setSectionVisibility] = useState({
     monthlyProgress: true,
     monthlyPerformance: true,
@@ -14212,6 +14236,9 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  memberWeekStartDate={memberWeeklyWeekStartDate}
+                  onPrevMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
+                  onNextMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
@@ -14310,6 +14337,9 @@ const App: React.FC = () => {
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  memberWeekStartDate={memberWeeklyWeekStartDate}
+                  onPrevMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
+                  onNextMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
