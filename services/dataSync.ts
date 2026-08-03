@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, type DriveFileRef } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -330,11 +330,37 @@ export interface TeammateData<T> {
   driveFileId: string;
 }
 
-/** Fetches every teammate's domain-shared data file (used by the cross-user / team views). */
+/**
+ * Fetches every teammate's domain-shared data file (used by the cross-user / team views).
+ *
+ * A past bug (a race in the debounced own-data save effect, see index.tsx) could create a
+ * duplicate `kpi-manager-data.json` for a user who already had one — leaving that person with
+ * two files, one of which silently stopped receiving updates. If that's ever happened before,
+ * `listTeammateDataFiles` would return both, and blindly reading/merging every file by iteration
+ * order made this view non-deterministically show whichever file happened to sort last — often
+ * the stale one. To be resilient to any pre-existing duplicates (as well as correct even though
+ * the underlying race is now fixed), this dedupes by owner email/name BEFORE reading content,
+ * keeping only the file with the most recent `modifiedTime` per owner — so a leftover stale
+ * duplicate never wins over the one the person is actually still editing.
+ */
 export async function loadAllTeammatesData<T = any>(): Promise<TeammateData<T>[]> {
   const files = await listTeammateDataFiles();
+  const latestByOwner = new Map<string, DriveFileRef>();
+  files.forEach((file) => {
+    const key = file.ownerEmail || file.name;
+    const existing = latestByOwner.get(key);
+    if (!existing || new Date(file.modifiedTime).getTime() > new Date(existing.modifiedTime).getTime()) {
+      latestByOwner.set(key, file);
+    }
+  });
+  if (latestByOwner.size < files.length) {
+    console.warn(
+      `[loadAllTeammatesData] found ${files.length} files but only ${latestByOwner.size} distinct owners — ` +
+      'at least one owner has more than one data file; keeping only the most recently modified one per owner.'
+    );
+  }
   const results = await Promise.all(
-    files.map(async (file) => {
+    Array.from(latestByOwner.values()).map(async (file) => {
       try {
         const content = await readFileContent<T>(file.id);
         return { email: file.ownerEmail || file.name, data: content, driveFileId: file.id };

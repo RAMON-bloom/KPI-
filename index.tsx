@@ -3720,6 +3720,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '全ユーザー/チームタブの「全ユーザーの進捗」「想定粗利（パイプライン合計）」「全ユーザー曜日別返信率」の各カードに、カードごとに独立した「前月」「次月」ボタンを追加した。他のカードやCSV出力の期間には一切影響せず、そのカードだけを個別に前後の月へ移動して確認できます（「週間サマリー」は従来から前週/次週ボタンで独立に移動できていたため変更なし）。ページ上部の「表示・出力期間」バーは、歩留まり分析とCSV出力の期間指定として引き続き利用できます',
       '「メンバー別週間サマリー」にも独立した「前の週」「次の週」ボタンを追加。従来は「週間サマリー（合計）」と同じ週を共有していましたが、それぞれ別々の週を表示できるようにしました',
       '【不具合修正】メンバーが自分の候補者パイプラインで選考状況などを更新しても、他のユーザーが見る全ユーザー/チーム別/パイプライン（チーム・全ユーザー・ユーザー別）画面にタイムリーに反映されない不具合を修正。原因は2つあり、(1) サインイン中に一度データを読み込むと以後はその画面を開き直すまでずっと同じ内容のままだった点は、画面に入り直すたびに再取得するようにして解消、(2) 「更新」ボタンを押しても実はブラウザのキャッシュから同じ内容が返ってきてしまい最新化されていなかった点は、Googleドライブへの読み取りリクエストが常にキャッシュを経由しないよう修正した。あわせて、候補者パイプラインの候補者一覧のすぐ上にも「候補者一覧を更新」ボタンを追加した（KPIタブの「更新」ボタンは既存）',
+      '【不具合修正】上記の続報として、より根本的な原因を特定して修正。アプリ起動直後、Google Drive上の既存データファイルの場所を確認できるより前の一瞬の間に何らかの保存が走ってしまうと、既存ユーザーなのに「新規ユーザー」と誤認され、同じ人のデータファイルがもう1つ余分に作られてしまう不具合があった。以後その端末での編集はすべてその余分な方のファイルにしか保存されず、他のユーザーからは元のファイルの古い内容しか見えない、という状態になっていた。この保存が発生するタイミングをファイルの場所の確認が完了した後まで確実に待つよう修正し、再発しないようにした。また、万が一すでに同じ人のファイルが複数できてしまっていた場合に備え、複数見つかった場合は必ず一番最近更新された方を使うようにした（過去に作られてしまった古い余分なファイルが優先されてしまう事態を避ける）',
+      '候補者パイプラインの「候補者一覧を更新」ボタンの隣に「自分のパイプラインをDriveに保存し直す」ボタンを追加。上記の不具合で自分のデータが正しく反映されていないかもしれない場合に、今このブラウザに表示されている内容をそのままGoogleドライブへ強制的に保存し直せます（各自ボタンを1回押していただくと、過去に発生した反映漏れの解消に役立ちます）',
     ],
   },
   {
@@ -8912,6 +8914,11 @@ const CandidatePipelineView: React.FC<{
     onSelectedUserEmailChange: (email: string | null) => void;
     isLoadingAggregate: boolean;
     onRefreshAggregate: () => void;
+    // 自分（signed-inアカウント）が現在ローカルに持っているパイプラインデータを、そのまま
+    // Google Driveへ強制的に上書き保存する — 過去の不具合で自分のデータファイルが重複作成されて
+    // しまっていた場合に、正しい方の内容を確実にDriveへ反映し直すための手動リカバリ手段。
+    onForceSyncOwnData: () => void;
+    isForcingSyncOwnData: boolean;
     isTeamsEditable: boolean;
     onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
     // ミドルは自分が所属するチームのメンバーの候補者パイプラインも代理編集できる — isTeamsEditable
@@ -8933,6 +8940,7 @@ const CandidatePipelineView: React.FC<{
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
+    onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters,
 }) => {
@@ -9712,11 +9720,20 @@ const CandidatePipelineView: React.FC<{
                 return null;
             })()}
 
-            {scope !== 'personal' && (
-                // メンバーが選考状況等を更新しても、この画面は開いた時点のスナップショットの
-                // ままになりがちなため、候補者カード一覧のすぐ上に、すぐ最新化するための更新
-                // ボタンを置く。
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <button
+                    type="button"
+                    onClick={onForceSyncOwnData}
+                    disabled={isForcingSyncOwnData}
+                    className="secondary-action-button"
+                    title="自分が今登録しているパイプラインの内容を、そのままGoogleドライブへ保存し直します。過去のデータがうまく反映されていない場合にお使いください。"
+                >
+                    {isForcingSyncOwnData ? '保存中...' : '自分のパイプラインをDriveに保存し直す'}
+                </button>
+                {scope !== 'personal' && (
+                    // メンバーが選考状況等を更新しても、この画面は開いた時点のスナップショットの
+                    // ままになりがちなため、候補者カード一覧のすぐ上に、すぐ最新化するための更新
+                    // ボタンを置く。
                     <button
                         type="button"
                         onClick={onRefreshAggregate}
@@ -9725,8 +9742,8 @@ const CandidatePipelineView: React.FC<{
                     >
                         {isLoadingAggregate ? '更新中...' : '候補者一覧を更新'}
                     </button>
-                </div>
-            )}
+                )}
+            </div>
 
              <div className="pipeline-list-controls">
                 {/* メインで使う「選考フェーズで絞り込み」「並び替え」「見込み月で絞り込み」を左側に
@@ -11322,6 +11339,16 @@ const App: React.FC = () => {
   // Google Drive storage state
   const [driveFileId, setDriveFileId] = useState<string | null>(null);
   const [isLoadingUserData, setIsLoadingUserData] = useState(false);
+  // 「ローカルキャッシュがあれば即座にisLoadingUserDataをfalseにする」（ローディング表示を
+  // 出さないための最適化）とは別に、「本当にこのアカウントの既存Driveファイルが見つかったか
+  // どうかの確認が完了したか」だけを表す独立したフラグ。false のままだと、debounce保存
+  // エフェクト（下記）はまだ発火しない — これが無いと、既存ユーザーでもキャッシュヒットで
+  // isLoadingUserDataが早々にfalseになった直後、まだdriveFileId（初期値null）が本物の値に
+  // 更新される前に何らかの変更でdebounce保存が走ってしまい、"driveFileId未確定=null"を
+  // 「新規ユーザー」と誤認して重複したDriveファイルを新規作成してしまう不具合があった
+  // （そのユーザー以後の編集が重複ファイル側にだけ保存され、他ユーザーからは古い方の
+  // ファイルしか見えなくなる — 「他ユーザーの更新が反映されない」不具合の実際の原因）。
+  const [isDriveFileIdResolved, setIsDriveFileIdResolved] = useState(false);
   const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
@@ -11591,10 +11618,12 @@ const App: React.FC = () => {
     if (!currentIdentity) {
       setCurrentUserData(null);
       setDriveFileId(null);
+      setIsDriveFileIdResolved(false);
       return;
     }
     let cancelled = false;
     const email = currentIdentity.email;
+    setIsDriveFileIdResolved(false);
 
     const normalize = (d: Partial<UserData>): UserData => ({
       entries: d.entries || [],
@@ -11665,6 +11694,9 @@ const App: React.FC = () => {
         setDriveFileId(null);
       }
       setIsLoadingUserData(false);
+      // 既存ファイルが見つかった／本当に存在しないと確認できた、いずれの場合もこれで
+      // driveFileIdは信頼できる状態になった — debounce保存エフェクトが動いてよい。
+      setIsDriveFileIdResolved(true);
     })();
     return () => { cancelled = true; };
   }, [currentIdentity]);
@@ -12236,12 +12268,19 @@ const App: React.FC = () => {
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
   // Writes through to a local cache immediately so the UI never waits on the network.
+  //
+  // isDriveFileIdResolvedも必ず待つ — isLoadingUserDataだけだと、ローカルキャッシュ命中時に
+  // すぐfalseになってしまい、まだ本物のdriveFileIdが判明する前（初期値null）にこの保存が
+  // 走ってしまうことがあった。driveFileId=nullは「新規ユーザー」の合図でもあるため、既存
+  // ユーザーなのに確認が終わる前に何か保存が走ると、既存ファイルとは別の重複ファイルを
+  // 新規作成してしまい、以後この端末での編集はその重複ファイルにしか反映されなくなる
+  // （他のユーザーからは元のファイルの古い内容しか見えなくなる不具合の原因だった）。
   useEffect(() => {
-    if (!isInitialized || !currentIdentity || !currentUserData || isLoadingUserData) return;
+    if (!isInitialized || !currentIdentity || !currentUserData || isLoadingUserData || !isDriveFileIdResolved) return;
     saveOwnDataDebounced(currentIdentity.email, driveFileId, currentUserData, (newFileId) => {
       setDriveFileId(newFileId);
     });
-  }, [currentUserData, currentIdentity, isInitialized, isLoadingUserData]);
+  }, [currentUserData, currentIdentity, isInitialized, isLoadingUserData, isDriveFileIdResolved]);
 
   // Best-effort flush of any pending debounced save when the tab is backgrounded or the page
   // is about to be torn down — the 2s debounce window would otherwise silently drop the last
@@ -14433,6 +14472,8 @@ const App: React.FC = () => {
                 onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
                 onRefreshAggregate={fetchAllUsersData}
+                onForceSyncOwnData={handleForceSync}
+                isForcingSyncOwnData={isForcingSync}
                 isTeamsEditable={isTeamsEditable}
                 onToggleTeammateVisibility={persistTeammateCandidateVisibility}
                 isCurrentUserMiddle={isCurrentUserMiddle}
