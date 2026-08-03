@@ -44,6 +44,10 @@ const MEDIA_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
 // a list this admin manages, persisted alongside the teams themselves.
 const TEAMS_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
 
+// 全ユーザー/チーム別/パイプライン（team・all_users・user）の集計画面を開いている間、
+// メンバーの更新をタイムリーに反映するためバックグラウンドで自動再取得する間隔。
+const AGGREGATE_DATA_POLL_INTERVAL_MS = 60000;
+
 const GENERAL_KPIS = {
   candidatesSubmitted: { label: '候補者推薦数', target: 30 },
   documentScreeningPassed: { label: '書類選考通過数', target: 25 },
@@ -3719,6 +3723,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '全ユーザー/チームタブの「全ユーザーの進捗」「想定粗利（パイプライン合計）」「全ユーザー曜日別返信率」の各カードに、カードごとに独立した「前月」「次月」ボタンを追加した。他のカードやCSV出力の期間には一切影響せず、そのカードだけを個別に前後の月へ移動して確認できます（「週間サマリー」は従来から前週/次週ボタンで独立に移動できていたため変更なし）。ページ上部の「表示・出力期間」バーは、歩留まり分析とCSV出力の期間指定として引き続き利用できます',
       '「メンバー別週間サマリー」にも独立した「前の週」「次の週」ボタンを追加。従来は「週間サマリー（合計）」と同じ週を共有していましたが、それぞれ別々の週を表示できるようにしました',
+      '【不具合修正】メンバーが自分の候補者パイプラインで選考状況などを更新しても、ミドルが見る全ユーザー/チーム別/パイプライン（チーム・全ユーザー・ユーザー別）画面にタイムリーに反映されない不具合を修正。従来はサインイン中に一度データを読み込むと、その後は「更新」ボタンを押すまでずっと同じ内容のままだったため、これらの画面を開いている間は1分ごとに自動でGoogleドライブから最新化するようにした。また、候補者パイプラインの「全ユーザー」「チーム」「ユーザー別」表示にも、すぐに最新化したいときのための「更新」ボタンを追加した（KPIタブには既存）',
     ],
   },
   {
@@ -8910,6 +8915,7 @@ const CandidatePipelineView: React.FC<{
     selectedUserEmail: string | null;
     onSelectedUserEmailChange: (email: string | null) => void;
     isLoadingAggregate: boolean;
+    onRefreshAggregate: () => void;
     isTeamsEditable: boolean;
     onToggleTeammateVisibility: (targetEmail: string, candidateId: string, nextIsHidden: boolean) => void;
     // ミドルは自分が所属するチームのメンバーの候補者パイプラインも代理編集できる — isTeamsEditable
@@ -8930,7 +8936,7 @@ const CandidatePipelineView: React.FC<{
     onSaveDefaultStageFilters: (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
-    onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate,
+    onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters,
 }) => {
@@ -9577,6 +9583,19 @@ const CandidatePipelineView: React.FC<{
                         <option value="">ユーザーを選択</option>
                         {userOptions.map(u => <option key={u.email} value={u.email}>{u.label}</option>)}
                     </select>
+                )}
+                {scope !== 'personal' && (
+                    // メンバーが選考状況等を更新しても、この画面は開いた時点のスナップショットの
+                    // ままになりがち（バックグラウンドの自動再取得はあるが、すぐ確認したい場合用）。
+                    <button
+                        type="button"
+                        onClick={onRefreshAggregate}
+                        disabled={isLoadingAggregate}
+                        className="secondary-action-button"
+                        style={{ marginLeft: '0.75rem' }}
+                    >
+                        {isLoadingAggregate ? '更新中...' : '更新'}
+                    </button>
                 )}
             </div>
 
@@ -11672,12 +11691,17 @@ const App: React.FC = () => {
   };
 
 
-  // Load every teammate's Drive-shared data (domain-wide, cross-device). This is fetched once
-  // per sign-in session the first time either view is opened, not on every tab switch — flipping
-  // back and forth between "全ユーザー"/"チーム別" and other tabs reuses what's already loaded.
-  // Use the "更新" button in those views to force a fresh pull from Drive.
-  const hasFetchedAllUsersRef = useRef(false);
-
+  // Load every teammate's Drive-shared data (domain-wide, cross-device).
+  //
+  // 過去の挙動（sign-inセッション中1回だけ取得し、以後はタブを行き来しても使い回す）だと、
+  // メンバーが自分のパイプラインで選考状況を更新しても、ミドル側の全ユーザー/チーム別/
+  // パイプライン（ユーザー別・チーム・全ユーザー）画面には反映されないまま何時間でも古い
+  // スナップショットを表示し続けてしまう不具合があった（「更新」ボタンを押した人だけ気づける）。
+  // 今は、集計が必要な画面に「入るたび」（isInitialized/aggregate系が既にtrueのままの再
+  // レンダリングでは再取得しない — needsAggregateDataのfalse→true遷移を検知）に加え、
+  // 画面を開いたままでも自動的に定期取得する（AGGREGATE_DATA_POLL_INTERVAL_MS）ことで、
+  // 都度「更新」を押さなくても比較的タイムリーに反映されるようにした。手動の「更新」ボタンは
+  // 従来通り、すぐに最新化したい場合のために残してある。
   const fetchAllUsersData = useCallback(async () => {
     setIsLoadingAllUsers(true);
     try {
@@ -11706,6 +11730,12 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // 前回のneedsAggregateDataを覚えておき、false→true（集計が必要な画面に新しく入った瞬間）
+  // でだけ再取得する — 集計画面を開いたまま他の状態が変わって再レンダリングされるたびに
+  // 取得し直す（＝hasFetchedAllUsersRefのような「一度だけ」ではなく、かつ無駄打ちもしない）
+  // ための簡単なエッジ検知。
+  const wasAggregateDataNeededRef = useRef(false);
+
   useEffect(() => {
     // The 個人実績 tab also needs this when the signed-in account holds the ミドル role and
     // belongs to at least one Team — that's what feeds the member-selector dropdown above the
@@ -11717,11 +11747,28 @@ const App: React.FC = () => {
       view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen ||
       isFeedbackModalOpen ||
       (view === 'personal_kpi' && currentUserIsMiddleWithTeam);
-    if (!needsAggregateData || !isInitialized || !currentIdentity) return;
-    if (hasFetchedAllUsersRef.current) return;
-    hasFetchedAllUsersRef.current = true;
-    fetchAllUsersData();
+    if (!needsAggregateData || !isInitialized || !currentIdentity) {
+      wasAggregateDataNeededRef.current = needsAggregateData;
+      return;
+    }
+    if (!wasAggregateDataNeededRef.current) {
+      fetchAllUsersData();
+    }
+    wasAggregateDataNeededRef.current = true;
   }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isFeedbackModalOpen, middleEmails, teams]);
+
+  // 集計画面を開いたままでも自動で最新化されるよう、表示中は定期的にバックグラウンドで
+  // 再取得する（ページを離れて戻ってくるのを待たずに、メンバーの更新がタイムリーに反映
+  // されるように）。
+  useEffect(() => {
+    const currentUserIsMiddleWithTeam = !!currentIdentity && middleEmails.includes(currentIdentity.email) && teams.some(t => t.memberEmails.includes(currentIdentity.email));
+    const needsAggregateData =
+      view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') ||
+      (view === 'personal_kpi' && currentUserIsMiddleWithTeam);
+    if (!needsAggregateData || !isInitialized || !currentIdentity) return;
+    const intervalId = setInterval(() => { fetchAllUsersData(); }, AGGREGATE_DATA_POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, middleEmails, teams]);
 
   // Loads unconditionally after sign-in (like the media config below), not gated by
   // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
@@ -14400,6 +14447,7 @@ const App: React.FC = () => {
                 selectedUserEmail={pipelineSelectedUserEmail}
                 onSelectedUserEmailChange={setPipelineSelectedUserEmail}
                 isLoadingAggregate={isLoadingAllUsers}
+                onRefreshAggregate={fetchAllUsersData}
                 isTeamsEditable={isTeamsEditable}
                 onToggleTeammateVisibility={persistTeammateCandidateVisibility}
                 isCurrentUserMiddle={isCurrentUserMiddle}
