@@ -18,6 +18,11 @@ async function authorizedFetch(url: string, init: RequestInit = {}, retried = fa
   if (!session) throw new Error('ログインが必要です。');
   const res = await fetch(url, {
     ...init,
+    // ブラウザのHTTPキャッシュを経由させない — 特に`files/{id}?alt=media`の読み取り
+    // （readFileContent）は同じURLに繰り返しアクセスするため、キャッシュ無効化を明示しないと
+    // 他ユーザーが直後にDrive上のファイルを更新していても、ブラウザが直前のレスポンスを
+    // そのまま返してしまい「更新」ボタンを押しても最新化されない不具合の原因になっていた。
+    cache: 'no-store',
     headers: {
       ...(init.headers || {}),
       Authorization: `Bearer ${session.accessToken}`,
