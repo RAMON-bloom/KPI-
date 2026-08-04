@@ -3722,6 +3722,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】メンバーが自分の候補者パイプラインで選考状況などを更新しても、他のユーザーが見る全ユーザー/チーム別/パイプライン（チーム・全ユーザー・ユーザー別）画面にタイムリーに反映されない不具合を修正。原因は2つあり、(1) サインイン中に一度データを読み込むと以後はその画面を開き直すまでずっと同じ内容のままだった点は、画面に入り直すたびに再取得するようにして解消、(2) 「更新」ボタンを押しても実はブラウザのキャッシュから同じ内容が返ってきてしまい最新化されていなかった点は、Googleドライブへの読み取りリクエストが常にキャッシュを経由しないよう修正した。あわせて、候補者パイプラインの候補者一覧のすぐ上にも「候補者一覧を更新」ボタンを追加した（KPIタブの「更新」ボタンは既存）',
       '【不具合修正】上記の続報として、より根本的な原因を特定して修正。アプリ起動直後、Google Drive上の既存データファイルの場所を確認できるより前の一瞬の間に何らかの保存が走ってしまうと、既存ユーザーなのに「新規ユーザー」と誤認され、同じ人のデータファイルがもう1つ余分に作られてしまう不具合があった。以後その端末での編集はすべてその余分な方のファイルにしか保存されず、他のユーザーからは元のファイルの古い内容しか見えない、という状態になっていた。この保存が発生するタイミングをファイルの場所の確認が完了した後まで確実に待つよう修正し、再発しないようにした。また、万が一すでに同じ人のファイルが複数できてしまっていた場合に備え、複数見つかった場合は必ず一番最近更新された方を使うようにした（過去に作られてしまった古い余分なファイルが優先されてしまう事態を避ける）',
       '候補者パイプラインの「候補者一覧を更新」ボタンの隣に「自分のパイプラインをDriveに保存し直す」ボタンを追加。上記の不具合で自分のデータが正しく反映されていないかもしれない場合に、今このブラウザに表示されている内容をそのままGoogleドライブへ強制的に保存し直せます（各自ボタンを1回押していただくと、過去に発生した反映漏れの解消に役立ちます）',
+      '【不具合修正】ミドルの人が、代理登録できるはずのメンバーの新規候補者を登録しようとすると「対象メンバーのデータファイルが見つかりませんでした」と表示され登録できない不具合を修正。チーム設定に登録されたメールアドレスの大文字・小文字の表記が実際のサインインメールと食い違っている場合に、代理登録先の候補一覧がその食い違ったままの表記で扱われてしまい、実際の保存先を探す段になって見つからなくなっていたのが原因でした',
     ],
   },
   {
@@ -13148,12 +13149,22 @@ const App: React.FC = () => {
       if (!currentIdentity || !isCurrentUserMiddle) return [];
       const set = new Set<string>();
       teams.forEach(team => {
-        if (team.memberEmails.includes(currentIdentity.email)) {
-          team.memberEmails.forEach(email => { if (email !== currentIdentity.email) set.add(email); });
+        if (team.memberEmails.some(e => normalizeEmail(e) === normalizeEmail(currentIdentity.email))) {
+          team.memberEmails.forEach(email => {
+            if (normalizeEmail(email) === normalizeEmail(currentIdentity.email)) return;
+            // team.memberEmailsは自由入力なので、実際にDriveへサインインした際の正しい大文字・
+            // 小文字表記（displayedAllUsersData/driveFileIdByEmailのキー）に解決してから返す —
+            // そうしないと、この一覧を素通しした先（代理登録の宛先選択・
+            // persistTeammateCandidateAdd等のdriveFileIdByEmail[targetEmail]検索）が表記の
+            // 食い違いで見つからず、「対象メンバーのデータファイルが見つかりませんでした」と
+            // なってしまう（新規候補者の代理登録で実際に発生した不具合）。
+            const resolved = resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email;
+            set.add(resolved);
+          });
         }
       });
       return Array.from(set);
-    }, [teams, currentIdentity, isCurrentUserMiddle]);
+    }, [teams, currentIdentity, isCurrentUserMiddle, displayedAllUsersData]);
 
     // 表示名付きの管理下メンバー一覧 — スプレッドシート取込み（チームメンバー分も含める場合の
     // 担当者マッピング選択肢）で使う。
