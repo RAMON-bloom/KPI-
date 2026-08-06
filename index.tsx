@@ -446,18 +446,23 @@ interface Candidate {
   resumeFile?: { name: string; }; // for backward compatibility
   resumeFiles?: { name: string; }[];
   interviewAudioFile?: { name: string; } | null;
+  // Legacy: used to hold every AI-generated interview-log/audio summary concatenated into one
+  // ever-growing string (each new upload either overwrote it (audio) or appended a "---面談ログ
+  // 「X」(date)より---" block (Drive logs/files)). Superseded by `memos` below, which gives each
+  // interview its own independent, titled entry instead. Kept only so pre-existing content isn't
+  // silently lost: shown as a fallback entry until the first time any memo is added/edited, at
+  // which point it's folded into `memos` and this field is cleared (see PipelineCandidateCard's
+  // displayMemos/commitMemos).
   interviewSummary?: string;
   // Legacy single free-text memo — superseded by `memos` below (a titled, multi-entry list).
   // Kept only so a candidate's pre-existing note isn't silently lost: displayed as a fallback
   // single entry until the first time any memo is added/edited, at which point it's folded into
   // `memos` and this field is cleared (see PipelineCandidateCard's displayMemos/commitMemos).
   interviewMemo?: string;
-  // Free-form, manually-typed notes — deliberately separate from interviewSummary (AI-generated
-  // from audio/Meet transcripts, and cleared whenever a new audio file is uploaded) so a
-  // recruiter's own written notes are never silently wiped out by that AI flow. Each entry has
-  // its own title (so several distinct notes — 面談メモ, 見送り理由, etc. — don't have to share
-  // one big text block) and an updatedAt timestamp set automatically whenever that entry is
-  // edited, never hand-entered.
+  // Titled, independently-timestamped notes — each面談ログ（Meet議事録・面談音声）の要約は取り込む
+  // たびにここへ1件ずつ追加され（summarizeAndAppendInterviewLog／handleAudioFile参照）、面談ごと
+  // に個別のタイトル編集・削除ができる。手書きのメモ（面談メモ、見送り理由等）も同じ場所に
+  // 自由に追加できる。updatedAtはそのエントリが保存されるたびに自動設定される（手入力しない）。
   memos?: MemoEntry[];
   createdAt: string; // ISO string
   isHidden?: boolean;
@@ -3723,6 +3728,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '【不具合修正】上記の続報として、より根本的な原因を特定して修正。アプリ起動直後、Google Drive上の既存データファイルの場所を確認できるより前の一瞬の間に何らかの保存が走ってしまうと、既存ユーザーなのに「新規ユーザー」と誤認され、同じ人のデータファイルがもう1つ余分に作られてしまう不具合があった。以後その端末での編集はすべてその余分な方のファイルにしか保存されず、他のユーザーからは元のファイルの古い内容しか見えない、という状態になっていた。この保存が発生するタイミングをファイルの場所の確認が完了した後まで確実に待つよう修正し、再発しないようにした。また、万が一すでに同じ人のファイルが複数できてしまっていた場合に備え、複数見つかった場合は必ず一番最近更新された方を使うようにした（過去に作られてしまった古い余分なファイルが優先されてしまう事態を避ける）',
       '候補者パイプラインの「候補者一覧を更新」ボタンの隣に「自分のパイプラインをDriveに保存し直す」ボタンを追加。上記の不具合で自分のデータが正しく反映されていないかもしれない場合に、今このブラウザに表示されている内容をそのままGoogleドライブへ強制的に保存し直せます（各自ボタンを1回押していただくと、過去に発生した反映漏れの解消に役立ちます）',
       '【不具合修正】ミドルの人が、代理登録できるはずのメンバーの新規候補者を登録しようとすると「対象メンバーのデータファイルが見つかりませんでした」と表示され登録できない不具合を修正。チーム設定に登録されたメールアドレスの大文字・小文字の表記が実際のサインインメールと食い違っている場合に、代理登録先の候補一覧がその食い違ったままの表記で扱われてしまい、実際の保存先を探す段になって見つからなくなっていたのが原因でした',
+      '候補者の面談ログ（Google Meetの議事録・面談音声）のAI要約を、面談ごとに分けて保存できるようにした。従来は音声をアップロードすると前回分の要約が上書きされ、議事録を取り込んだ場合も1つの文字列にすべて連結されて読みづらくなっていたが、今後は面談ログ・音声を取り込むたびに「メモ」欄へ1件ずつ独立した要約として追加され、それぞれ個別にタイトルの変更・内容の編集・削除ができる。既存候補者の従来の面談要約（複数回分が連結されたもの）は「面談要約（旧形式・統合済み）」という1件のメモとしてそのまま残るので、内容が消えることはない',
     ],
   },
   {
@@ -5354,7 +5360,7 @@ const CandidateModal: React.FC<{
             }
         }
 
-        setCandidate(prev => ({ ...prev, interviewAudioFile: { name: audioFile.name }, interviewSummary: '' }));
+        setCandidate(prev => ({ ...prev, interviewAudioFile: { name: audioFile.name } }));
         setIsGeneratingInterviewSummary(true);
 
         try {
@@ -5380,9 +5386,18 @@ const CandidateModal: React.FC<{
                 extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
             ]);
 
+            // 面談ごとに分けて保存する — memosに1件ずつ追加するので、複数の音声を取り込んでも
+            // 前回分が消えずに残る。
+            const dateLabel = new Date().toLocaleDateString('ja-JP');
+            const newMemo: MemoEntry = {
+                id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                title: `面談ログ（音声: ${audioFile.name}・${dateLabel}）`,
+                content: response.text.trim(),
+                updatedAt: new Date().toISOString(),
+            };
             setCandidate(prev => ({
                 ...prev,
-                interviewSummary: response.text.trim(),
+                memos: [...(prev.memos || []), newMemo],
                 age: basicInfo.age ?? prev.age,
                 salary: basicInfo.salary ?? prev.salary,
                 phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
@@ -5392,7 +5407,7 @@ const CandidateModal: React.FC<{
         } catch (error) {
             console.error("Error generating interview summary:", error);
             alert('AIによる面談要約の生成中にエラーが発生しました。');
-            setCandidate(prev => ({ ...prev, interviewAudioFile: null, interviewSummary: '' }));
+            setCandidate(prev => ({ ...prev, interviewAudioFile: null }));
         } finally {
             setIsGeneratingInterviewSummary(false);
         }
@@ -5418,7 +5433,6 @@ const CandidateModal: React.FC<{
         setCandidate(prev => ({
             ...prev,
             interviewAudioFile: null,
-            interviewSummary: '',
         }));
     };
 
@@ -5452,6 +5466,8 @@ const CandidateModal: React.FC<{
     // Drive-fetched/plain-text logs, or a multimodal {parts} array (inlineData + instruction)
     // for PDF/Word files, letting Gemini read the document itself instead of this app trying to
     // extract text from those formats client-side.
+    // 面談ごとに分けて保存する — 複数の面談ログを取り込んでも、それぞれ独立したメモとして
+    // memosに追加されるので、1つの文字列に連結されて読みづらくなることがない。
     const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
         setIsSummarizingInterviewLog(true);
         try {
@@ -5460,10 +5476,15 @@ const CandidateModal: React.FC<{
                 ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
                 extractCandidateBasicInfo(contents),
             ]);
-            const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
+            const newMemo: MemoEntry = {
+                id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                title: `面談ログ（${sourceLabel}・${dateLabel}）`,
+                content: response.text.trim(),
+                updatedAt: new Date().toISOString(),
+            };
             setCandidate(prev => ({
                 ...prev,
-                interviewSummary: prev.interviewSummary ? `${prev.interviewSummary}\n\n${entry}` : entry,
+                memos: [...(prev.memos || []), newMemo],
                 age: basicInfo.age ?? prev.age,
                 salary: basicInfo.salary ?? prev.salary,
                 phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
@@ -5854,19 +5875,23 @@ const CandidateModal: React.FC<{
                     </div>
                 </div>
                 <div className="form-group form-group-span-3">
-                    <label htmlFor="interviewSummary">面談要約 (AI)</label>
-                    <div className="summary-wrapper">
-                        <textarea
-                            id="interviewSummary"
-                            name="interviewSummary"
-                            value={candidate.interviewSummary}
-                            onChange={handleChange}
-                            rows={5}
-                            placeholder={isGeneratingInterviewSummary ? "AIが音声データを解析し、要約を生成中です..." : "面談の音声ファイルをアップロードすると、ここに要約が自動生成されます。"}
-                            disabled={isGeneratingInterviewSummary}
-                        />
-                        {isGeneratingInterviewSummary && <div className="spinner"></div>}
-                    </div>
+                    <label>面談ログ（AI要約・面談ごとに保存されます）</label>
+                    {candidate.memos && candidate.memos.length > 0 ? (
+                        <div className="file-list">
+                            {candidate.memos.map(memo => (
+                                <div key={memo.id} className="file-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                    <strong>{memo.title}</strong>
+                                    <p className="form-helper-text" style={{ whiteSpace: 'pre-wrap' }}>{memo.content}</p>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <p className="form-helper-text">
+                            {(isGeneratingInterviewSummary || isSummarizingInterviewLog)
+                                ? 'AIが要約を生成中です...'
+                                : '面談の音声ファイルや議事録を取り込むと、面談ごとの要約がここに追加されます（登録後、候補者カードから編集・削除できます）。'}
+                        </p>
+                    )}
                  </div>
                  <div className="form-group form-group-span-3">
                     <label htmlFor="interviewMemo">面談メモ（手動）</label>
@@ -7861,7 +7886,7 @@ const PipelineCandidateCard: React.FC<{
       if (!window.confirm('既存の音声ファイルを置き換えますか？')) return;
     }
     const audioFileInfo = { name: audioFile.name };
-    onSave({ ...c, interviewAudioFile: audioFileInfo, interviewSummary: '' });
+    onSave({ ...c, interviewAudioFile: audioFileInfo });
     setIsGeneratingInterviewSummary(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
@@ -7872,10 +7897,22 @@ const PipelineCandidateCard: React.FC<{
         ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } }),
         extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
       ]);
+      // 面談ごとに分けて保存する — 以前は毎回interviewSummaryを丸ごと上書きしていたため、
+      // 新しい音声をアップロードすると前回分の要約が消えてしまっていた。今はmemosに1件ずつ
+      // 追加するので、過去の面談分もすべて残る。
+      const dateLabel = new Date().toLocaleDateString('ja-JP');
+      const newMemo: MemoEntry = {
+        id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        title: `面談ログ（音声: ${audioFile.name}・${dateLabel}）`,
+        content: response.text.trim(),
+        updatedAt: new Date().toISOString(),
+      };
       onSave({
         ...c,
         interviewAudioFile: audioFileInfo,
-        interviewSummary: response.text.trim(),
+        memos: [...displayMemos, newMemo],
+        interviewMemo: undefined,
+        interviewSummary: undefined,
         age: basicInfo.age ?? c.age,
         salary: basicInfo.salary ?? c.salary,
         phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
@@ -7884,7 +7921,7 @@ const PipelineCandidateCard: React.FC<{
     } catch (error) {
       console.error("Error generating interview summary:", error);
       alert('AIによる面談要約の生成中にエラーが発生しました。');
-      onSave({ ...c, interviewAudioFile: null, interviewSummary: '' });
+      onSave({ ...c, interviewAudioFile: null });
     } finally {
       setIsGeneratingInterviewSummary(false);
     }
@@ -7910,7 +7947,7 @@ const PipelineCandidateCard: React.FC<{
     if (e.target.files && e.target.files.length > 0) handleAudioFile(e.target.files);
   };
   const handleRemoveAudioFile = () => {
-    onSave({ ...c, interviewAudioFile: null, interviewSummary: '' });
+    onSave({ ...c, interviewAudioFile: null });
   };
 
   // 面談ログ（Google Meet議事録）検索・取込み — CandidateModal（新規登録時）専用だった機能を、
@@ -7940,6 +7977,9 @@ const PipelineCandidateCard: React.FC<{
     }
   };
 
+  // 面談ごとに分けて保存する — 以前は1つのinterviewSummary文字列にすべての面談ログの要約を
+  // 連結していたため、どこからどこまでが1回分の面談かが読みづらかった。今は面談ログ1件ごとに
+  // 独立したメモ（memos）として追加するので、それぞれ個別にタイトル編集・削除ができる。
   const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
     setIsSummarizingInterviewLog(true);
     try {
@@ -7948,10 +7988,17 @@ const PipelineCandidateCard: React.FC<{
         ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
         extractCandidateBasicInfo(contents),
       ]);
-      const entry = `--- 面談ログ「${sourceLabel}」(${dateLabel}) より ---\n${response.text.trim()}`;
+      const newMemo: MemoEntry = {
+        id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        title: `面談ログ（${sourceLabel}・${dateLabel}）`,
+        content: response.text.trim(),
+        updatedAt: new Date().toISOString(),
+      };
       onSave({
         ...c,
-        interviewSummary: c.interviewSummary ? `${c.interviewSummary}\n\n${entry}` : entry,
+        memos: [...displayMemos, newMemo],
+        interviewMemo: undefined,
+        interviewSummary: undefined,
         age: basicInfo.age ?? c.age,
         salary: basicInfo.salary ?? c.salary,
         phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
@@ -8040,15 +8087,20 @@ const PipelineCandidateCard: React.FC<{
     e.target.value = '';
   };
 
-  // メモ: c.memos is the source of truth once anything has been saved to it; before that, a
-  // legacy single-field interviewMemo (if any) is shown as a stand-in single entry. The very
-  // first add/edit/delete folds that legacy value into memos for real and clears interviewMemo.
+  // メモ: c.memos is the source of truth once anything has been saved to it; before that, two
+  // legacy single-field values (if any) are shown as stand-in entries — interviewMemo (手書きの
+  // 面談メモ) and interviewSummary (面談ログ・音声からAIが生成し、複数回分を1つの文字列に連結
+  // していた旧方式の要約)。どちらも空でなければ両方フォールバック表示する。The very first add/
+  // edit/delete folds whichever legacy values are present into memos for real and clears them.
   const displayMemos: MemoEntry[] = c.memos && c.memos.length > 0
     ? c.memos
-    : (c.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: c.interviewMemo, updatedAt: '' }] : []);
+    : [
+        ...(c.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: c.interviewMemo, updatedAt: '' }] : []),
+        ...(c.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約（旧形式・統合済み）', content: c.interviewSummary, updatedAt: '' }] : []),
+      ];
 
   const commitMemos = (memos: MemoEntry[]) => {
-    onSave({ ...c, memos, interviewMemo: undefined });
+    onSave({ ...c, memos, interviewMemo: undefined, interviewSummary: undefined });
   };
   const updateMemo = (id: string, patch: Partial<Pick<MemoEntry, 'title' | 'content'>>) => {
     commitMemos(displayMemos.map(m => (m.id === id ? { ...m, ...patch, updatedAt: new Date().toISOString() } : m)));
@@ -8623,16 +8675,8 @@ const PipelineCandidateCard: React.FC<{
                         <p className="info-value summary-text">{c.summary || '概要がありません。'}</p>
                     )}
                 </div>
-                <div className="candidate-info-item summary-item">
-                    <span className="info-label">面談要約 (AI)</span>
-                    {candidateIsOwn ? (
-                        <InlineTextField multiline rows={16} value={c.interviewSummary || ''} onCommit={(v) => commitCandidateField('interviewSummary', v)} placeholder="面談の音声ファイルをアップロードすると自動生成されます" ariaLabel="面談要約" className="summary-text interview-summary-text" />
-                    ) : (
-                        <p className="info-value summary-text">{c.interviewSummary || '面談要約はありません。'}</p>
-                    )}
-                </div>
                 <div className="candidate-info-item summary-item memo-list-section">
-                    <span className="info-label">メモ</span>
+                    <span className="info-label">面談ログ・メモ</span>
                     <div className="memo-list">
                         {displayMemos.map(memo => (
                             <div key={memo.id} className="memo-entry">
