@@ -3729,6 +3729,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者パイプラインの「候補者一覧を更新」ボタンの隣に「自分のパイプラインをDriveに保存し直す」ボタンを追加。上記の不具合で自分のデータが正しく反映されていないかもしれない場合に、今このブラウザに表示されている内容をそのままGoogleドライブへ強制的に保存し直せます（各自ボタンを1回押していただくと、過去に発生した反映漏れの解消に役立ちます）',
       '【不具合修正】ミドルの人が、代理登録できるはずのメンバーの新規候補者を登録しようとすると「対象メンバーのデータファイルが見つかりませんでした」と表示され登録できない不具合を修正。チーム設定に登録されたメールアドレスの大文字・小文字の表記が実際のサインインメールと食い違っている場合に、代理登録先の候補一覧がその食い違ったままの表記で扱われてしまい、実際の保存先を探す段になって見つからなくなっていたのが原因でした',
       '候補者の面談ログ（Google Meetの議事録・面談音声）のAI要約を、面談ごとに分けて保存できるようにした。従来は音声をアップロードすると前回分の要約が上書きされ、議事録を取り込んだ場合も1つの文字列にすべて連結されて読みづらくなっていたが、今後は面談ログ・音声を取り込むたびに「メモ」欄へ1件ずつ独立した要約として追加され、それぞれ個別にタイトルの変更・内容の編集・削除ができる。既存候補者の従来の面談要約（複数回分が連結されたもの）は「面談要約（旧形式・統合済み）」という1件のメモとしてそのまま残るので、内容が消えることはない',
+      'ミドルの人が、選考スケジュール カレンダー上で自分の管理下メンバーの選考予定・掘り起しリマインダーのバッジを直接クリックして編集できるようにした（従来は日付欄をクリックして候補者を選び直す必要があり、バッジそのものは自分の分しかクリックできなかった）',
     ],
   },
   {
@@ -7045,7 +7046,12 @@ const PipelineCalendarView: React.FC<{
     onDayClick: (dateStr: string) => void;
     onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
     onEditRevival: (candidate: Candidate) => void;
-}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival }) => {
+    // ミドルが自分の管理下メンバーの選考予定・掘り起しリマインダーも、カレンダーのバッジを
+    // 直接クリックして編集できるようにするための判定材料 — PipelineCandidateCardの
+    // isManagedByMiddleと同じ考え方（isOwnEventとは別軸で、両方trueにはならない）。
+    isCurrentUserMiddle: boolean;
+    middleManagedMemberEmails: string[];
+}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival, isCurrentUserMiddle, middleManagedMemberEmails }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
@@ -7112,6 +7118,9 @@ const PipelineCalendarView: React.FC<{
                     <div className="pipeline-calendar-events">
                         {events.map((ev, idx) => {
                             const isOwnEvent = !ev.candidate.ownerEmail || ev.candidate.ownerEmail === currentUserEmail;
+                            const isManagedByMiddle = !isOwnEvent && !!ev.candidate.ownerEmail
+                                && isCurrentUserMiddle && middleManagedMemberEmails.includes(ev.candidate.ownerEmail);
+                            const isEditableEvent = isOwnEvent || isManagedByMiddle;
                             if (ev.kind === 'revival') {
                                 const handleRevivalActivate = (e: React.SyntheticEvent) => {
                                     e.stopPropagation();
@@ -7120,12 +7129,12 @@ const PipelineCalendarView: React.FC<{
                                 return (
                                     <div
                                         key={idx}
-                                        className={`pipeline-calendar-event pipeline-calendar-event-revival ${isOwnEvent ? 'is-editable' : ''}`}
-                                        title={`掘り起し: ${ev.candidate.name}${ev.candidate.revival?.nextAction ? ` / ${ev.candidate.revival.nextAction}` : ''}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
-                                        role={isOwnEvent ? 'button' : undefined}
-                                        tabIndex={isOwnEvent ? 0 : undefined}
-                                        onClick={isOwnEvent ? handleRevivalActivate : undefined}
-                                        onKeyDown={isOwnEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRevivalActivate(e); } } : undefined}
+                                        className={`pipeline-calendar-event pipeline-calendar-event-revival ${isEditableEvent ? 'is-editable' : ''}`}
+                                        title={`掘り起し: ${ev.candidate.name}${ev.candidate.revival?.nextAction ? ` / ${ev.candidate.revival.nextAction}` : ''}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
+                                        role={isEditableEvent ? 'button' : undefined}
+                                        tabIndex={isEditableEvent ? 0 : undefined}
+                                        onClick={isEditableEvent ? handleRevivalActivate : undefined}
+                                        onKeyDown={isEditableEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRevivalActivate(e); } } : undefined}
                                     >
                                         <span className="pipeline-calendar-event-stage">掘り起し</span>
                                         {ev.candidate.name}
@@ -7139,13 +7148,13 @@ const PipelineCalendarView: React.FC<{
                             return (
                                 <div
                                     key={idx}
-                                    className={`pipeline-calendar-event ${isOwnEvent ? 'is-editable' : ''}`}
+                                    className={`pipeline-calendar-event ${isEditableEvent ? 'is-editable' : ''}`}
                                     style={{ '--badge-color': STAGE_COLOR_MAP[ev.application.stage] } as React.CSSProperties}
-                                    title={`${ev.application.scheduledTime ? `${ev.application.scheduledTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isOwnEvent ? ' — クリックして編集' : ''}`}
-                                    role={isOwnEvent ? 'button' : undefined}
-                                    tabIndex={isOwnEvent ? 0 : undefined}
-                                    onClick={isOwnEvent ? handleEventActivate : undefined}
-                                    onKeyDown={isOwnEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEventActivate(e); } } : undefined}
+                                    title={`${ev.application.scheduledTime ? `${ev.application.scheduledTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
+                                    role={isEditableEvent ? 'button' : undefined}
+                                    tabIndex={isEditableEvent ? 0 : undefined}
+                                    onClick={isEditableEvent ? handleEventActivate : undefined}
+                                    onKeyDown={isEditableEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEventActivate(e); } } : undefined}
                                 >
                                     <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.application.stage]}</span>
                                     {ev.application.scheduledTime && <span className="pipeline-calendar-event-time">{ev.application.scheduledTime}</span>}
@@ -9688,6 +9697,8 @@ const CandidatePipelineView: React.FC<{
                         onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
                         onEditApplication={handleOpenApplicationModal}
                         onEditRevival={handleOpenRevivalModal}
+                        isCurrentUserMiddle={isCurrentUserMiddle}
+                        middleManagedMemberEmails={middleManagedMemberEmails}
                     />
                 </div>
             </div>
