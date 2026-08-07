@@ -15,7 +15,7 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, GoogleIdentity } from './services/googleAuth';
+import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
@@ -3719,6 +3719,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-08-07',
+    items: [
+      '【不具合修正】アプリを開いてしばらく（約1時間）経つと、勝手にログイン状態が切れてしまい、入力してもGoogleドライブに保存できなくなる不具合を修正した。Googleログインの有効期限が切れる少し前に、画面の再ログイン操作なしで自動的に期限を延長し続けるようにしたので、タブを開いたまま作業を続けても途中でログアウトされなくなります。また、期限が切れた直後に保存や再読み込みが走った場合でも、いったん自動で再ログインを試みてから処理するようにしたため、「ログインが必要です」で保存が失敗したり、再読み込みでログイン画面に戻されたりすることがなくなりました（自動での再ログインができない場合のみ、従来どおりログイン画面が表示されます）',
+    ],
+  },
   {
     date: '2026-08-02',
     items: [
@@ -11638,19 +11644,38 @@ const App: React.FC = () => {
   };
 
 
-  // Restore the Google session, if the access token from earlier in this browser tab's
-  // session is still valid. We deliberately do NOT attempt a network re-auth here: any
-  // token request not triggered by a real click gets blocked by the browser's popup
-  // blocker, so it would only add a delay before showing the login screen anyway. Once
-  // expired/cleared, signIn() (called from the login button) tries a silent-if-possible
-  // flow first using the last-known email, so returning users still get a near-instant
-  // re-login with just one click.
+  // Restore the Google session on load. If the access token from earlier in this browser tab's
+  // session is still valid, use it directly (instant, no network). If it's already expired —
+  // the common case when the page is reloaded more than ~1h after signing in, which is exactly
+  // when the app used to bounce the user back to the login screen "on its own" — try ONE silent
+  // token refresh using the last-known email before giving up. That refresh opens no popup (it
+  // reuses the browser's still-valid Google session), so it restores the session with zero
+  // clicks; only if it genuinely can't (the browser's own Google session has ended, or consent
+  // was revoked) do we fall back to the login screen, where a single click re-authenticates.
   useEffect(() => {
+    let cancelled = false;
     const session = getCurrentSession();
     if (session) {
       setCurrentIdentity(session.identity);
+      setIsInitialized(true);
+      return;
     }
-    setIsInitialized(true);
+    const lastEmail = getLastKnownEmail();
+    if (!lastEmail) {
+      setIsInitialized(true);
+      return;
+    }
+    (async () => {
+      try {
+        const identity = await refreshTokenSilently();
+        if (!cancelled) setCurrentIdentity(identity);
+      } catch {
+        // Silent restore not possible — the login screen (one-click re-auth) will show instead.
+      } finally {
+        if (!cancelled) setIsInitialized(true);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // The signed-in Google account's email is always the current user; register it
@@ -12377,6 +12402,64 @@ const App: React.FC = () => {
     return () => {
       unsubscribe();
       clearInterval(intervalId);
+    };
+  }, [currentIdentity, driveFileId]);
+
+  // Keep the Google access token fresh for as long as this tab stays open. The token Google
+  // hands back only lives ~1 hour; once it lapses, every Drive read/write starts failing and —
+  // after a reload — the app falls back to the login screen. That was the root cause of the
+  // "しばらく使っていると勝手にログアウトして保存できなくなる" bug. The 401-retry inside
+  // authorizedFetch can't prevent it on its own because getCurrentSession() returns null the
+  // instant the token expires. So here we proactively re-request a token silently (no popup —
+  // reuses the browser's still-valid Google session) a few minutes before it expires, which
+  // refreshes expiresAt in sessionStorage and keeps the session alive indefinitely.
+  useEffect(() => {
+    if (!currentIdentity) return;
+    const email = currentIdentity.email;
+    let cancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    const REFRESH_MARGIN_MS = 5 * 60 * 1000;  // refresh 5 min before the token actually expires
+    const MIN_DELAY_MS = 10 * 1000;
+    const RETRY_DELAY_MS = 60 * 1000;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const expiresAt = getSessionExpiresAt();
+      const delay = expiresAt
+        ? Math.max(MIN_DELAY_MS, expiresAt - Date.now() - REFRESH_MARGIN_MS)
+        : MIN_DELAY_MS;
+      timerId = setTimeout(runRefresh, delay);
+    };
+
+    const runRefresh = async () => {
+      if (cancelled) return;
+      if (timerId) { clearTimeout(timerId); timerId = null; }
+      try {
+        await refreshTokenSilently();
+        // Token renewed — if a save had failed while the session was briefly lapsed, retry it now.
+        retryPendingSyncIfNeeded(email, driveFileId, setDriveFileId);
+        scheduleNext();
+      } catch {
+        // Silent refresh failed (e.g. the browser's own Google session ended). Leave the current
+        // session in place and try again shortly; a manual re-login still recovers everything.
+        if (!cancelled) timerId = setTimeout(runRefresh, RETRY_DELAY_MS);
+      }
+    };
+
+    // Also refresh as soon as the user returns to a tab that was backgrounded long enough for the
+    // token to have (nearly) expired while background timers were throttled by the browser.
+    const handleVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const expiresAt = getSessionExpiresAt();
+      if (!expiresAt || expiresAt - Date.now() < REFRESH_MARGIN_MS) runRefresh();
+    };
+
+    scheduleNext();
+    document.addEventListener('visibilitychange', handleVisible);
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisible);
     };
   }, [currentIdentity, driveFileId]);
 

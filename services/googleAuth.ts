@@ -175,6 +175,25 @@ export function getCurrentSession(): { accessToken: string; identity: GoogleIden
 }
 
 /**
+ * Epoch ms at which the stored access token expires — read WITHOUT the "drop it once expired"
+ * gate that getCurrentSession/getStoredSession apply, so a caller can see the real expiry even
+ * as it approaches (or has just passed). Used to schedule a proactive silent refresh a few
+ * minutes before the token lapses, keeping an open tab's session alive indefinitely instead of
+ * letting it die ~1h in (which is what made the app "log itself out" and stop saving).
+ * Returns null if there's no stored session at all.
+ */
+export function getSessionExpiresAt(): number | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const session: StoredSession = JSON.parse(raw);
+    return typeof session.expiresAt === 'number' ? session.expiresAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Signs the user in. Called from a click handler, so — unlike an automatic page-load
  * attempt — the browser allows the popup this opens. Tries silently first (skips the
  * account-chooser/consent screen if this browser already has an active Google session and

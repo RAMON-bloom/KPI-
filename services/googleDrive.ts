@@ -14,8 +14,22 @@ export interface DriveFileRef {
 }
 
 async function authorizedFetch(url: string, init: RequestInit = {}, retried = false): Promise<Response> {
-  const session = getCurrentSession();
-  if (!session) throw new Error('ログインが必要です。');
+  let session = getCurrentSession();
+  // The access token is dropped locally the instant it expires (getCurrentSession returns null
+  // once past expiresAt). Previously this threw "ログインが必要です" right here — which is why,
+  // about an hour into a session, every save suddenly started failing and the app looked as if
+  // it had spontaneously logged the user out. Instead, try a silent token refresh first (no
+  // popup — it reuses the browser's still-valid Google session), exactly like the 401 path
+  // below does for a token the server rejects. Only give up if that refresh also fails.
+  if (!session) {
+    try {
+      await refreshTokenSilently();
+    } catch {
+      /* fall through to the throw below */
+    }
+    session = getCurrentSession();
+    if (!session) throw new Error('ログインが必要です。');
+  }
   const res = await fetch(url, {
     ...init,
     // ブラウザのHTTPキャッシュを経由させない — 特に`files/{id}?alt=media`の読み取り
