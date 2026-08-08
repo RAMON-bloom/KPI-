@@ -820,6 +820,11 @@ interface Team {
   memberEmails: string[];
   createdBy: string;
   createdAt: string;
+  // Which media (scouting sources) this team's members enter/track KPIs for, by MediaEntry.id.
+  // undefined = no restriction (every currently-active media applies, same as before this field
+  // existed) — a team only narrows down once someone explicitly picks a subset in チーム管理.
+  // Once set, newly-created media do NOT automatically join it; an editor must add them by hand.
+  mediaIds?: string[];
 }
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
@@ -3723,6 +3728,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-08-09',
     items: [
       '候補者のレジュメ登録が、PDFに加えてWordファイル（.doc/.docx）でもアップロードできるようになった。氏名・現職・学歴・概要などの自動入力は従来どおり行われます',
+      '「チーム管理」で、チームごとに使用する媒体を利用中の媒体の中から複数選択できるようにした。選択すると、そのチームのメンバーの「実績入力」画面には選んだ媒体だけが表示され、必要な媒体のKPIだけを入力すればよくなります（未設定のチームは従来どおり登録されている媒体すべてが対象です）',
     ],
   },
   {
@@ -4328,6 +4334,7 @@ const TeamsModal: React.FC<{
     userOptions: { email: string; label: string }[];
     memberDepartments: Record<string, Department>;
     middleEmails: string[];
+    activeMedia: MediaEntry[];
     onClose: () => void;
     onCreateTeam: (name: string) => void;
     onRenameTeam: (teamId: string, name: string) => void;
@@ -4338,7 +4345,8 @@ const TeamsModal: React.FC<{
     onRevokeEditor: (email: string) => void;
     onSetMemberDepartment: (email: string, department: Department | null) => void;
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle }) => {
+    onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -4379,6 +4387,14 @@ const TeamsModal: React.FC<{
     const handleSaveEdit = (teamId: string) => {
         if (editedName.trim()) onRenameTeam(teamId, editedName.trim());
         setEditingTeamId(null);
+    };
+
+    // undefined mediaIds means "no restriction" — toggling from that state starts from the
+    // full active-media list (i.e. unchecking one item narrows down from "everything").
+    const handleToggleTeamMedia = (team: Team, mediaId: string, checked: boolean) => {
+        const current = team.mediaIds ?? activeMedia.map(m => m.id);
+        const next = checked ? [...current, mediaId] : current.filter(id => id !== mediaId);
+        onSetTeamMedia(team.id, next);
     };
 
     const handleAddMember = (teamId: string, emailOverride?: string) => {
@@ -4633,6 +4649,35 @@ const TeamsModal: React.FC<{
                                             <button onClick={() => handleAddMember(team.id)} className="submit-button">追加</button>
                                         </div>
                                     )}
+                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>使用する媒体</span>
+                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                            チェックした媒体だけが、このチームのメンバーの「実績入力」画面に表示されます。未設定（すべてチェック）の場合は、登録されている媒体すべてが対象になります。
+                                        </p>
+                                        {activeMedia.length === 0 ? (
+                                            <p className="no-data-message">利用中の媒体がまだ登録されていません。</p>
+                                        ) : isEditable ? (
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                                                {activeMedia.map(m => {
+                                                    const isChecked = team.mediaIds ? team.mediaIds.includes(m.id) : true;
+                                                    return (
+                                                        <label key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.9rem' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={isChecked}
+                                                                onChange={(e) => handleToggleTeamMedia(team, m.id, e.target.checked)}
+                                                            />
+                                                            {m.name}
+                                                        </label>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <span style={{ fontSize: '0.9rem' }}>
+                                                {team.mediaIds ? (team.mediaIds.length > 0 ? activeMedia.filter(m => team.mediaIds!.includes(m.id)).map(m => m.name).join('、') : '（なし）') : 'すべての媒体'}
+                                            </span>
+                                        )}
+                                    </div>
                                 </li>
                             ))}
                         </ul>
@@ -12261,6 +12306,19 @@ const App: React.FC = () => {
     return teams.find(t => t.memberEmails.includes(currentIdentity.email))?.id || null;
   }, [teams, currentIdentity]);
 
+  // 実績入力（DateEntryModal）に渡す媒体一覧 — 入力対象者（本人、またはミドル代理入力中は
+  // 代理対象のメンバー）が所属するチームで媒体が絞り込まれていれば、その媒体だけに限定する。
+  // 未所属、または絞り込み未設定（mediaIds未設定）のチームに所属する場合は、従来どおり
+  // 登録されている媒体すべてを対象にする。複数チームに所属する場合はmyTeamIdと同じく先頭の
+  // チームを採用する。
+  const entryActiveMedia = useMemo(() => {
+    const subjectEmail = middleEntryTargetEmail || currentIdentity?.email;
+    if (!subjectEmail) return activeMedia;
+    const subjectTeam = teams.find(t => t.memberEmails.includes(subjectEmail));
+    if (!subjectTeam?.mediaIds) return activeMedia;
+    return activeMedia.filter(m => subjectTeam.mediaIds!.includes(m.id));
+  }, [activeMedia, teams, middleEntryTargetEmail, currentIdentity]);
+
   // Seeds both team-scope selectors (チーム別 tab, パイプラインのチームスコープ) to the
   // signed-in user's own team the first time it becomes known, so they start pre-filled instead
   // of empty. Guarded to run only once so it never fights a later manual selection or clear.
@@ -12374,6 +12432,10 @@ const App: React.FC = () => {
 
   const handleRemoveTeamMember = (teamId: string, email: string) => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t)));
+  };
+
+  const handleSetTeamMedia = (teamId: string, mediaIds: string[]) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, mediaIds } : t)));
   };
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
@@ -13731,6 +13793,7 @@ const App: React.FC = () => {
           userOptions={pipelineUserOptions}
           memberDepartments={memberDepartments}
           middleEmails={middleEmails}
+          activeMedia={activeMedia}
           onClose={() => setIsTeamsModalOpen(false)}
           onCreateTeam={handleCreateTeam}
           onRenameTeam={handleRenameTeam}
@@ -13741,6 +13804,7 @@ const App: React.FC = () => {
           onRevokeEditor={handleRevokeTeamsEditor}
           onSetMemberDepartment={handleSetMemberDepartment}
           onToggleMiddle={handleToggleMiddle}
+          onSetTeamMedia={handleSetTeamMedia}
         />
       )}
       {isChangelogModalOpen && (
@@ -13778,7 +13842,7 @@ const App: React.FC = () => {
         <DateEntryModal
           date={selectedDate}
           initialValues={calendarEntriesByDate.get(selectedDate) || null}
-          activeMedia={activeMedia}
+          activeMedia={entryActiveMedia}
           subjectLabel={middleEntryTargetEmail ? (pipelineUserOptions.find(o => o.email === middleEntryTargetEmail)?.label || middleEntryTargetEmail) : undefined}
           onSave={middleEntryTargetEmail ? (date, values) => handleSaveMiddleEntry(middleEntryTargetEmail, date, values) : handleSaveEntry}
           onNavigate={middleEntryTargetEmail ? handleNavigateMiddleEntryDate(middleEntryTargetEmail) : handleNavigateEntryDate}
