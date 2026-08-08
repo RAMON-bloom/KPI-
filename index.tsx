@@ -4352,10 +4352,9 @@ const TeamsModal: React.FC<{
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
     const [newEditorEmail, setNewEditorEmail] = useState('');
-    // Open by default (matches this modal's appearance before these became foldable) — a user
-    // with many registered accounts can collapse whichever of these three they don't need right
-    // now instead of scrolling past them every time.
-    const [openSections, setOpenSections] = useState({ permissions: true, departments: true, middle: true });
+    // Collapsed by default — most visits are just to add/remove a team member, so these three
+    // (rarely touched) sections shouldn't force scrolling past them every time.
+    const [openSections, setOpenSections] = useState({ permissions: false, departments: false, middle: false });
     const toggleSection = (key: keyof typeof openSections) => setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
 
     const labelByEmail = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
