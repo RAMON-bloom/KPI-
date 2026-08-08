@@ -3720,6 +3720,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-08-09',
+    items: [
+      '候補者のレジュメ登録が、PDFに加えてWordファイル（.doc/.docx）でもアップロードできるようになった。氏名・現職・学歴・概要などの自動入力は従来どおり行われます',
+    ],
+  },
+  {
     date: '2026-08-07',
     items: [
       '【不具合修正】アプリを開いてしばらく（約1時間）経つと、勝手にログイン状態が切れてしまい、入力してもGoogleドライブに保存できなくなる不具合を修正した。Googleログインの有効期限が切れる少し前に、画面の再ログイン操作なしで自動的に期限を延長し続けるようにしたので、タブを開いたまま作業を続けても途中でログアウトされなくなります。また、期限が切れた直後に保存や再読み込みが走った場合でも、いったん自動で再ログインを試みてから処理するようにしたため、「ログインが必要です」で保存が失敗したり、再読み込みでログイン画面に戻されたりすることがなくなりました（自動での再ログインができない場合のみ、従来どおりログイン画面が表示されます）',
@@ -5059,6 +5065,27 @@ const resolveInterviewLogFile = (file: File): { mimeType: string; error?: string
  * ケースと同じ関数）で本文を取得する。バージョンによってresource_id/doc_id/urlのいずれかに
  * IDが入っているため、順に試す。
  */
+// レジュメの手動アップロードが対応する形式。file.type はドラッグ＆ドロップ時に空文字になる
+// ことがあるため、拡張子からも補完する（resolveInterviewLogFileと同じ考え方）。
+const RESUME_MIME_BY_EXTENSION: Record<string, string> = {
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+const RESUME_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // Gemini generateContentのinlineData実用上限に合わせた目安
+
+const resolveResumeFile = (file: File): { mimeType: string; error?: string } => {
+    const lowerName = file.name.toLowerCase();
+    const extension = Object.keys(RESUME_MIME_BY_EXTENSION).find(ext => lowerName.endsWith(ext));
+    if (!extension) {
+        return { mimeType: '', error: `対応していないファイル形式です（${file.name}）。.pdf / .doc / .docx のいずれかを選択してください。` };
+    }
+    if (file.size > RESUME_MAX_FILE_SIZE_BYTES) {
+        return { mimeType: '', error: `ファイルサイズが大きすぎます（上限20MB）: ${file.name}` };
+    }
+    return { mimeType: file.type || RESUME_MIME_BY_EXTENSION[extension] };
+};
+
 const extractGoogleDocIdFromGdocFile = (pointerFileText: string): string | null => {
     try {
         const parsed = JSON.parse(pointerFileText);
@@ -5259,28 +5286,30 @@ const CandidateModal: React.FC<{
     const handleResumeFile = async (files: FileList) => {
       if (!files || files.length === 0) return;
 
-      const pdfFiles = Array.from(files).filter(file => file.type === 'application/pdf');
-      if (pdfFiles.length === 0) {
-          alert('PDFファイルのみアップロードできます。');
-          return;
+      const resolvedFiles = Array.from(files).map(file => ({ file, ...resolveResumeFile(file) }));
+      const invalidFiles = resolvedFiles.filter(f => f.error);
+      if (invalidFiles.length > 0) {
+          alert(invalidFiles.map(f => f.error).join('\n'));
       }
+      const validFiles = resolvedFiles.filter((f): f is { file: File; mimeType: string; error?: undefined } => !f.error);
+      if (validFiles.length === 0) return;
 
       const existingFileNames = new Set(candidate.resumeFiles?.map(f => f.name) || []);
-      const newFiles = pdfFiles.filter(file => !existingFileNames.has(file.name));
+      const newFiles = validFiles.filter(f => !existingFileNames.has(f.file.name));
 
       if (newFiles.length === 0) {
         alert('アップロードしようとしたファイルは既に追加されています。');
         return;
       }
 
-      setCandidate(prev => ({ ...prev, resumeFiles: [...(prev.resumeFiles || []), ...newFiles.map(f => ({ name: f.name }))] }));
+      setCandidate(prev => ({ ...prev, resumeFiles: [...(prev.resumeFiles || []), ...newFiles.map(f => ({ name: f.file.name }))] }));
       setIsGenerating(true);
       try {
-          const fileParts = await Promise.all(newFiles.map(async (file) => {
+          const fileParts = await Promise.all(newFiles.map(async ({ file, mimeType }) => {
               const base64Data = await fileToBase64(file);
               return {
                   inlineData: {
-                      mimeType: file.type,
+                      mimeType,
                       data: base64Data,
                   },
               };
@@ -5676,16 +5705,16 @@ const CandidateModal: React.FC<{
               <div className="form-group-grid">
                   <div className="form-group form-group-span-3">
                       <label>レジュメ - 複数可</label>
-                      <p className="form-helper-text">PDFをアップロード（複数ファイルを追加すると情報は統合されます）、またはテキストを貼り付けると、氏名、現職、学歴、概要が自動入力されます。</p>
-                       <div 
-                          id="resume-drop-zone" 
-                          className={`drop-zone ${resumeDragActive ? 'drag-active' : ''}`} 
-                          onDragEnter={handleResumeDrag} 
-                          onDragLeave={handleResumeDrag} 
-                          onDragOver={handleResumeDrag} 
+                      <p className="form-helper-text">PDF・Wordファイル（.doc/.docx）をアップロード（複数ファイルを追加すると情報は統合されます）、またはテキストを貼り付けると、氏名、現職、学歴、概要が自動入力されます。</p>
+                       <div
+                          id="resume-drop-zone"
+                          className={`drop-zone ${resumeDragActive ? 'drag-active' : ''}`}
+                          onDragEnter={handleResumeDrag}
+                          onDragLeave={handleResumeDrag}
+                          onDragOver={handleResumeDrag}
                           onDrop={handleResumeDrop}
                         >
-                          <input ref={resumeInputRef} type="file" id="resume-upload" accept="application/pdf" onChange={handleResumeFileChange} multiple />
+                          <input ref={resumeInputRef} type="file" id="resume-upload" accept=".pdf,application/pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleResumeFileChange} multiple />
                           {candidate.resumeFiles && candidate.resumeFiles.length > 0 ? (
                               <div className="file-list">
                                   {candidate.resumeFiles.map(file => (
@@ -5696,11 +5725,11 @@ const CandidateModal: React.FC<{
                                   ))}
                               </div>
                           ) : (
-                              <p onClick={onResumeButtonClick}>ここにPDFファイルをドラッグ＆ドロップ、またはクリックして選択</p>
+                              <p onClick={onResumeButtonClick}>ここにPDF・Wordファイルをドラッグ＆ドロップ、またはクリックして選択</p>
                           )}
                       </div>
                       <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
-                          PDFが無い場合は、レジュメの本文をそのまま貼り付けても同じように自動入力できます。
+                          PDF・Wordファイルが無い場合は、レジュメの本文をそのまま貼り付けても同じように自動入力できます。
                       </p>
                       <textarea
                           value={resumeTextInput}
