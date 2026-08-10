@@ -642,6 +642,14 @@ section {
   border-top: 1px solid var(--border-color);
   padding: 0.5rem;
   min-height: 110px;
+  /* Grid items default to min-width: auto, meaning their column won't shrink below the
+     min-content size of whatever's inside — including unbreakable (white-space: nowrap) event
+     badge text. Without this, a day with a long candidate/company name badge forces its whole
+     column far wider than its 1fr share, shoving later columns (including the rightmost one)
+     off the visible grid — which .calendar-grid's overflow: hidden then clips outright. Setting
+     min-width: 0 here lets the column actually respect 1fr, so .pipeline-calendar-event's
+     existing text-overflow: ellipsis can do its job instead of blowing out the layout. */
+  min-width: 0;
   cursor: pointer;
   transition: background-color 0.2s;
   font-size: 0.85rem;
