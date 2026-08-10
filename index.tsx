@@ -728,6 +728,10 @@ interface UserData {
   // 別々の値を持てる — 自分タブとチームタブで見たい絞り込み条件が違うことが多いため。
   // 未保存のスコープはundefined（絞り込みなしから始まる、従来通り）。
   pipelineStageFilterDefaults?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
+  // 週間サマリー・各カレンダー（実績カレンダー／選考スケジュールカレンダー）の週の始まり表示
+  // 設定 — 未設定（既定）は従来通り日曜始まり、'saturday'なら土曜始まり（土〜金）に切り替わる。
+  // ヘッダーの「週の始まり」トグルで変更し、getStartOfWeek呼び出し側すべてがこれを参照する。
+  weekStartDay?: 'saturday';
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -873,14 +877,27 @@ interface TeamsConfig {
   middleEmails?: string[];
 }
 
-const getStartOfWeek = (date: Date): Date => {
+// weekStartsOn: 0 = 日曜始まり（既定）, 6 = 土曜始まり。週間サマリー・各カレンダーの表示形式
+// 切り替え（UserData.weekStartDay、ヘッダーの「週の始まり」トグル参照）に対応するため、どちらの
+// 曜日を週の先頭として扱うかを呼び出し元が指定できる。
+const getStartOfWeek = (date: Date, weekStartsOn: 0 | 6 = 0): Date => {
   const d = new Date(date);
-  const day = d.getDay(); // Sunday - 0, Monday - 1, ...
-  const diff = d.getDate() - day; // Adjust date to Sunday
+  const day = d.getDay(); // Sunday - 0, Monday - 1, ..., Saturday - 6
+  const diff = d.getDate() - ((day - weekStartsOn + 7) % 7); // Adjust date back to weekStartsOn
   d.setDate(diff);
   d.setHours(0, 0, 0, 0);
   return d;
 };
+
+// PipelineCalendarView・CalendarView共通: 月グリッドの曜日ヘッダーラベルと、月初1日目の前に
+// 空白セルを何個並べるか（=月初の曜日がweekStartsOn列から何列目に来るか）を、週の始まり設定に
+// 応じて算出する。
+const WEEKDAY_LABELS_SUNDAY_START = ['日', '月', '火', '水', '木', '金', '土'];
+const WEEKDAY_LABELS_SATURDAY_START = ['土', '日', '月', '火', '水', '木', '金'];
+const getWeekdayLabels = (weekStartsOn: 0 | 6): string[] =>
+  weekStartsOn === 6 ? WEEKDAY_LABELS_SATURDAY_START : WEEKDAY_LABELS_SUNDAY_START;
+const getLeadingEmptyDays = (firstOfMonthDayOfWeek: number, weekStartsOn: 0 | 6): number =>
+  (firstOfMonthDayOfWeek - weekStartsOn + 7) % 7;
 
 // 全ユーザー/チーム別タブの各カード（進捗・想定粗利・曜日別返信率）が個別に持つ「前月/次月」
 // ナビゲーション用 — offset=0は「今月」（他の箇所と同じくnullを返し、目標・達成率の表示など
@@ -1660,14 +1677,15 @@ const WeeklySummary: React.FC<{
   weeklyKpiTargets: Record<KpiKey, number>;
   onPrevWeek: () => void;
   onNextWeek: () => void;
-}> = ({ weekStartDate, data, weeklyKpiTargets, onPrevWeek, onNextWeek }) => {
+  weekStartsOn: 0 | 6;
+}> = ({ weekStartDate, data, weeklyKpiTargets, onPrevWeek, onNextWeek, weekStartsOn }) => {
   const endDate = new Date(weekStartDate);
   endDate.setDate(weekStartDate.getDate() + 6);
 
   const formatDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
   const weekRange = `${formatDate(weekStartDate)} - ${formatDate(endDate)}`;
 
-  const isThisWeek = getStartOfWeek(new Date()).getTime() === weekStartDate.getTime();
+  const isThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === weekStartDate.getTime();
 
   return (
     <div className="weekly-summary-container">
@@ -3646,15 +3664,16 @@ const CalendarView: React.FC<{
   onDayClick: (date: string) => void;
   onPrevMonth: () => void;
   onNextMonth: () => void;
-}> = ({ viewDate, entriesByDate, allMedia, onDayClick, onPrevMonth, onNextMonth }) => {
+  weekStartsOn: 0 | 6;
+}> = ({ viewDate, entriesByDate, allMedia, onDayClick, onPrevMonth, onNextMonth, weekStartsOn }) => {
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth();
-  
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayLocalString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  
-  const firstDayOfMonth = new Date(year, month, 1).getDay();
+
+  const firstDayOfMonth = getLeadingEmptyDays(new Date(year, month, 1).getDay(), weekStartsOn);
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
   const days = [];
@@ -3734,7 +3753,7 @@ const CalendarView: React.FC<{
         <button onClick={onNextMonth} aria-label="次の月へ">次月 &gt;</button>
       </div>
       <div className="calendar-grid-header">
-        {['日', '月', '火', '水', '木', '金', '土'].map(day => <div key={day}>{day}</div>)}
+        {getWeekdayLabels(weekStartsOn).map(day => <div key={day}>{day}</div>)}
       </div>
       <div className="calendar-grid">
         {days}
@@ -3753,6 +3772,15 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-08-10',
+    items: [
+      'ヘッダーに「週の始まり」の切り替え（日曜始まり／土曜始まり）を追加。実績カレンダー・選考スケジュールカレンダー・週間サマリー（合計・メンバー別）すべてに反映されます。切り替えるとこれらの表示は「今週」に戻ります',
+      '【不具合修正】パイプラインカレンダーで、選考予定の候補者名・企業名の表示が長い日があると、その日の列が本来の幅を超えて広がってしまい、右端（土曜日など）の日付が見えなくなることがあった不具合を修正',
+      '【不具合修正】お問い合わせのチャットで、開発者と投稿者がほぼ同時に返信した場合や、返信が届いた後に投稿者が別の操作（KPI入力等）を行った場合に、返信が保存されず消えてしまうことがあった不具合を修正',
+      '【不具合修正】候補者が複数社の書類選考・面接を通過した場合、書類選考通過数などのKPI実績が候補者1人につき1回を超えて重複してカウントされていた不具合を修正',
+    ],
+  },
   {
     date: '2026-08-09',
     items: [
@@ -7159,7 +7187,8 @@ const PipelineCalendarView: React.FC<{
     // isManagedByMiddleと同じ考え方（isOwnEventとは別軸で、両方trueにはならない）。
     isCurrentUserMiddle: boolean;
     middleManagedMemberEmails: string[];
-}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival, isCurrentUserMiddle, middleManagedMemberEmails }) => {
+    weekStartsOn: 0 | 6;
+}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival, isCurrentUserMiddle, middleManagedMemberEmails, weekStartsOn }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
@@ -7198,7 +7227,7 @@ const PipelineCalendarView: React.FC<{
     today.setHours(0, 0, 0, 0);
     const todayLocalString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
-    const firstDayOfMonth = new Date(year, month, 1).getDay();
+    const firstDayOfMonth = getLeadingEmptyDays(new Date(year, month, 1).getDay(), weekStartsOn);
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
     const days = [];
@@ -7284,7 +7313,7 @@ const PipelineCalendarView: React.FC<{
                 <button onClick={onNextMonth} aria-label="次の月へ">次月 &gt;</button>
             </div>
             <div className="calendar-grid-header">
-                {['日', '月', '火', '水', '木', '金', '土'].map(day => <div key={day}>{day}</div>)}
+                {getWeekdayLabels(weekStartsOn).map(day => <div key={day}>{day}</div>)}
             </div>
             <div className="calendar-grid pipeline-calendar-grid">
                 {days}
@@ -9099,12 +9128,13 @@ const CandidatePipelineView: React.FC<{
     // 始まる）。
     defaultStageFilters?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
     onSaveDefaultStageFilters: (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => void;
+    weekStartsOn: 0 | 6;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
-    onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters,
+    onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters, weekStartsOn,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
@@ -9807,6 +9837,7 @@ const CandidatePipelineView: React.FC<{
                         onEditRevival={handleOpenRevivalModal}
                         isCurrentUserMiddle={isCurrentUserMiddle}
                         middleManagedMemberEmails={middleManagedMemberEmails}
+                        weekStartsOn={weekStartsOn}
                     />
                 </div>
             </div>
@@ -10734,6 +10765,7 @@ const AllUsersDashboard: React.FC<{
   memberWeekStartDate: Date;
   onPrevMemberWeek: () => void;
   onNextMemberWeek: () => void;
+  weekStartsOn: 0 | 6;
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean; monthlyTrend: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
   onSaveSectionDefaults: () => void;
@@ -10753,7 +10785,7 @@ const AllUsersDashboard: React.FC<{
   onPrevDowMonth: () => void;
   onNextDowMonth: () => void;
 }> = ({
-  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
+  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
   funnelPeriodOverride = null,
   progressPeriodOverride, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
@@ -10791,7 +10823,7 @@ const AllUsersDashboard: React.FC<{
   }, [memberWeekStartDate]);
   const formatMemberWeekDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
   const memberWeekRange = `${formatMemberWeekDate(memberWeekStartDate)} - ${formatMemberWeekDate(memberWeeklyEndDate)}`;
-  const isMemberWeekThisWeek = getStartOfWeek(new Date()).getTime() === memberWeekStartDate.getTime();
+  const isMemberWeekThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === memberWeekStartDate.getTime();
   const candidatesAcrossUsers = useMemo(
     () => users.flatMap(user => allUsersData[user]?.candidates || []),
     [users, allUsersData]
@@ -11080,6 +11112,7 @@ const AllUsersDashboard: React.FC<{
             weeklyKpiTargets={aggregateWeeklyKpiTargets}
             onPrevWeek={onPrevWeek}
             onNextWeek={onNextWeek}
+            weekStartsOn={weekStartsOn}
           />
         </div>
       </section>
@@ -11733,6 +11766,38 @@ const App: React.FC = () => {
     setCurrentUserData(prev => (prev ? { ...prev, allUsersSectionDefaults } : prev));
   };
 
+  // 週間サマリー・各カレンダーの週の始まり — currentUserData.weekStartDayから毎レンダー導出
+  // する（他の設定同様、専用のstateは持たない）。getStartOfWeekへ渡す形（0=日曜, 6=土曜）に
+  // 揃えておく。
+  const weekStartsOn: 0 | 6 = currentUserData?.weekStartDay === 'saturday' ? 6 : 0;
+
+  // viewWeekStartDate/memberWeeklyWeekStartDateのuseState初期値は、currentUserDataがまだ
+  // 読み込まれる前（＝weekStartDayが分かる前）に一度だけ評価されるため、常に日曜始まりで
+  // 計算されてしまう。保存済みのweekStartDayが読み込めた直後に一度だけ、その設定での「今週」
+  // へ揃え直す — hasAppliedSectionDefaultsRefと同じ、一度だけ適用してその後のcurrentUserData
+  // 更新（KPI入力のたびに起きる）では再適用しないためのガード。
+  const hasAppliedWeekStartDayRef = useRef(false);
+  useEffect(() => {
+    if (hasAppliedWeekStartDayRef.current || !currentUserData) return;
+    hasAppliedWeekStartDayRef.current = true;
+    if (currentUserData.weekStartDay === 'saturday') {
+      setViewWeekStartDate(getStartOfWeek(new Date(), 6));
+      setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), 6));
+    }
+  }, [currentUserData]);
+
+  // ヘッダーの「週の始まり」トグルから呼ばれる。切り替えた瞬間、週間サマリー（合計・メンバー別
+  // 両方）の表示週を新しい基準での「今週」に揃え直す——過去の週を見ていた場合はカレンダー日数の
+  // ズレでどちらの基準でも同じ範囲を指し続けることはまずできない（週の始まりが変われば「同じ週」
+  // の定義自体がずれる）ため、他の同様の切り替え操作（月選択のリセット等）と同じく「今」に戻す
+  // のが最も分かりやすい。
+  const handleSetWeekStartDay = (value: 'sunday' | 'saturday') => {
+    setCurrentUserData(prev => (prev ? { ...prev, weekStartDay: value === 'saturday' ? 'saturday' : undefined } : prev));
+    const nextWeekStartsOn: 0 | 6 = value === 'saturday' ? 6 : 0;
+    setViewWeekStartDate(getStartOfWeek(new Date(), nextWeekStartsOn));
+    setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), nextWeekStartsOn));
+  };
+
   // 候補者パイプラインの「選考フェーズで絞り込み」— CandidatePipelineViewが現在チェックして
   // いるフェーズを、今表示中のスコープ（自分/全ユーザー/チーム/ユーザー別）ごとの既定値として
   // 保存する。上のhandleSaveAllUsersSectionDefaultsと同じ「今の状態をそのままデフォルトとして
@@ -11831,6 +11896,8 @@ const App: React.FC = () => {
       // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
       // 消えて見えていた。
       pipelineStageFilterDefaults: d.pipelineStageFilterDefaults,
+      // 同じ理由: 週の始まり設定も許可リストに無いと保存直後は効いていても再読み込みで消える。
+      weekStartDay: d.weekStartDay,
     });
 
     const cached = readLocalCache<UserData>(email);
@@ -14064,6 +14131,17 @@ const App: React.FC = () => {
                 <option value="AC">AssetCareer</option>
               </select>
             )}
+            {currentIdentity && (
+              <select
+                className="own-department-select"
+                value={weekStartsOn === 6 ? 'saturday' : 'sunday'}
+                onChange={(e) => handleSetWeekStartDay(e.target.value as 'sunday' | 'saturday')}
+                title="週間サマリー・カレンダー（実績カレンダー／選考スケジュールカレンダー）の週の始まりを切り替えます"
+              >
+                <option value="sunday">週の始まり: 日曜</option>
+                <option value="saturday">週の始まり: 土曜</option>
+              </select>
+            )}
             <button onClick={() => setIsTeamsModalOpen(true)} className="header-utility-button">チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)} className="header-utility-button">媒体管理</button>
             <button onClick={() => setIsHelpModalOpen(true)} className="header-utility-button">使い方</button>
@@ -14139,6 +14217,7 @@ const App: React.FC = () => {
                   onDayClick={setSelectedDate}
                   onPrevMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
                   onNextMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                  weekStartsOn={weekStartsOn}
                 />
               </div>
             </section>
@@ -14177,6 +14256,7 @@ const App: React.FC = () => {
                     weeklyKpiTargets={weeklyKpiTargets}
                     onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                     onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                    weekStartsOn={weekStartsOn}
                 />
               </div>
             </section>
@@ -14648,6 +14728,7 @@ const App: React.FC = () => {
                   memberWeekStartDate={memberWeeklyWeekStartDate}
                   onPrevMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  weekStartsOn={weekStartsOn}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
@@ -14749,6 +14830,7 @@ const App: React.FC = () => {
                   memberWeekStartDate={memberWeeklyWeekStartDate}
                   onPrevMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                   onNextMemberWeek={() => setMemberWeeklyWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                  weekStartsOn={weekStartsOn}
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
@@ -14820,6 +14902,7 @@ const App: React.FC = () => {
                 onAddManagedCandidate={persistTeammateCandidateAdd}
                 defaultStageFilters={currentUserData?.pipelineStageFilterDefaults}
                 onSaveDefaultStageFilters={handleSavePipelineStageFilterDefaults}
+                weekStartsOn={weekStartsOn}
             />
           </>
         )}
