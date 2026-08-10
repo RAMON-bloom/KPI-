@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -12262,10 +12262,14 @@ const App: React.FC = () => {
   };
 
   // スレッドへのメッセージ追加 — 投稿者本人（自分の投稿への追記）・開発者（誰の投稿にも返信
-  // 可能）の両方から呼ばれる。persistFeedbackUpdateがどちらの経路で書き込むかを判別するので、
-  // ここでは新しいmessages配列を組み立てて渡すだけでよい。getFeedbackThreadMessagesでレガシー
-  // のdeveloperReplyも取り込むため、最初の追記時にそちらは自然とmessages形式へ移行する。
-  const handleAddFeedbackMessage = (post: FeedbackPost & { authorEmail: string }, content: string) => {
+  // 可能）の両方から呼ばれる。あえてpersistFeedbackUpdateは使わない: あちらは呼び出し元が
+  // 組み立てたmessages配列丸ごとをpatchとして上書きする設計で、スレッド追記にそれを使うと
+  // 「開発者と投稿者がほぼ同時に返信した」「投稿者が続けて2通送った」ケースで、直前に他方が
+  // 追加した1件がこちら側のローカルスナップショット（表示中のpost）に反映される前に上書きされ、
+  // Drive上から消えてしまう（「チャットが正しく保存されていないことがある」不具合の実体）。
+  // ここでは新規メッセージ1件だけを持ち、ローカルはsetState更新関数内で・Driveは
+  // appendTeammateFeedbackMessage内で、それぞれその時点の最新状態に対して追記する。
+  const handleAddFeedbackMessage = (post: FeedbackPost & { authorEmail: string }, content: string): Promise<void> => {
     if (!currentIdentity) return Promise.resolve();
     const trimmed = content.trim();
     if (!trimmed) return Promise.resolve();
@@ -12275,8 +12279,35 @@ const App: React.FC = () => {
       content: trimmed,
       createdAt: new Date().toISOString(),
     };
-    const messages = [...getFeedbackThreadMessages(post), newMessage];
-    return persistFeedbackUpdate(post.authorEmail, post.id, { messages });
+    const appendTo = (p: FeedbackPost): FeedbackPost => ({ ...p, messages: [...getFeedbackThreadMessages(p), newMessage] });
+
+    if (post.authorEmail === currentIdentity.email) {
+      setCurrentUserData(prev => {
+        if (!prev) return prev;
+        const posts = prev.feedbackPosts || [];
+        return { ...prev, feedbackPosts: posts.map(p => (p.id === post.id ? appendTo(p) : p)) };
+      });
+      return Promise.resolve();
+    }
+    setAllUsersData(prev => {
+      const target = prev[post.authorEmail];
+      if (!target) return prev;
+      const posts = target.feedbackPosts || [];
+      return { ...prev, [post.authorEmail]: { ...target, feedbackPosts: posts.map(p => (p.id === post.id ? appendTo(p) : p)) } };
+    });
+    const targetFileId = driveFileIdByEmail[post.authorEmail];
+    if (!targetFileId) {
+      const err = new Error('投稿者のデータファイルが見つかりませんでした。ページを更新してから再度お試しください。');
+      alert(err.message);
+      return Promise.reject(err);
+    }
+    return appendTeammateFeedbackMessage<UserData>(targetFileId, post.id, newMessage, TEAMS_ADMIN_EMAIL)
+      .then(() => {})
+      .catch(err => {
+        console.error('Failed to save feedback message to author Drive file', err);
+        alert(`保存に失敗しました: ${describeTeammateDriveWriteError(err)}`);
+        throw err;
+      });
   };
 
   const handleSetFeedbackStatus = (authorEmail: string, postId: string, status: FeedbackStatus) => {

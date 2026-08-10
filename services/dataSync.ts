@@ -592,6 +592,39 @@ export async function overwriteTeammateFeedbackPost<T extends { feedbackPosts?: 
   return updated;
 }
 
+/**
+ * 開発者・投稿者どちらかが「お問い合わせ」スレッドに1件メッセージを追記する専用の書き込み。
+ * overwriteTeammateFeedbackPostは呼び出し元が組み立てた`messages`配列丸ごとをpatchとして渡す
+ * 前提だが、スレッドへの追記でそれをやると、呼び出し元がその配列を組み立てた時点（投稿者本人が
+ * 続けて2通送った、開発者と投稿者がほぼ同時に返信した等）で他方がまだ送っていた別の1件が、その
+ * ローカルスナップショットに含まれておらず、書き込み時にまるごと消えてしまう（「チャットが
+ * 正しく保存されない」不具合の実体）。ここではpatchとして新規メッセージ1件だけを受け取り、
+ * 追記先の既存messages配列は必ずこの関数がDriveから読み直した最新データ（レガシーの単発
+ * developerReplyしか無い投稿はそれを1件目として合成——getFeedbackThreadMessagesと同じ変換）
+ * から組み立てるため、他方が直前に追記した1件を上書き消去することがない。
+ */
+export async function appendTeammateFeedbackMessage<T extends { feedbackPosts?: any[] } = any>(
+  driveFileId: string,
+  postId: string,
+  newMessage: { id: string; authorEmail: string; content: string; createdAt: string },
+  developerEmailForLegacyReply: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const posts = latest.feedbackPosts || [];
+  const updatedPosts = posts.map((p: any) => {
+    if (p.id !== postId) return p;
+    const existingMessages: any[] = (p.messages && p.messages.length > 0)
+      ? p.messages
+      : (p.developerReply
+        ? [{ id: `${p.id}-legacy-reply`, authorEmail: developerEmailForLegacyReply, content: p.developerReply, createdAt: p.repliedAt || p.createdAt }]
+        : []);
+    return { ...p, messages: [...existingMessages, newMessage] };
+  });
+  const updated = { ...latest, feedbackPosts: updatedPosts };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
 export interface TeamsConfigResult<T> {
   data: T | null;
   driveFileId: string | null;
