@@ -396,11 +396,13 @@ interface CompanyApplication {
   // dashboard, so a candidate interviewing at several companies isn't counted multiple times.
   offerConfidence?: ConfidenceGrade;
   acceptanceConfidence?: ConfidenceGrade;
-  // Which stage-pass KPI keys (書類選考通過数/1次面接通過数/etc., see STAGE_ADVANCE_KPI_KEYS)
-  // have already been counted into a day's KPI actuals for THIS application, as its stage
-  // advanced — prevents re-editing the same application back and forth (or re-saving without
-  // an actual stage change) from double-counting the same event. Does not include
-  // candidatesSubmitted — see Candidate.recommendationRecorded for why.
+  // Legacy: which stage-pass KPI keys had already been counted into a day's KPI actuals for
+  // THIS application specifically, back when dedup was per-application. Superseded by
+  // Candidate.recordedFunnelKpiKeys, which dedupes candidate-wide instead — a candidate passing
+  // 書類選考 at several companies should only ever credit documentScreeningPassed once, not once
+  // per company. Kept only so computeStageAdvanceUpdate can fold any pre-existing values in here
+  // into recordedFunnelKpiKeys on first save after the change, instead of re-crediting an event
+  // that was already counted under the old per-application scheme.
   recordedAchievementKpiKeys?: (keyof typeof GENERAL_KPIS)[];
   // The forward-progress stage this application was in immediately before moving to お見送り/
   // 選考辞退 — captured at the moment of that transition (see computeStageAdvanceUpdate), since
@@ -492,6 +494,18 @@ interface Candidate {
   // than per-application because a recommendation only ever counts once per candidate, even
   // when they're being pursued at several companies at once.
   recommendationRecorded?: boolean;
+  // Which forward-progress KPI keys (documentScreeningPassed/firstInterviewPassed/
+  // secondInterviewPassed/finalInterviewPassed/offersExtended/placements — everything in
+  // STAGE_ADVANCE_KPI_KEYS except candidatesSubmitted, which keeps its own dedicated
+  // recommendationRecorded flag above, and declined/withdrawn/acceptanceWithdrawn, which use
+  // exitRecorded below) has already been counted into KPI actuals for this candidate, TOTAL
+  // across every one of their applications — set by computeStageAdvanceUpdate the first time any
+  // one application crosses that gate. A candidate-level flag rather than per-application because
+  // e.g. passing 書類選考 at three companies is still only one real "this candidate cleared
+  // document screening" event, and should only ever credit documentScreeningPassed once — the
+  // same reasoning as recommendationRecorded/exitRecorded, just generalized to every forward-
+  // progress KPI instead of just candidatesSubmitted / just the exit KPIs.
+  recordedFunnelKpiKeys?: (keyof typeof GENERAL_KPIS)[];
   // Whether an お見送り数/選考辞退数 has already been counted for this candidate — like
   // recommendationRecorded, a candidate-level flag: at most ONE exit outcome is ever reflected
   // per candidate in total, however many of their applications end up お見送り/選考辞退. Set the
@@ -531,7 +545,7 @@ interface Candidate {
 /**
  * Diffs `nextCandidate`'s applications against `prevCandidate`'s (the state before THIS save)
  * to find any stage advances, and returns both the candidate with dedup bookkeeping applied
- * (recordedAchievementKpiKeys per application, recommendationRecorded if newly triggered) and
+ * (recordedFunnelKpiKeys candidate-wide, recommendationRecorded if newly triggered) and
  * the raw {kpiKey: howMany} deltas to add to today's KPI actuals. Pure — callers persist both
  * pieces themselves. `prevCandidate` undefined (a brand-new candidate, or an application that
  * didn't exist before this save) means there's no "previous stage" to diff against, so nothing
@@ -547,10 +561,22 @@ function computeStageAdvanceUpdate(
   const kpiDeltas: Record<string, number> = {};
   let recommendationJustRecorded = false;
 
+  // Candidate-wide dedup set for every forward-progress KPI EXCEPT candidatesSubmitted (which
+  // keeps its own dedicated recommendationRecorded flag, handled below) — see
+  // Candidate.recordedFunnelKpiKeys. Seeded from that field plus any legacy per-application
+  // CompanyApplication.recordedAchievementKpiKeys still hanging around from before this dedup
+  // moved candidate-wide, so a candidate who'd already had e.g. documentScreeningPassed credited
+  // via one company isn't immediately re-credited the first time a second company is found to
+  // have crossed the same gate under the new logic.
+  const funnelRecorded = new Set<keyof typeof GENERAL_KPIS>(nextCandidate.recordedFunnelKpiKeys || []);
+  nextCandidate.applications.forEach(a => (a.recordedAchievementKpiKeys || []).forEach(k => funnelRecorded.add(k)));
+
   // Pass 1: forward-progress KPIs (candidatesSubmitted through placements) fire immediately,
   // same as always — real progress at one company counts regardless of what's going on at
   // others, and never on creation (no prevApp). declined/withdrawn are excluded here; they're
-  // handled in Pass 2 below.
+  // handled in Pass 2 below. Every key here other than candidatesSubmitted is deduped against
+  // funnelRecorded above, once per CANDIDATE total — passing 書類選考 at three companies still
+  // only ever credits documentScreeningPassed once, not once per company.
   const updatedApplications = nextCandidate.applications.map(app => {
     const prevApp = prevAppById.get(app.id);
     if (!prevApp || prevApp.stage === app.stage) return app;
@@ -586,27 +612,29 @@ function computeStageAdvanceUpdate(
       }
       return base;
     }
-    const recorded = new Set(base.recordedAchievementKpiKeys || []);
-    let changed = false;
+    let firedAny = false;
     keys.forEach(key => {
       if (key === 'candidatesSubmitted') {
-        // Candidate-level dedup, not per-application — see recommendationRecorded's doc comment.
+        // Candidate-level dedup via its own dedicated flag — see recommendationRecorded's doc comment.
         if (nextCandidate.recommendationRecorded || recommendationJustRecorded) return;
         recommendationJustRecorded = true;
         kpiDeltas.candidatesSubmitted = (kpiDeltas.candidatesSubmitted || 0) + 1;
         return;
       }
-      if (recorded.has(key)) return;
-      recorded.add(key);
-      changed = true;
+      // Candidate-wide dedup — see funnelRecorded's doc comment above. A second (or third...)
+      // company crossing a gate this candidate already cleared elsewhere doesn't credit again.
+      if (funnelRecorded.has(key)) return;
+      funnelRecorded.add(key);
+      firedAny = true;
       kpiDeltas[key] = (kpiDeltas[key] || 0) + 1;
     });
-    if (!changed && !(keys.length === 1 && keys[0] === 'candidatesSubmitted')) {
-      // Every key this transition would have credited was already in recordedAchievementKpiKeys
-      // — the KPI actual silently doesn't move even though 選考トラック shows the new stage.
-      console.warn('[KPI] Stage change detected but every KPI key was already recorded for this application — no actual was added.', { candidateId: nextCandidate.id, applicationId: app.id, prevStage: prevApp.stage, nextStage: app.stage, keys, alreadyRecorded: Array.from(recorded) });
+    if (!firedAny && !(keys.length === 1 && keys[0] === 'candidatesSubmitted')) {
+      // Every key this transition would have credited was already recorded for this candidate
+      // (via some other application) — the KPI actual silently doesn't move even though 選考
+      // トラック still shows this application's new stage.
+      console.warn('[KPI] Stage change detected but every KPI key was already recorded for this candidate — no actual was added.', { candidateId: nextCandidate.id, applicationId: app.id, prevStage: prevApp.stage, nextStage: app.stage, keys, alreadyRecorded: Array.from(funnelRecorded) });
     }
-    return changed ? { ...base, recordedAchievementKpiKeys: Array.from(recorded) } : base;
+    return base;
   });
 
   // Pass 2: declined/withdrawn/acceptanceWithdrawn — deduped ONCE PER CANDIDATE TOTAL
@@ -662,6 +690,7 @@ function computeStageAdvanceUpdate(
       ...nextCandidate,
       applications: updatedApplications,
       recommendationRecorded: nextCandidate.recommendationRecorded || recommendationJustRecorded,
+      recordedFunnelKpiKeys: Array.from(funnelRecorded),
       exitRecorded: nextCandidate.exitRecorded || exitJustRecorded,
       exitPhase: exitJustRecorded ? exitPhase : nextCandidate.exitPhase,
       exitPhaseAt: exitJustRecorded ? exitPhaseAt : nextCandidate.exitPhaseAt,
@@ -13256,7 +13285,7 @@ const App: React.FC = () => {
     const todayStr = new Date().toLocaleDateString('sv-SE');
     // Auto-reflects KPI actuals when an application's stage advances (打診→書類選考 etc., see
     // STAGE_ADVANCE_KPI_KEYS) — finalCandidate carries the dedup bookkeeping this produces
-    // (recordedAchievementKpiKeys / recommendationRecorded / exitedFromStage), kpiDeltas is what
+    // (recordedFunnelKpiKeys / recommendationRecorded / exitedFromStage), kpiDeltas is what
     // to add to today's entry.
     const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(prevCandidate, sanitized, todayStr);
     setCurrentUserData(prevData => {
