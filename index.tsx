@@ -729,9 +729,11 @@ interface UserData {
   // 未保存のスコープはundefined（絞り込みなしから始まる、従来通り）。
   pipelineStageFilterDefaults?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
   // 週間サマリー・各カレンダー（実績カレンダー／選考スケジュールカレンダー）の週の始まり表示
-  // 設定 — 未設定（既定）は従来通り日曜始まり、'saturday'なら土曜始まり（土〜金）に切り替わる。
-  // ヘッダーの「週の始まり」トグルで変更し、getStartOfWeek呼び出し側すべてがこれを参照する。
-  weekStartDay?: 'saturday';
+  // 設定。未設定（既定）は「個人での上書きなし」を意味し、所属チームにTeam.weekStartDayが
+  // 設定されていればそれを継承、無ければ日曜始まり——'sunday'/'saturday'を明示的に選ぶと、
+  // 所属チームの設定に関わらずそちらが常に優先される（ヘッダーの「週の始まり」セレクトで変更）。
+  // App内のweekStartsOn算出、getStartOfWeek呼び出し側すべてがこの解決結果を参照する。
+  weekStartDay?: 'sunday' | 'saturday';
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -858,6 +860,12 @@ interface Team {
   // existed) — a team only narrows down once someone explicitly picks a subset in チーム管理.
   // Once set, newly-created media do NOT automatically join it; an editor must add them by hand.
   mediaIds?: string[];
+  // このチームに所属するメンバーの週間サマリー・カレンダー（実績カレンダー／選考スケジュール
+  // カレンダー）の週の始まりの既定値 — undefined（既定）は日曜始まり。'saturday'にすると、
+  // 個人側で明示的に上書きしていないメンバー全員がこのチームの設定（土曜始まり）を継承する
+  // （UserData.weekStartDayのコメント・App内のweekStartsOn算出参照）。複数チームに所属する
+  // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
+  weekStartDay?: 'saturday';
 }
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
@@ -3775,7 +3783,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-08-10',
     items: [
-      'ヘッダーに「週の始まり」の切り替え（日曜始まり／土曜始まり）を追加。実績カレンダー・選考スケジュールカレンダー・週間サマリー（合計・メンバー別）すべてに反映されます。切り替えるとこれらの表示は「今週」に戻ります',
+      'ヘッダーに「週の始まり」の切り替え（日曜始まり／土曜始まり）を追加。実績カレンダー・選考スケジュールカレンダー・週間サマリー（合計・メンバー別）すべてに反映されます。切り替えるとこれらの表示は「今週」に戻ります。また「チーム管理」で、チームごとに「週の始まり」の既定値を設定できるようになりました。メンバー個人が明示的に上書きしていなければ、所属チームの既定値が使われます',
       '【不具合修正】パイプラインカレンダーで、選考予定の候補者名・企業名の表示が長い日があると、その日の列が本来の幅を超えて広がってしまい、右端（土曜日など）の日付が見えなくなることがあった不具合を修正',
       '【不具合修正】お問い合わせのチャットで、開発者と投稿者がほぼ同時に返信した場合や、返信が届いた後に投稿者が別の操作（KPI入力等）を行った場合に、返信が保存されず消えてしまうことがあった不具合を修正',
       '【不具合修正】候補者が複数社の書類選考・面接を通過した場合、書類選考通過数などのKPI実績が候補者1人につき1回を超えて重複してカウントされていた不具合を修正',
@@ -4403,7 +4411,8 @@ const TeamsModal: React.FC<{
     onSetMemberDepartment: (email: string, department: Department | null) => void;
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia }) => {
+    onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -4732,6 +4741,24 @@ const TeamsModal: React.FC<{
                                             <span style={{ fontSize: '0.9rem' }}>
                                                 {team.mediaIds ? (team.mediaIds.length > 0 ? activeMedia.filter(m => team.mediaIds!.includes(m.id)).map(m => m.name).join('、') : '（なし）') : 'すべての媒体'}
                                             </span>
+                                        )}
+                                    </div>
+                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>週の始まり（週間サマリー・カレンダー）</span>
+                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                            このチームのメンバーは、個人側で明示的に上書きしていない限りここでの設定に従います。未設定（既定）は日曜始まりです。
+                                        </p>
+                                        {isEditable ? (
+                                            <select
+                                                value={team.weekStartDay ?? 'sunday'}
+                                                onChange={(e) => onSetTeamWeekStartDay(team.id, e.target.value === 'saturday' ? 'saturday' : undefined)}
+                                                aria-label={`${team.name}の週の始まり`}
+                                            >
+                                                <option value="sunday">日曜始まり</option>
+                                                <option value="saturday">土曜始まり</option>
+                                            </select>
+                                        ) : (
+                                            <span style={{ fontSize: '0.9rem' }}>{team.weekStartDay === 'saturday' ? '土曜始まり' : '日曜始まり'}</span>
                                         )}
                                     </div>
                                 </li>
@@ -11766,34 +11793,46 @@ const App: React.FC = () => {
     setCurrentUserData(prev => (prev ? { ...prev, allUsersSectionDefaults } : prev));
   };
 
-  // 週間サマリー・各カレンダーの週の始まり — currentUserData.weekStartDayから毎レンダー導出
-  // する（他の設定同様、専用のstateは持たない）。getStartOfWeekへ渡す形（0=日曜, 6=土曜）に
-  // 揃えておく。
-  const weekStartsOn: 0 | 6 = currentUserData?.weekStartDay === 'saturday' ? 6 : 0;
+  // 週間サマリー・各カレンダーの週の始まり。個人で明示的に上書き（currentUserData.weekStartDay
+  // ='sunday'|'saturday'）していればそれを最優先、していなければ所属チーム
+  // （Team.weekStartDay）の既定値を継承し、どちらも無ければ日曜始まり。複数チームに所属する
+  // 場合は他の所属判定（myTeamId・entryActiveMediaのsubjectTeam）と同じく先頭のチームを採用する
+  // ——teamsはこの時点で既にuseState済み（下のuseState群より上）なのでここから直接参照できる。
+  const myTeamForWeekStart = useMemo(
+    () => (currentIdentity ? teams.find(t => t.memberEmails.includes(currentIdentity.email)) : undefined),
+    [teams, currentIdentity]
+  );
+  const weekStartsOn: 0 | 6 = currentUserData?.weekStartDay
+    ? (currentUserData.weekStartDay === 'saturday' ? 6 : 0)
+    : (myTeamForWeekStart?.weekStartDay === 'saturday' ? 6 : 0);
 
-  // viewWeekStartDate/memberWeeklyWeekStartDateのuseState初期値は、currentUserDataがまだ
-  // 読み込まれる前（＝weekStartDayが分かる前）に一度だけ評価されるため、常に日曜始まりで
-  // 計算されてしまう。保存済みのweekStartDayが読み込めた直後に一度だけ、その設定での「今週」
-  // へ揃え直す — hasAppliedSectionDefaultsRefと同じ、一度だけ適用してその後のcurrentUserData
-  // 更新（KPI入力のたびに起きる）では再適用しないためのガード。
+  // viewWeekStartDate/memberWeeklyWeekStartDateのuseState初期値は、currentUserData・teamsが
+  // まだ読み込まれる前（＝実際に適用されるweekStartsOnが分かる前）に一度だけ評価されるため、
+  // 常に日曜始まりで計算されてしまう。両方読み込めた直後に一度だけ、その時点のweekStartsOnでの
+  // 「今週」へ揃え直す — hasAppliedSectionDefaultsRefと同じ、一度だけ適用してその後の
+  // currentUserData更新（KPI入力のたびに起きる）では再適用しないためのガード。teamsConfigLoaded
+  // も待つのは、チーム未読み込みのままweekStartsOn=0（未継承扱い）で確定させてしまわないため。
   const hasAppliedWeekStartDayRef = useRef(false);
   useEffect(() => {
-    if (hasAppliedWeekStartDayRef.current || !currentUserData) return;
+    if (hasAppliedWeekStartDayRef.current || !currentUserData || !teamsConfigLoaded) return;
     hasAppliedWeekStartDayRef.current = true;
-    if (currentUserData.weekStartDay === 'saturday') {
+    if (weekStartsOn === 6) {
       setViewWeekStartDate(getStartOfWeek(new Date(), 6));
       setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), 6));
     }
-  }, [currentUserData]);
+  }, [currentUserData, teamsConfigLoaded, weekStartsOn]);
 
-  // ヘッダーの「週の始まり」トグルから呼ばれる。切り替えた瞬間、週間サマリー（合計・メンバー別
-  // 両方）の表示週を新しい基準での「今週」に揃え直す——過去の週を見ていた場合はカレンダー日数の
-  // ズレでどちらの基準でも同じ範囲を指し続けることはまずできない（週の始まりが変われば「同じ週」
-  // の定義自体がずれる）ため、他の同様の切り替え操作（月選択のリセット等）と同じく「今」に戻す
-  // のが最も分かりやすい。
-  const handleSetWeekStartDay = (value: 'sunday' | 'saturday') => {
-    setCurrentUserData(prev => (prev ? { ...prev, weekStartDay: value === 'saturday' ? 'saturday' : undefined } : prev));
-    const nextWeekStartsOn: 0 | 6 = value === 'saturday' ? 6 : 0;
+  // ヘッダーの「週の始まり」セレクトから呼ばれる。value=undefinedは「個人での上書きを外し、
+  // 所属チームの既定値（未設定なら日曜）に戻す」ことを意味する。切り替えた瞬間、週間サマリー
+  // （合計・メンバー別両方）の表示週を新しい基準での「今週」に揃え直す——過去の週を見ていた場合は
+  // カレンダー日数のズレでどちらの基準でも同じ範囲を指し続けることはまずできない（週の始まりが
+  // 変われば「同じ週」の定義自体がずれる）ため、他の同様の切り替え操作（月選択のリセット等）と
+  // 同じく「今」に戻すのが最も分かりやすい。
+  const handleSetWeekStartDay = (value: 'sunday' | 'saturday' | undefined) => {
+    setCurrentUserData(prev => (prev ? { ...prev, weekStartDay: value } : prev));
+    const nextWeekStartsOn: 0 | 6 = value
+      ? (value === 'saturday' ? 6 : 0)
+      : (myTeamForWeekStart?.weekStartDay === 'saturday' ? 6 : 0);
     setViewWeekStartDate(getStartOfWeek(new Date(), nextWeekStartsOn));
     setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), nextWeekStartsOn));
   };
@@ -12599,6 +12638,11 @@ const App: React.FC = () => {
 
   const handleSetTeamMedia = (teamId: string, mediaIds: string[]) => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, mediaIds } : t)));
+  };
+
+  // 週間サマリー・カレンダーの週の始まりのチーム既定値。value=undefinedで日曜（既定）に戻す。
+  const handleSetTeamWeekStartDay = (teamId: string, value: 'saturday' | undefined) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
   };
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
@@ -13968,6 +14012,7 @@ const App: React.FC = () => {
           onSetMemberDepartment={handleSetMemberDepartment}
           onToggleMiddle={handleToggleMiddle}
           onSetTeamMedia={handleSetTeamMedia}
+          onSetTeamWeekStartDay={handleSetTeamWeekStartDay}
         />
       )}
       {isChangelogModalOpen && (
@@ -14134,12 +14179,13 @@ const App: React.FC = () => {
             {currentIdentity && (
               <select
                 className="own-department-select"
-                value={weekStartsOn === 6 ? 'saturday' : 'sunday'}
-                onChange={(e) => handleSetWeekStartDay(e.target.value as 'sunday' | 'saturday')}
-                title="週間サマリー・カレンダー（実績カレンダー／選考スケジュールカレンダー）の週の始まりを切り替えます"
+                value={currentUserData?.weekStartDay ?? 'inherit'}
+                onChange={(e) => handleSetWeekStartDay(e.target.value === 'inherit' ? undefined : (e.target.value as 'sunday' | 'saturday'))}
+                title="週間サマリー・カレンダー（実績カレンダー／選考スケジュールカレンダー）の週の始まりを切り替えます。「所属チームの設定」は、チーム管理で自分のチームに設定された既定値（未設定は日曜）に従います"
               >
-                <option value="sunday">週の始まり: 日曜</option>
-                <option value="saturday">週の始まり: 土曜</option>
+                <option value="inherit">週の始まり: 所属チームの設定{myTeamForWeekStart?.weekStartDay === 'saturday' ? '（土曜）' : myTeamForWeekStart ? '（日曜）' : ''}</option>
+                <option value="sunday">週の始まり: 日曜（個人設定）</option>
+                <option value="saturday">週の始まり: 土曜（個人設定）</option>
               </select>
             )}
             <button onClick={() => setIsTeamsModalOpen(true)} className="header-utility-button">チーム管理</button>
