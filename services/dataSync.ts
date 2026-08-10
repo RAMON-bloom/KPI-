@@ -219,8 +219,25 @@ async function performSave(
   onFileCreated: (id: string) => void
 ): Promise<void> {
   try {
-    const payload = { ...(data as object), schemaVersion: SCHEMA_VERSION };
+    let payload: Record<string, unknown> = { ...(data as object), schemaVersion: SCHEMA_VERSION };
     if (driveFileId) {
+      // This is a blind whole-document overwrite of whatever this browser's local state happens
+      // to hold — fine for every field this browser is the sole writer of, but feedbackPosts is
+      // also written directly by OTHER clients (a developer's reply via
+      // appendTeammateFeedbackMessage, or even this same account's own appendOwnFeedbackPost from
+      // a moment ago) and this browser never re-fetches feedbackPosts mid-session to learn about
+      // that. Without this, ANY unrelated edit (a KPI entry, a candidate edit — anything that
+      // touches currentUserData and re-triggers this debounce) would silently revert
+      // feedbackPosts back to this browser's stale copy, erasing a reply that had already landed
+      // on Drive. Re-reading it fresh immediately before writing closes that gap; if the read
+      // itself fails, fall through and write the local snapshot as before rather than blocking
+      // the rest of this save on it.
+      try {
+        const latest = await readFileContent<{ feedbackPosts?: unknown[] }>(driveFileId);
+        if (latest && latest.feedbackPosts) payload = { ...payload, feedbackPosts: latest.feedbackPosts };
+      } catch (readErr) {
+        console.error('Failed to re-fetch feedbackPosts before saving own data — writing local snapshot instead', readErr);
+      }
       await updateFileContent(driveFileId, payload);
     } else {
       const newId = await createOwnDataFile(payload, email);
@@ -621,6 +638,31 @@ export async function appendTeammateFeedbackMessage<T extends { feedbackPosts?: 
     return { ...p, messages: [...existingMessages, newMessage] };
   });
   const updated = { ...latest, feedbackPosts: updatedPosts };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
+ * 自分自身の新規「お問い合わせ」投稿を、通常のcurrentUserData丸ごと上書き（2秒デバウンスの
+ * saveOwnDataDebounced）に任せず、appendTeammateFeedbackMessageと同じfetch最新→追記→書き込み
+ * パターンで即座にDriveへ直接反映する。
+ *
+ * なぜ必要か: 自分のDriveファイルへの書き込み経路は自分のブラウザのsaveOwnDataDebouncedだけ
+ * ではない——開発者の返信（appendTeammateFeedbackMessage）やミドル/チーム編集者の代理編集
+ * （overwriteTeammateCandidatePatch等）も、同じファイルへ直接書き込む。これらの書き込みが
+ * 行われた後、自分のブラウザ側ではそれを知らないまま（feedbackPostsはセッション中ポーリング
+ * されない）何か別の操作をきっかけにsaveOwnDataDebouncedが発火すると、その時点のローカル
+ * スナップショット（＝他者の書き込みを知らない古い状態）でファイル全体を上書きし、他者が
+ * 直前に書き込んだ内容を消してしまう。feedbackPostsへの変更だけはこの関数（と
+ * appendTeammateFeedbackMessage）を通じて即座に・最新データに対して直接反映することで、
+ * 通常の丸ごと上書きの影響を受けないようにする。
+ */
+export async function appendOwnFeedbackPost<T extends { feedbackPosts?: any[] } = any>(
+  driveFileId: string,
+  newPost: any
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updated = { ...latest, feedbackPosts: [...(latest.feedbackPosts || []), newPost] };
   await updateFileContent(driveFileId, updated);
   return updated;
 }

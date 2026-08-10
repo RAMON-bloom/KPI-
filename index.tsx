@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -12221,14 +12221,30 @@ const App: React.FC = () => {
       status: '未対応',
     };
     setCurrentUserData(prev => (prev ? { ...prev, feedbackPosts: [...(prev.feedbackPosts || []), newPost] } : prev));
+    // ローカル更新だけだと、通常のcurrentUserData丸ごと上書き（2秒デバウンスの
+    // saveOwnDataDebounced）が発火するまでの間に開発者の返信やミドルの代理編集など別経路の
+    // Drive書き込みが挟まると、そちらを消してしまう（appendOwnFeedbackPostのコメント参照）。
+    // driveFileIdがまだ無い（ファイル未作成の新規ユーザー）場合はそもそも他経路との競合が
+    // 起きようがないため、通常のデバウンス保存（ファイル新規作成を兼ねる）に任せる。
+    if (driveFileId) {
+      appendOwnFeedbackPost<UserData>(driveFileId, newPost).catch(err => {
+        console.error('Failed to save new feedback post directly to Drive', err);
+      });
+    }
   };
 
   // 開発者による他ユーザーの投稿への返信・ステータス変更・削除 — persistTeammateCandidateVisibility
-  // と同じ、楽観的ローカル更新 + Drive書き込みのパターン。投稿者本人（＝開発者自身の投稿）の場合は
-  // 自分のUserDataを更新するだけでよい。patch=nullは投稿の削除を意味する。呼び出し元
-  // （FeedbackModal）が成功/失敗を画面に表示できるよう、Drive書き込みの結果までちゃんと
+  // と同じ、楽観的ローカル更新 + Drive書き込みのパターン。patch=nullは投稿の削除を意味する。
+  // 呼び出し元（FeedbackModal）が成功/失敗を画面に表示できるよう、Drive書き込みの結果までちゃんと
   // 待てるPromiseを返す（以前はfire-and-forgetで、返信ボタンを押しても見た目上何も起きず
   // 「返信できない」ように見えていた）。
+  //
+  // 投稿者本人（＝開発者自身の投稿）でも、ローカル更新だけで満足せず必ずoverwriteTeammateFeedbackPost
+  // で自分のdriveFileIdへ直接書き込む——通常のcurrentUserData丸ごと上書き（saveOwnDataDebounced）
+  // には、他クライアントの書き込みを消さないよう常に「Driveから読み直した最新feedbackPosts」を
+  // 使うガードを入れた（appendOwnFeedbackPostのコメント参照）ため、もしここをローカル更新
+  // だけにすると、今まさにここで加えたステータス変更・削除がそのガードによって次回のデバウンス
+  // 保存で「まだそれを知らない古いDrive側の値」に巻き戻されてしまう。
   const persistFeedbackUpdate = (authorEmail: string, postId: string, patch: Partial<FeedbackPost> | null): Promise<void> => {
     if (currentIdentity && authorEmail === currentIdentity.email) {
       setCurrentUserData(prev => {
@@ -12237,7 +12253,14 @@ const App: React.FC = () => {
         const updated = patch === null ? posts.filter(p => p.id !== postId) : posts.map(p => (p.id === postId ? { ...p, ...patch } : p));
         return { ...prev, feedbackPosts: updated };
       });
-      return Promise.resolve();
+      if (!driveFileId) return Promise.resolve();
+      return overwriteTeammateFeedbackPost<UserData>(driveFileId, postId, patch as Record<string, unknown> | null)
+        .then(() => {})
+        .catch(err => {
+          console.error('Failed to save own feedback status/delete directly to Drive', err);
+          alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+          throw err;
+        });
     }
     setAllUsersData(prev => {
       const target = prev[authorEmail];
@@ -12269,6 +12292,13 @@ const App: React.FC = () => {
   // Drive上から消えてしまう（「チャットが正しく保存されていないことがある」不具合の実体）。
   // ここでは新規メッセージ1件だけを持ち、ローカルはsetState更新関数内で・Driveは
   // appendTeammateFeedbackMessage内で、それぞれその時点の最新状態に対して追記する。
+  //
+  // 自分の投稿への追記（＝post.authorEmail === currentIdentity.email）でも、通常の
+  // currentUserData丸ごと上書き（saveOwnDataDebounced）任せにはしない——appendOwnFeedbackPost
+  // のコメントの通り、開発者の返信やミドルの代理編集が自分のファイルへ先に書き込まれた後、
+  // 自分側のブラウザがそれを知らないまま何らかのきっかけでデバウンス保存が走ると、直前に
+  // 他者が書き込んだ内容ごと消してしまう。appendTeammateFeedbackMessageは書き込み先が誰の
+  // ファイルかを問わないので、自分のdriveFileIdを渡して同じ「最新データへ直接追記」で書き込む。
   const handleAddFeedbackMessage = (post: FeedbackPost & { authorEmail: string }, content: string): Promise<void> => {
     if (!currentIdentity) return Promise.resolve();
     const trimmed = content.trim();
@@ -12287,7 +12317,14 @@ const App: React.FC = () => {
         const posts = prev.feedbackPosts || [];
         return { ...prev, feedbackPosts: posts.map(p => (p.id === post.id ? appendTo(p) : p)) };
       });
-      return Promise.resolve();
+      if (!driveFileId) return Promise.resolve();
+      return appendTeammateFeedbackMessage<UserData>(driveFileId, post.id, newMessage, TEAMS_ADMIN_EMAIL)
+        .then(() => {})
+        .catch(err => {
+          console.error('Failed to save own feedback message directly to Drive', err);
+          alert(`保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+          throw err;
+        });
     }
     setAllUsersData(prev => {
       const target = prev[post.authorEmail];
