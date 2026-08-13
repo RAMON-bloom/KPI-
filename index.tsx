@@ -421,14 +421,16 @@ interface CompanyApplication {
   // — powers the visual 選考トラック in the candidate detail view ("いつ応募していつ選考通過
   // したか") and the pipeline calendar's faint 実施済み選考 log. Seeded with one entry at
   // creation time (see addApplication/ApplicationModal), then appended to on every genuine stage
-  // change (see computeStageAdvanceUpdate), which dates each entry to whatever had actually been
-  // scheduled for the just-concluded stage (falling back to the save date only when nothing had
-  // been scheduled, or it was still in the future) — so this is the real "when did each
-  // interview happen" record, distinct from scheduledDate (which only ever holds the CURRENT
-  // stage's still-upcoming date). `date` is missing only on a synthesized origin entry
-  // backfilled for an application that already existed before this feature shipped — there's no
-  // real record of when it first entered that stage, so it's shown as "記録開始前" rather than a
-  // fabricated date.
+  // change (see computeStageAdvanceUpdate) with a placeholder date of the save day, which is
+  // then backfilled onto THAT SAME stage's own entry (never the next stage's — that previously
+  // mislabeled the date, making a hovered badge's history disagree with the pipeline calendar)
+  // with whatever had actually been scheduled for it, the moment the application moves on to the
+  // next stage — so once a stage is behind you, its entry reflects the real "when did this
+  // interview happen" date rather than merely when the change got entered into the app. Distinct
+  // from scheduledDate, which only ever holds the CURRENT stage's still-upcoming date. `date` is
+  // missing only on a synthesized origin entry backfilled for an application that already
+  // existed before this feature shipped — there's no real record of when it first entered that
+  // stage, so it's shown as "記録開始前" rather than a fabricated date.
   stageHistory?: { stage: PipelineStage; date?: string }[];
 }
 
@@ -610,22 +612,33 @@ function computeStageAdvanceUpdate(
       base = { ...base, exitedFromStage: prevApp.stage, exitedAt: todayStr };
     }
 
-    // Records this transition on the 選考トラック (see CompanyApplication.stageHistory), dated
-    // whenever possible to the date that had actually been scheduled for the interview/action
-    // that just concluded (prevApp.scheduledDate) rather than todayStr (merely whenever the
-    // change happened to get entered into the app) — this is what lets 選考トラック and the
-    // pipeline calendar's 実施済み選考 log reflect when each interview genuinely took place. Only
-    // trusted when it isn't in the future relative to today: a still-upcoming scheduled date
-    // skipped straight to another stage (e.g. the interview got cancelled/postponed and the
-    // stage was corrected instead) is not a real completion date, so falls back to todayStr. An
+    // Records this transition on the 選考トラック (see CompanyApplication.stageHistory). An
     // application saved before this feature existed has no history yet — backfill one entry for
-    // the stage it was already at (date unknown, shown as "記録開始前") before appending the real
-    // transition, so the track always has a sensible starting point.
-    const reachedOn = (prevApp.scheduledDate && prevApp.scheduledDate <= todayStr) ? prevApp.scheduledDate : todayStr;
-    const priorHistory = base.stageHistory && base.stageHistory.length > 0
+    // the stage it was already at (date unknown, shown as "記録開始前") before appending today's
+    // real transition, so the track always has a sensible starting point.
+    let priorHistory = base.stageHistory && base.stageHistory.length > 0
       ? base.stageHistory
       : [{ stage: prevApp.stage }];
-    base = { ...base, stageHistory: [...priorHistory, { stage: app.stage, date: reachedOn }] };
+
+    // Backfills the REAL date prevApp.stage's own interview/action took place — whatever had
+    // actually been scheduled for it (prevApp.scheduledDate) — onto prevApp.stage's OWN existing
+    // entry above, correcting its placeholder todayStr from when it was first entered. Must land
+    // on prevApp.stage's entry specifically, not the new app.stage entry pushed below: attaching
+    // it there instead previously mislabeled the date as if it were app.stage's own date, so
+    // hovering a badge (see buildStageTooltip) showed e.g. "1次面接(7/5) → 2次面接(7/10)" when
+    // 7/10 had actually been 1次面接's own scheduled date — mismatching what the pipeline
+    // calendar showed for that same interview. Only trusted when not still in the future
+    // relative to today: a still-upcoming scheduled date skipped straight to another stage (e.g.
+    // the interview got cancelled/postponed and the stage was corrected instead) is not a real
+    // completion date, so prevApp.stage's entry is simply left at its original todayStr.
+    if (prevApp.scheduledDate && prevApp.scheduledDate <= todayStr) {
+      const lastPrevStageIdx = priorHistory.reduce((acc, h, i) => h.stage === prevApp.stage ? i : acc, -1);
+      if (lastPrevStageIdx !== -1) {
+        priorHistory = priorHistory.map((h, i) => i === lastPrevStageIdx ? { ...h, date: prevApp.scheduledDate } : h);
+      }
+    }
+
+    base = { ...base, stageHistory: [...priorHistory, { stage: app.stage, date: todayStr }] };
 
     const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn' && k !== 'acceptanceWithdrawn');
     if (keys.length === 0) {
