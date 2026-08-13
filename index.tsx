@@ -6387,6 +6387,12 @@ const ApplicationModal: React.FC<{
                             {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
                         </select>
                     </div>
+                    {application.stageHistory && application.stageHistory.length > 0 && (
+                        <div className="form-group">
+                            <label>選考トラック</label>
+                            <StageTrack history={application.stageHistory} />
+                        </div>
+                    )}
                     <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
                         <input
@@ -7903,14 +7909,41 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
-// カーソルを合わせた時に、日程調整済みの選考予定日時をツールチップで見せる（未調整ならその行は
-// 省く）。editableな（＝クリックで編集できる）バッジには末尾に案内文を足す。
+// カーソルを合わせた時に、日程調整済みの選考予定日時と、これまでの選考トラック（いつどの
+// フェーズに進んだか）をツールチップで見せる（それぞれ未調整/記録なしならその行は省く）—
+// カードの詳細を展開しなくても、バッジにホバーするだけで確認できるようにするため。editable
+// な（＝クリックで編集できる）バッジには末尾に案内文を足す。
 const buildStageTooltip = (app: CompanyApplication, editable: boolean): string => {
   const scheduleLine = app.scheduledDate
     ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
     : '';
-  const base = `${app.companyName}: ${app.stage}${scheduleLine}`;
+  const trackLine = app.stageHistory && app.stageHistory.length > 0
+    ? `\n選考トラック: ${app.stageHistory.map(h => `${h.stage}(${h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'})`).join(' → ')}`
+    : '';
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}${trackLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
+};
+
+// 選考トラック — stageHistoryをステージ→日付の一連のステップとして描画する。候補者カードの
+// 「詳細を表示（編集する）」を開いた時の詳細カードと、そこまで開かなくても選考情報を確認できる
+// ApplicationModal（バッジをクリックするだけで開く軽量な方）の両方から使えるよう共通化した。
+const StageTrack: React.FC<{ history: CompanyApplication['stageHistory'] }> = ({ history }) => {
+  if (!history || history.length === 0) return null;
+  return (
+    <div className="stage-track">
+      {history.map((h, i) => (
+        <React.Fragment key={i}>
+          {i > 0 && <span className="stage-track-arrow">→</span>}
+          <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[h.stage] } as React.CSSProperties}>
+            <span className="stage-track-stage">{h.stage}</span>
+            <span className="stage-track-date">
+              {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
+            </span>
+          </span>
+        </React.Fragment>
+      ))}
+    </div>
+  );
 };
 
 // The 選考状況 badge shown in a candidate card's collapsed "ぱっと見" summary. Hovering shows the
@@ -9017,19 +9050,7 @@ const PipelineCandidateCard: React.FC<{
                                     {app.stageHistory && app.stageHistory.length > 0 && (
                                         <div className="detail-card-item detail-card-item-track">
                                             <span>選考トラック:</span>
-                                            <div className="stage-track">
-                                                {app.stageHistory.map((h, i) => (
-                                                    <React.Fragment key={i}>
-                                                        {i > 0 && <span className="stage-track-arrow">→</span>}
-                                                        <span className="stage-track-step" style={{'--badge-color': STAGE_COLOR_MAP[h.stage]} as React.CSSProperties}>
-                                                            <span className="stage-track-stage">{h.stage}</span>
-                                                            <span className="stage-track-date">
-                                                                {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
-                                                            </span>
-                                                        </span>
-                                                    </React.Fragment>
-                                                ))}
-                                            </div>
+                                            <StageTrack history={app.stageHistory} />
                                         </div>
                                     )}
                                     <div className="detail-card-item">
