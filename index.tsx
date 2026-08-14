@@ -251,6 +251,13 @@ const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適�
 // (from a placement standpoint) branches off the main path.
 const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '内定承諾後辞退'];
 
+// パイプラインカレンダーの「実施済み選考」薄いログ（see PipelineCalendarView）には出さない
+// ステージ — 打診・書類選考は面接そのものではなく事務的な通過であり、お見送りは選考の実施では
+// ないため、カレンダー上に「実施済み」として並ぶと紛らわしいというユーザーからのフィードバック
+// で除外した。選考トラック（stageHistory自体・候補者カードのホバー/ApplicationModal表示）は
+// 引き続きすべてのステージを記録・表示する — 除外はカレンダー表示だけのフィルタ。
+const CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES: PipelineStage[] = ['打診', '書類選考', 'お見送り'];
+
 // Maps "an application just advanced INTO this stage" to the GENERAL_KPIS key(s) representing
 // having passed the gate immediately before it. Reaching 内定 fires BOTH finalInterviewPassed
 // (funnel-input metric: how many passed the final interview) and offersExtended (outcome
@@ -7282,12 +7289,14 @@ const PipelineCalendarView: React.FC<{
         });
         // 実施済み選考ログ — every past stage transition (see CompanyApplication.stageHistory),
         // one faint badge per entry that has a real date (the backfilled "記録開始前" origin
-        // entry has none and is skipped). This is what makes 各面接がいつ行われたか visible
-        // directly on the calendar, independent of the (now-cleared-on-advance) scheduledDate.
+        // entry has none and is skipped), except CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES (打診・
+        // 書類選考・お見送り — not real interviews, kept off the calendar per user feedback).
+        // This is what makes 各面接がいつ行われたか visible directly on the calendar,
+        // independent of the (now-cleared-on-advance) scheduledDate.
         candidates.filter(c => !c.isHidden).forEach(c => {
             c.applications.filter(app => !app.isHidden).forEach(app => {
                 (app.stageHistory || []).forEach(h => {
-                    if (!h.date) return;
+                    if (!h.date || CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES.includes(h.stage)) return;
                     const list = map.get(h.date) || [];
                     list.push({ kind: 'completed', candidate: c, application: app, stage: h.stage, date: h.date });
                     map.set(h.date, list);
