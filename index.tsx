@@ -251,13 +251,6 @@ const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適�
 // (from a placement standpoint) branches off the main path.
 const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '内定承諾後辞退'];
 
-// パイプラインカレンダーの「実施済み選考」薄いログ（see PipelineCalendarView）には出さない
-// ステージ — 打診・書類選考は面接そのものではなく事務的な通過であり、お見送りは選考の実施では
-// ないため、カレンダー上に「実施済み」として並ぶと紛らわしいというユーザーからのフィードバック
-// で除外した。選考トラック（stageHistory自体・候補者カードのホバー/ApplicationModal表示）は
-// 引き続きすべてのステージを記録・表示する — 除外はカレンダー表示だけのフィルタ。
-const CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES: PipelineStage[] = ['打診', '書類選考', 'お見送り'];
-
 // Maps "an application just advanced INTO this stage" to the GENERAL_KPIS key(s) representing
 // having passed the gate immediately before it. Reaching 内定 fires BOTH finalInterviewPassed
 // (funnel-input metric: how many passed the final interview) and offersExtended (outcome
@@ -425,9 +418,12 @@ interface CompanyApplication {
   // actuals are dated per day.
   exitedAt?: string;
   // Every stage this application has actually been at, in order, with the date it was recorded
-  // — powers the visual 選考トラック in the candidate detail view ("いつ応募していつ選考通過
-  // したか") and the pipeline calendar's faint 実施済み選考 log. Seeded with one entry at
-  // creation time (see addApplication/ApplicationModal), then appended to on every genuine stage
+  // — powers the visual 選考トラック shown in the candidate detail view, on the collapsed card's
+  // badge hover tooltip (see buildStageTooltip), and in ApplicationModal ("いつ応募していつ
+  // 選考通過したか"). Deliberately NOT shown on the pipeline calendar — only still-upcoming
+  // scheduledDate events belong there, past/completed stages are not put on the calendar. Seeded
+  // with one entry at creation time (see addApplication/ApplicationModal), then appended to on
+  // every genuine stage
   // change (see computeStageAdvanceUpdate) with a placeholder date of the save day, which is
   // then backfilled onto THAT SAME stage's own entry (never the next stage's — that previously
   // mislabeled the date, making a hovered badge's history disagree with the pipeline calendar)
@@ -7240,21 +7236,20 @@ const GrossProfitSummary: React.FC<{
 
 type PipelineCalendarEvent =
     | { kind: 'application'; candidate: Candidate; application: CompanyApplication }
-    | { kind: 'completed'; candidate: Candidate; application: CompanyApplication; stage: PipelineStage; date: string }
     | { kind: 'revival'; candidate: Candidate };
 
 /**
- * Month calendar of every visible application's manually-set scheduledDate (solid badge — a
- * still-upcoming interview/action), plus a faint "実施済み選考" badge for every past stage
- * transition recorded in stageHistory (a completed one — see CompanyApplication.stageHistory),
- * and a 掘り起し reminder event on each revival-listed candidate's nextActionDate. Reads
- * whatever `candidates` list the caller passes in, so it's automatically scoped by the
- * pipeline's existing 自分/全ユーザー/チーム/ユーザー別 switcher — no separate scope control
- * needed here. Clicking empty day space lets the signed-in user schedule (or edit) one of their
- * own candidates' applications for that date, via onDayClick. Clicking an existing event bar
- * instead jumps straight to editing THAT application/revival entry — but only when it belongs to
- * the signed-in user (stops propagation so it doesn't also trigger onDayClick); other people's
- * events are shown for visibility only and aren't clickable.
+ * Month calendar of every visible application's manually-set scheduledDate, plus a 掘り起し
+ * reminder event on each revival-listed candidate's nextActionDate. Reads whatever `candidates`
+ * list the caller passes in, so it's automatically scoped by the pipeline's existing 自分/全
+ * ユーザー/チーム/ユーザー別 switcher — no separate scope control needed here. Clicking empty
+ * day space lets the signed-in user schedule (or edit) one of their own candidates'
+ * applications for that date, via onDayClick. Clicking an existing event bar instead jumps
+ * straight to editing THAT application/revival entry — but only when it belongs to the
+ * signed-in user (stops propagation so it doesn't also trigger onDayClick); other people's
+ * events are shown for visibility only and aren't clickable. 選考トラック（実施済みの各フェーズが
+ * いつだったか）は候補者カードのホバー表示・ApplicationModalで確認できるが、このカレンダーには
+ * 意図的に出さない（実施済みのイベントはカレンダーに載せない方針）。
  */
 const PipelineCalendarView: React.FC<{
     candidates: Candidate[];
@@ -7285,22 +7280,6 @@ const PipelineCalendarView: React.FC<{
                 const list = map.get(app.scheduledDate!) || [];
                 list.push({ kind: 'application', candidate: c, application: app });
                 map.set(app.scheduledDate!, list);
-            });
-        });
-        // 実施済み選考ログ — every past stage transition (see CompanyApplication.stageHistory),
-        // one faint badge per entry that has a real date (the backfilled "記録開始前" origin
-        // entry has none and is skipped), except CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES (打診・
-        // 書類選考・お見送り — not real interviews, kept off the calendar per user feedback).
-        // This is what makes 各面接がいつ行われたか visible directly on the calendar,
-        // independent of the (now-cleared-on-advance) scheduledDate.
-        candidates.filter(c => !c.isHidden).forEach(c => {
-            c.applications.filter(app => !app.isHidden).forEach(app => {
-                (app.stageHistory || []).forEach(h => {
-                    if (!h.date || CALENDAR_COMPLETED_LOG_EXCLUDED_STAGES.includes(h.stage)) return;
-                    const list = map.get(h.date) || [];
-                    list.push({ kind: 'completed', candidate: c, application: app, stage: h.stage, date: h.date });
-                    map.set(h.date, list);
-                });
             });
         });
         // Revival reminders come from EVERY candidate regardless of isHidden — a 掘り起しリスト
@@ -7374,27 +7353,6 @@ const PipelineCalendarView: React.FC<{
                                     >
                                         <span className="pipeline-calendar-event-stage">掘り起し</span>
                                         {ev.candidate.name}
-                                    </div>
-                                );
-                            }
-                            if (ev.kind === 'completed') {
-                                const handleCompletedActivate = (e: React.SyntheticEvent) => {
-                                    e.stopPropagation();
-                                    onEditApplication(ev.candidate, ev.application);
-                                };
-                                return (
-                                    <div
-                                        key={idx}
-                                        className={`pipeline-calendar-event pipeline-calendar-event-completed ${isEditableEvent ? 'is-editable' : ''}`}
-                                        style={{ '--badge-color': STAGE_COLOR_MAP[ev.stage] } as React.CSSProperties}
-                                        title={`実施済み選考: ${ev.candidate.name} / ${ev.application.companyName} / ${ev.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
-                                        role={isEditableEvent ? 'button' : undefined}
-                                        tabIndex={isEditableEvent ? 0 : undefined}
-                                        onClick={isEditableEvent ? handleCompletedActivate : undefined}
-                                        onKeyDown={isEditableEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCompletedActivate(e); } } : undefined}
-                                    >
-                                        <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.stage]}実施</span>
-                                        {ev.candidate.name} - {ev.application.companyName}
                                     </div>
                                 );
                             }
