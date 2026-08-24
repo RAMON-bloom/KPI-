@@ -2668,3 +2668,142 @@ p.memo-content-text {
       align-items: stretch;
     }
 }
+
+/* --- 紹介先企業カオスマップ --- */
+.chaos-map-view {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.chaos-map-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  background-color: var(--card-bg-color);
+  border-radius: var(--border-radius);
+  box-shadow: var(--card-shadow);
+  padding: 0.75rem 1rem;
+}
+.chaos-map-kind-switcher {
+  display: flex;
+  gap: 0.25rem;
+}
+.chaos-map-search-input {
+  min-width: 12rem;
+  flex: 1;
+}
+.chaos-map-ng-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+  color: var(--text-muted-color);
+  font-size: 0.9rem;
+}
+.chaos-map-grid {
+  display: grid;
+  gap: 1px;
+  background-color: var(--border-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  overflow-x: auto;
+}
+.chaos-map-corner-cell {
+  background-color: var(--card-bg-color);
+}
+.chaos-map-category-header {
+  background-color: var(--card-bg-color);
+  padding: 0.6rem 0.5rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chaos-map-difficulty-header {
+  min-width: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #fff;
+}
+.chaos-map-difficulty-S { background-color: #b91c1c; }
+.chaos-map-difficulty-A { background-color: #dc3545; }
+.chaos-map-difficulty-B { background-color: #ef7b7b; }
+.chaos-map-difficulty-C { background-color: #f5b8b8; color: var(--text-color); }
+.chaos-map-difficulty-D { background-color: #fceeee; color: var(--text-color); }
+.chaos-map-cell {
+  background-color: var(--card-bg-color);
+  padding: 0.4rem;
+  min-height: 3.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.35rem;
+}
+.chaos-map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--text-color);
+}
+.chaos-map-chip:hover {
+  border-color: var(--primary-color);
+}
+.chaos-map-chip-ng {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.chaos-map-chip-badge {
+  font-size: 0.85rem;
+}
+.chaos-map-chip-ng-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--danger-color);
+}
+.chaos-map-cell-add-button {
+  background: none;
+  border: 1px dashed var(--border-color);
+  border-radius: 999px;
+  width: 1.6rem;
+  height: 1.6rem;
+  line-height: 1;
+  color: var(--text-muted-color);
+  cursor: pointer;
+}
+.chaos-map-cell-add-button:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+.chaos-map-badge-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.chaos-map-badge-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}
+.chaos-map-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.chaos-map-saving-indicator {
+  color: var(--text-muted-color);
+  font-size: 0.85rem;
+}

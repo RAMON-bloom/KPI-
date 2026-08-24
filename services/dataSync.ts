@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, type DriveFileRef } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, findChaosMapConfigFile, createChaosMapConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, type DriveFileRef } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -6,6 +6,7 @@ const PENDING_SYNC_PREFIX = 'kpiPendingSync:';
 const LAST_SYNCED_AT_PREFIX = 'kpiLastSyncedAt:';
 const LEGACY_APPDATA_KEY = 'kpiAppData';
 const MEDIA_CONFIG_CACHE_KEY = 'kpiMediaConfigCache';
+const CHAOS_MAP_CONFIG_CACHE_KEY = 'kpiChaosMapConfigCache';
 const SCHEMA_VERSION = 1;
 
 function pendingSyncKey(email: string): string {
@@ -95,6 +96,24 @@ export function readMediaConfigCache<T = any>(): T | null {
 function writeMediaConfigCache(data: unknown): void {
   try {
     localStorage.setItem(MEDIA_CONFIG_CACHE_KEY, JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
+
+/** The shared chaos-map-config cache is not user-specific — everyone reads the same list. */
+export function readChaosMapConfigCache<T = any>(): T | null {
+  try {
+    const raw = localStorage.getItem(CHAOS_MAP_CONFIG_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeChaosMapConfigCache(data: unknown): void {
+  try {
+    localStorage.setItem(CHAOS_MAP_CONFIG_CACHE_KEY, JSON.stringify(data));
   } catch {
     // ignore
   }
@@ -734,4 +753,102 @@ export async function saveMediaConfig(
     return driveFileId;
   }
   return createMediaConfigFile(data, creatorEmail);
+}
+
+export interface ChaosMapConfigResult<T> {
+  data: T | null;
+  driveFileId: string | null;
+  ownerEmail: string | null;
+}
+
+/** Loads the single shared chaos-map-config file (紹介先企業カオスマップ), if one exists yet. */
+export async function loadChaosMapConfig<T = any>(): Promise<ChaosMapConfigResult<T>> {
+  const existing = await findChaosMapConfigFile();
+  if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
+  const content = await readFileContent<T>(existing.id);
+  writeChaosMapConfigCache(content);
+  // Under this app's full `drive` scope (unlike media-config's admin-only editing model), any
+  // bloom-firm.com account is meant to be able to write here — self-heal a 'reader'-only or
+  // undiscoverable domain permission regardless of who happens to load it first.
+  ensureDomainPermission(existing.id, 'writer').catch(() => {});
+  return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
+}
+
+/**
+ * Creates the shared chaos-map-config file the first time anyone opens the page, or overwrites
+ * it wholesale otherwise. Only meant for the low-frequency `categories`/`badgeCatalog` settings
+ * — the frequently-edited `companies` array should go through add/update/deleteChaosMapCompany
+ * instead, which re-fetch-then-merge to avoid clobbering a concurrent teammate's edit.
+ */
+export async function saveChaosMapConfig(
+  driveFileId: string | null,
+  data: unknown,
+  creatorEmail: string
+): Promise<string> {
+  writeChaosMapConfigCache(data);
+  if (driveFileId) {
+    await updateFileContent(driveFileId, data);
+    return driveFileId;
+  }
+  return createChaosMapConfigFile(data, creatorEmail);
+}
+
+/**
+ * Adds one company to the shared カオスマップ: re-fetches the latest config from Drive right
+ * before writing (same pattern as addTeammateCandidate above) so that two people adding
+ * different companies within moments of each other don't clobber one another's addition.
+ */
+export async function addChaosMapCompany<T extends { companies: any[] } = any>(
+  driveFileId: string,
+  company: unknown
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updated = { ...latest, companies: [...(latest.companies || []), company] };
+  await updateFileContent(driveFileId, updated);
+  writeChaosMapConfigCache(updated);
+  return updated;
+}
+
+/** Same re-fetch-then-merge pattern as addChaosMapCompany, but patches an existing company. */
+export async function updateChaosMapCompany<T extends { companies: any[] } = any>(
+  driveFileId: string,
+  companyId: string,
+  patch: Record<string, unknown>
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const companies = latest.companies || [];
+  const updatedCompanies = companies.map((c: any) => (c.id === companyId ? { ...c, ...patch } : c));
+  const updated = { ...latest, companies: updatedCompanies };
+  await updateFileContent(driveFileId, updated);
+  writeChaosMapConfigCache(updated);
+  return updated;
+}
+
+/** Same re-fetch-then-merge pattern as addChaosMapCompany, but removes a company. */
+export async function deleteChaosMapCompany<T extends { companies: any[] } = any>(
+  driveFileId: string,
+  companyId: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const companies = latest.companies || [];
+  const updated = { ...latest, companies: companies.filter((c: any) => c.id !== companyId) };
+  await updateFileContent(driveFileId, updated);
+  writeChaosMapConfigCache(updated);
+  return updated;
+}
+
+/**
+ * Overwrites just the badgeCatalog field via the same re-fetch-then-merge pattern as the
+ * company functions above — badge catalog edits are rare, but re-fetching first still avoids
+ * clobbering a companies-array change a teammate made moments earlier.
+ */
+export async function saveChaosMapBadgeCatalog<T extends { badgeCatalog: any[] } = any>(
+  driveFileId: string,
+  badgeCatalog: unknown[]
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updated = { ...latest, badgeCatalog };
+  await updateFileContent(driveFileId, updated);
+  writeChaosMapConfigCache(updated);
+  return updated;
 }

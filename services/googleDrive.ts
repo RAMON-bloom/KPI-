@@ -3,6 +3,7 @@ import { getCurrentSession, refreshTokenSilently } from './googleAuth';
 const DATA_FILE_NAME = 'kpi-manager-data.json';
 const TEAMS_FILE_NAME = 'kpi-manager-teams.json';
 const MEDIA_FILE_NAME = 'kpi-manager-media.json';
+const CHAOS_MAP_FILE_NAME = 'kpi-manager-chaos-map.json';
 const APP_TAG = 'kpi-manager-v1';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
 
@@ -301,6 +302,28 @@ export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
 /** Creates the shared teams-config file; the creator becomes the only one who can edit it (drive.file scope). */
 export async function createTeamsConfigFile(content: unknown, creatorEmail: string): Promise<string> {
   const fileId = await createJsonFile(TEAMS_FILE_NAME, { app: APP_TAG, kind: 'teams-config' }, { ownerEmail: creatorEmail }, content);
+  await grantDomainPermission(fileId, 'writer');
+  return fileId;
+}
+
+/**
+ * Finds the single shared chaos-map-config file (紹介先企業カオスマップ), if it exists.
+ * Unlike media-config, this is NOT scoped to a single admin account — the map is meant to be
+ * editable by anyone in the domain, so any account's discovery query converging on the same
+ * file (via the corpora=domain fallback in findSharedConfigFile) is exactly what's wanted here.
+ */
+export async function findChaosMapConfigFile(): Promise<DriveFileRef | null> {
+  return findSharedConfigFile(CHAOS_MAP_FILE_NAME);
+}
+
+/**
+ * Creates the shared chaos-map-config file the first time anyone opens the カオスマップ page.
+ * Grants domain-wide 'writer' immediately so — under this app's full `drive` scope (see
+ * services/googleAuth.ts) — every bloom-firm.com account can actually write to it afterwards,
+ * not just its creator.
+ */
+export async function createChaosMapConfigFile(content: unknown, creatorEmail: string): Promise<string> {
+  const fileId = await createJsonFile(CHAOS_MAP_FILE_NAME, { app: APP_TAG, kind: 'chaos-map-config' }, { ownerEmail: creatorEmail }, content);
   await grantDomainPermission(fileId, 'writer');
   return fileId;
 }

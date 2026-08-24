@@ -23,6 +23,9 @@ import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, Scout
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError } from './services/googleTasks';
 import { buildCandidateDraftsFromGrid, extractDistinctColumnValues, CANDIDATE_IMPORT_FIELD_CATALOG, CandidateImportFieldKey, BuildCandidateDraftsResult } from './services/pipelineSpreadsheetImport';
+import { loadChaosMapConfig, saveChaosMapConfig, addChaosMapCompany, updateChaosMapCompany, deleteChaosMapCompany, saveChaosMapBadgeCatalog, readChaosMapConfigCache } from './services/dataSync';
+import { ChaosMapConfig, ChaosMapCompany, ChaosMapBadge, SEED_CHAOS_MAP_CONFIG, generateChaosMapId } from './services/chaosMapData';
+import { ChaosMapView } from './components/ChaosMap';
 
 ChartJS.register(
   CategoryScale,
@@ -11643,7 +11646,7 @@ const App: React.FC = () => {
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
   // View state
-  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline'>('personal_kpi');
+  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline' | 'chaos_map'>('personal_kpi');
   const [allUsersData, setAllUsersData] = useState<Record<string, UserData>>({});
 
   // BCA事業部 header switcher — 'BCA' shows F+ and AC combined (not a real assignment of its
@@ -11791,6 +11794,15 @@ const App: React.FC = () => {
   const [mediaOwnerEmail, setMediaOwnerEmail] = useState<string | null>(null);
   const [isLoadingMediaConfig, setIsLoadingMediaConfig] = useState(allMedia.length === 0);
   const [isMediaModalOpen, setIsMediaModalOpen] = useState(false);
+
+  // 紹介先企業カオスマップ state — shared across all users, Drive-backed like Teams/Media, but
+  // (unlike Media) editable by anyone in the domain, so there's no admin-only email gate here.
+  // Loaded lazily the first time the user opens the view (see the effect below), not
+  // unconditionally at sign-in like Teams/Media, since it's an isolated page nothing else reads.
+  const [chaosMapConfig, setChaosMapConfig] = useState<ChaosMapConfig | null>(() => readChaosMapConfigCache<ChaosMapConfig>());
+  const [chaosMapDriveFileId, setChaosMapDriveFileId] = useState<string | null>(null);
+  const [isLoadingChaosMapConfig, setIsLoadingChaosMapConfig] = useState(true);
+  const hasLoadedChaosMapRef = useRef(false);
 
   // --- Consolidated user data state ---
   const [currentUserData, setCurrentUserData] = useState<UserData | null>(null);
@@ -12249,6 +12261,105 @@ const App: React.FC = () => {
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
+
+  // Loads the shared カオスマップ config once, the first time the user actually opens the
+  // page (unlike Teams/Media it isn't read anywhere else in the app, so there's no reason to
+  // fetch it at sign-in for users who never visit this view). If no Drive file exists yet,
+  // falls back to the in-memory seed categories/badges so the grid is usable immediately —
+  // the real file is only created lazily, on the first add/edit (see the handlers below).
+  useEffect(() => {
+    if (view !== 'chaos_map' || !currentIdentity || !isInitialized || hasLoadedChaosMapRef.current) return;
+    hasLoadedChaosMapRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await loadChaosMapConfig<ChaosMapConfig>();
+        if (cancelled) return;
+        if (result.data) {
+          setChaosMapConfig(result.data);
+          setChaosMapDriveFileId(result.driveFileId);
+        } else {
+          setChaosMapConfig(SEED_CHAOS_MAP_CONFIG);
+        }
+      } catch (error) {
+        console.error('Failed to load chaos map config from Drive', error);
+        hasLoadedChaosMapRef.current = false;
+      } finally {
+        if (!cancelled) setIsLoadingChaosMapConfig(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [view, currentIdentity, isInitialized]);
+
+  // Adds one company. If the shared Drive file doesn't exist yet (first company anyone ever
+  // adds), creates it seeded with the default categories/badges plus this company in one shot.
+  const handleAddChaosMapCompany = async (companyData: Omit<ChaosMapCompany, 'id' | 'createdBy' | 'createdAt'>) => {
+    if (!currentIdentity) return;
+    const newCompany: ChaosMapCompany = {
+      ...companyData,
+      id: generateChaosMapId('company'),
+      createdBy: currentIdentity.email,
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      if (!chaosMapDriveFileId) {
+        const seeded: ChaosMapConfig = { ...SEED_CHAOS_MAP_CONFIG, companies: [newCompany] };
+        const newFileId = await saveChaosMapConfig(null, seeded, currentIdentity.email);
+        setChaosMapDriveFileId(newFileId);
+        setChaosMapConfig(seeded);
+      } else {
+        const updated = await addChaosMapCompany<ChaosMapConfig>(chaosMapDriveFileId, newCompany);
+        setChaosMapConfig(updated);
+      }
+    } catch (error) {
+      console.error('Failed to add chaos map company', error);
+      alert('企業の追加に失敗しました。');
+    }
+  };
+
+  const handleUpdateChaosMapCompany = async (companyId: string, patch: Partial<ChaosMapCompany>) => {
+    if (!chaosMapDriveFileId || !currentIdentity) return;
+    try {
+      const updated = await updateChaosMapCompany<ChaosMapConfig>(chaosMapDriveFileId, companyId, {
+        ...patch,
+        updatedBy: currentIdentity.email,
+        updatedAt: new Date().toISOString(),
+      });
+      setChaosMapConfig(updated);
+    } catch (error) {
+      console.error('Failed to update chaos map company', error);
+      alert('企業の更新に失敗しました。');
+    }
+  };
+
+  const handleDeleteChaosMapCompany = async (companyId: string) => {
+    if (!chaosMapDriveFileId) return;
+    try {
+      const updated = await deleteChaosMapCompany<ChaosMapConfig>(chaosMapDriveFileId, companyId);
+      setChaosMapConfig(updated);
+    } catch (error) {
+      console.error('Failed to delete chaos map company', error);
+      alert('企業の削除に失敗しました。');
+    }
+  };
+
+  const handleSaveChaosMapBadgeCatalog = async (badges: ChaosMapBadge[]) => {
+    if (!currentIdentity) return;
+    try {
+      if (!chaosMapDriveFileId) {
+        const seeded: ChaosMapConfig = { ...SEED_CHAOS_MAP_CONFIG, badgeCatalog: badges };
+        const newFileId = await saveChaosMapConfig(null, seeded, currentIdentity.email);
+        setChaosMapDriveFileId(newFileId);
+        setChaosMapConfig(seeded);
+      } else {
+        const updated = await saveChaosMapBadgeCatalog<ChaosMapConfig>(chaosMapDriveFileId, badges);
+        setChaosMapConfig(updated);
+      }
+    } catch (error) {
+      console.error('Failed to save chaos map badge catalog', error);
+      alert('バッジの保存に失敗しました。');
+    }
+  };
 
   const handleCustomPeriodExport = (label: string, exportUsers: string[]) => {
     if (!customExportStartDate || !customExportEndDate) {
@@ -14182,6 +14293,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
+            <button onClick={() => setView('chaos_map')} disabled={view === 'chaos_map'}>紹介先カオスマップ</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
@@ -15017,6 +15129,16 @@ const App: React.FC = () => {
                 weekStartsOn={weekStartsOn}
             />
           </>
+        )}
+        {view === 'chaos_map' && (
+          <ChaosMapView
+            config={chaosMapConfig}
+            isLoading={isLoadingChaosMapConfig}
+            onAddCompany={handleAddChaosMapCompany}
+            onUpdateCompany={handleUpdateChaosMapCompany}
+            onDeleteCompany={handleDeleteChaosMapCompany}
+            onSaveBadgeCatalog={handleSaveChaosMapBadgeCatalog}
+          />
         )}
       </main>
     </div>
