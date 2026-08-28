@@ -8096,6 +8096,10 @@ const PipelineCandidateCard: React.FC<{
   onEditApplication,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
+  // c.sourceはMediaEntry.id（例: 名前が日本語だけの媒体だと'media'のような機械的なスラッグに
+  // なる）を保持しているため、表示にはそのまま使わず必ず対応する媒体名に解決する。
+  const resolveSourceLabel = (source: string): string =>
+    source === 'Other' ? 'その他' : (allMedia.find(m => m.id === source)?.name || source);
   const visibleApplications = c.applications.filter(app => !app.isHidden);
   const bestConfidenceApp = getBestConfidenceApplication(c);
   // 内定承諾した選考の意思決定時期（成約月）— 通常はDecisionMonthPromptModalで内定承諾に
@@ -8486,7 +8490,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="key-info-item">
                     <span>媒体</span>
                     {candidateIsOwn ? (
-                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={c.source} emptyText="N/A">
+                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={resolveSourceLabel(c.source)} emptyText="N/A">
                             <option value="">選択してください</option>
                             {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                             {c.source && c.source !== 'Other' && !activeMedia.some(m => m.id === c.source) && (
@@ -8497,7 +8501,7 @@ const PipelineCandidateCard: React.FC<{
                             <option value="Other">その他</option>
                         </InlineSelectField>
                     ) : (
-                        c.source || 'N/A'
+                        (c.source && resolveSourceLabel(c.source)) || 'N/A'
                     )}
                 </div>
                 <div className="key-info-item">
@@ -8695,7 +8699,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">集客媒体</span>
                     {candidateIsOwn ? (
-                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={c.source} emptyText="N/A">
+                        <InlineSelectField value={c.source} onCommit={(v) => commitCandidateField('source', v)} ariaLabel="集客媒体" displayText={resolveSourceLabel(c.source)} emptyText="N/A">
                             <option value="">選択してください</option>
                             {activeMedia.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                             {c.source && c.source !== 'Other' && !activeMedia.some(m => m.id === c.source) && (
@@ -8706,7 +8710,7 @@ const PipelineCandidateCard: React.FC<{
                             <option value="Other">その他</option>
                         </InlineSelectField>
                     ) : (
-                        <span className="info-value">{c.source || 'N/A'}</span>
+                        <span className="info-value">{(c.source && resolveSourceLabel(c.source)) || 'N/A'}</span>
                     )}
                 </div>
                 <div className="candidate-info-item">
@@ -9542,7 +9546,7 @@ const CandidatePipelineView: React.FC<{
                 escapeCSV(candidate.currentSalary),
                 escapeCSV(candidate.salary),
                 escapeCSV(candidate.expectedAnnualSalary),
-                escapeCSV(candidate.source),
+                escapeCSV(candidate.source === 'Other' ? 'その他' : (allMedia.find(m => m.id === candidate.source)?.name || candidate.source)),
                 escapeCSV(candidate.age),
                 escapeCSV(candidate.jobType),
                 escapeCSV(candidate.phoneNumber),
