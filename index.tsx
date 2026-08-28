@@ -4270,7 +4270,7 @@ const FeedbackModal: React.FC<{
   posts: (FeedbackPost & { authorEmail: string; authorLabel: string })[];
   isDeveloper: boolean;
   currentUserEmail: string;
-  onSubmit: (category: FeedbackCategory, content: string) => void;
+  onSubmit: (category: FeedbackCategory, content: string) => Promise<void>;
   onAddMessage: (post: FeedbackPost & { authorEmail: string }, content: string) => Promise<void>;
   onSetStatus: (authorEmail: string, postId: string, status: FeedbackStatus) => Promise<void>;
   onDelete: (authorEmail: string, postId: string) => Promise<void>;
@@ -4286,12 +4286,28 @@ const FeedbackModal: React.FC<{
   // そのまま表示されるようにする。
   const [sendingPostId, setSendingPostId] = useState<string | null>(null);
   const [sendMessageByPostId, setSendMessageByPostId] = useState<Record<string, string>>({});
+  // 新規投稿の送信状況。上のスレッド返信と同じ理由（fire-and-forgetだと「投稿しても保存
+  // されない」ように見える）で、送信中はボタンを無効化し、失敗時はcontentを消さずその場に
+  // 残して再送できるようにする。
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!content.trim()) return;
-    onSubmit(category, content.trim());
-    setContent('');
+    const trimmed = content.trim();
+    if (!trimmed || isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitMessage(null);
+    onSubmit(category, trimmed)
+      .then(() => {
+        setContent('');
+      })
+      .catch(() => {
+        setSubmitMessage('投稿の保存に失敗しました。もう一度お試しください。');
+      })
+      .finally(() => {
+        setIsSubmitting(false);
+      });
   };
 
   const handleSendMessage = (post: FeedbackPost & { authorEmail: string; authorLabel: string }) => {
@@ -4343,7 +4359,12 @@ const FeedbackModal: React.FC<{
                 required
               />
             </div>
-            <button type="submit" className="submit-button">投稿する</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <button type="submit" className="submit-button" disabled={isSubmitting || !content.trim()}>
+                {isSubmitting ? '送信中...' : '投稿する'}
+              </button>
+              {submitMessage && <span className="feedback-save-message" style={{ color: 'var(--danger-color)' }}>{submitMessage}</span>}
+            </div>
           </form>
           <div className="feedback-list">
             {posts.length === 0 && <p className="no-data-message">まだ投稿がありません。</p>}
@@ -12388,7 +12409,7 @@ const App: React.FC = () => {
     return posts.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [displayedAllUsersData]);
 
-  const handleSubmitFeedback = (category: FeedbackCategory, content: string) => {
+  const handleSubmitFeedback = (category: FeedbackCategory, content: string): Promise<void> => {
     const newPost: FeedbackPost = {
       id: `feedback_${Date.now()}`,
       category,
@@ -12402,11 +12423,23 @@ const App: React.FC = () => {
     // Drive書き込みが挟まると、そちらを消してしまう（appendOwnFeedbackPostのコメント参照）。
     // driveFileIdがまだ無い（ファイル未作成の新規ユーザー）場合はそもそも他経路との競合が
     // 起きようがないため、通常のデバウンス保存（ファイル新規作成を兼ねる）に任せる。
+    //
+    // ここは以前fire-and-forget（.catchでconsole.errorするだけ）だった——Drive書き込みが
+    // 失敗しても呼び出し元（FeedbackModal）には何も伝わらず、画面上は投稿できたように見える
+    // ままページを再読み込みすると消えている、という「投稿しても保存されない」不具合の実体。
+    // persistFeedbackUpdate/handleAddFeedbackMessageと同じく、結果を待てるPromiseを返して
+    // 失敗時は楽観更新を巻き戻し、ユーザーにも知らせる。
     if (driveFileId) {
-      appendOwnFeedbackPost<UserData>(driveFileId, newPost).catch(err => {
-        console.error('Failed to save new feedback post directly to Drive', err);
-      });
+      return appendOwnFeedbackPost<UserData>(driveFileId, newPost)
+        .then(() => {})
+        .catch(err => {
+          console.error('Failed to save new feedback post directly to Drive', err);
+          setCurrentUserData(prev => (prev ? { ...prev, feedbackPosts: (prev.feedbackPosts || []).filter(p => p.id !== newPost.id) } : prev));
+          alert(`投稿の保存に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+          throw err;
+        });
     }
+    return Promise.resolve();
   };
 
   // 開発者による他ユーザーの投稿への返信・ステータス変更・削除 — persistTeammateCandidateVisibility
