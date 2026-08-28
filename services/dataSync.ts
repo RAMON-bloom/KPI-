@@ -212,6 +212,30 @@ let pendingSave: { email: string; driveFileId: string | null; data: unknown; onF
 // still vanish: it wasn't a debounce-timing race, it was an in-flight write race.
 let writeQueue: Promise<void> = Promise.resolve();
 
+/**
+ * Runs `task` serialized after every other write already queued (this debounced save AND the
+ * direct feedbackPosts writers below), returning its result.
+ *
+ * なぜ必要か: appendOwnFeedbackPost/appendTeammateFeedbackMessage/overwriteTeammateFeedbackPost
+ * は元々このwriteQueueの外側で独立にfetch最新→書き込みしていた。performSave（上のwriteQueueの
+ * 唯一の使い手だった）側の「書き込み直前にfeedbackPostsだけ読み直す」ガードは、あくまで
+ * "performSave自身の直前"にしか効かない——同時に走っているappendOwnFeedbackPost等の
+ * 読み直し→書き込みが、performSaveの読み直しとPATCHの間に挟まる余地は塞げていなかった。
+ * 具体的には: 新規投稿1) appendOwnFeedbackPostがGET→（ここでperformSaveのGETが割り込み、まだ
+ * 投稿前の内容を読む）→ appendOwnFeedbackPostのPATCHが先に成立 → 2秒後のperformSaveのPATCHが
+ * 「投稿前のfeedbackPosts」で丸ごと上書き、という順序になると、投稿は一瞬画面に出た直後に
+ * Drive上からは消える（「バグ報告を投稿しても保存されない」の実体）。全員を同じ直列キューに
+ * 通すことで、この2系統が同じファイルに対して同時に読み書きすることがなくなる。
+ */
+function enqueueOnWriteQueue<T>(task: () => Promise<T>): Promise<T> {
+  const result = writeQueue.then(task);
+  // Keep the shared queue alive even if this particular write fails — a rejection here must not
+  // block every write queued after it. The rejection itself still propagates to `result`, which
+  // the caller awaits normally.
+  writeQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 async function performSave(
   email: string,
   driveFileId: string | null,
@@ -259,12 +283,11 @@ async function performSave(
 
 /** Appends the currently-pending save (if any) to the write queue and returns it. */
 function enqueuePendingSave(): Promise<void> {
-  writeQueue = writeQueue.then(async () => {
+  return enqueueOnWriteQueue(async () => {
     const save = pendingSave;
     pendingSave = null;
     if (save) await performSave(save.email, save.driveFileId, save.data, save.onFileCreated);
   });
-  return writeQueue;
 }
 
 /**
@@ -599,14 +622,16 @@ export async function overwriteTeammateFeedbackPost<T extends { feedbackPosts?: 
   postId: string,
   patch: Record<string, unknown> | null
 ): Promise<T> {
-  const latest = await readFileContent<T>(driveFileId);
-  const posts = latest.feedbackPosts || [];
-  const updatedPosts = patch === null
-    ? posts.filter((p: any) => p.id !== postId)
-    : posts.map((p: any) => (p.id === postId ? { ...p, ...patch } : p));
-  const updated = { ...latest, feedbackPosts: updatedPosts };
-  await updateFileContent(driveFileId, updated);
-  return updated;
+  return enqueueOnWriteQueue(async () => {
+    const latest = await readFileContent<T>(driveFileId);
+    const posts = latest.feedbackPosts || [];
+    const updatedPosts = patch === null
+      ? posts.filter((p: any) => p.id !== postId)
+      : posts.map((p: any) => (p.id === postId ? { ...p, ...patch } : p));
+    const updated = { ...latest, feedbackPosts: updatedPosts };
+    await updateFileContent(driveFileId, updated);
+    return updated;
+  });
 }
 
 /**
@@ -626,20 +651,22 @@ export async function appendTeammateFeedbackMessage<T extends { feedbackPosts?: 
   newMessage: { id: string; authorEmail: string; content: string; createdAt: string },
   developerEmailForLegacyReply: string
 ): Promise<T> {
-  const latest = await readFileContent<T>(driveFileId);
-  const posts = latest.feedbackPosts || [];
-  const updatedPosts = posts.map((p: any) => {
-    if (p.id !== postId) return p;
-    const existingMessages: any[] = (p.messages && p.messages.length > 0)
-      ? p.messages
-      : (p.developerReply
-        ? [{ id: `${p.id}-legacy-reply`, authorEmail: developerEmailForLegacyReply, content: p.developerReply, createdAt: p.repliedAt || p.createdAt }]
-        : []);
-    return { ...p, messages: [...existingMessages, newMessage] };
+  return enqueueOnWriteQueue(async () => {
+    const latest = await readFileContent<T>(driveFileId);
+    const posts = latest.feedbackPosts || [];
+    const updatedPosts = posts.map((p: any) => {
+      if (p.id !== postId) return p;
+      const existingMessages: any[] = (p.messages && p.messages.length > 0)
+        ? p.messages
+        : (p.developerReply
+          ? [{ id: `${p.id}-legacy-reply`, authorEmail: developerEmailForLegacyReply, content: p.developerReply, createdAt: p.repliedAt || p.createdAt }]
+          : []);
+      return { ...p, messages: [...existingMessages, newMessage] };
+    });
+    const updated = { ...latest, feedbackPosts: updatedPosts };
+    await updateFileContent(driveFileId, updated);
+    return updated;
   });
-  const updated = { ...latest, feedbackPosts: updatedPosts };
-  await updateFileContent(driveFileId, updated);
-  return updated;
 }
 
 /**
@@ -661,10 +688,12 @@ export async function appendOwnFeedbackPost<T extends { feedbackPosts?: any[] } 
   driveFileId: string,
   newPost: any
 ): Promise<T> {
-  const latest = await readFileContent<T>(driveFileId);
-  const updated = { ...latest, feedbackPosts: [...(latest.feedbackPosts || []), newPost] };
-  await updateFileContent(driveFileId, updated);
-  return updated;
+  return enqueueOnWriteQueue(async () => {
+    const latest = await readFileContent<T>(driveFileId);
+    const updated = { ...latest, feedbackPosts: [...(latest.feedbackPosts || []), newPost] };
+    await updateFileContent(driveFileId, updated);
+    return updated;
+  });
 }
 
 export interface TeamsConfigResult<T> {
