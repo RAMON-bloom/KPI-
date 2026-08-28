@@ -132,11 +132,22 @@ export async function ensureDomainPermission(fileId: string, role: 'reader' | 'w
   await grantDomainPermission(fileId, role);
 }
 
-/** Finds the signed-in user's own kpi-manager-data.json in their My Drive, if it exists. */
+/**
+ * Finds the signed-in user's own kpi-manager-data.json in their My Drive, if it exists.
+ *
+ * 過去、既存ファイルが確認できる前に保存が走ると重複ファイルを作ってしまう不具合があった
+ * （saveOwnDataDebounced呼び出し側のisDriveFileIdResolvedガードのコメント参照）せいで、
+ * 実際に複数ユーザーが同名の重複ファイルを複数持っている状態がDrive上に残っている。
+ * orderByを指定していなかったため、このクエリはDrive側の不定な順序でfiles[0]を返しており
+ * ——直近の書き込み（appendOwnFeedbackPost等）が新しい方のファイルに届いていても、次回の
+ * ページ読み込みで古い方の重複ファイルが選ばれてしまうと、保存したはずの内容が消えたように
+ * 見えていた（「バグ報告を投稿しても保存されない」不具合の実体）。loadAllTeammatesDataが
+ * 重複ファイルを「最終更新が最も新しいもの」で解決しているのと同じ基準に揃える。
+ */
 export async function findOwnDataFile(): Promise<DriveFileRef | null> {
   const q = `name='${DATA_FILE_NAME}' and appProperties has { key='app' and value='${APP_TAG}' } and 'me' in owners and trashed=false`;
   const res = await authorizedFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&spaces=drive`
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&spaces=drive`
   );
   if (!res.ok) throw new Error('Driveファイルの検索に失敗しました。');
   const data = await res.json();
