@@ -6213,8 +6213,8 @@ const CandidateModal: React.FC<{
                             />
                           </div>
                           {/* 日程が確定していない間だけ「どちらのボールか」が意味を持つため、
-                              選考予定日が未入力の時だけ表示する。 */}
-                          {!app.scheduledDate && (
+                              選考予定日が未入力または過去日付（前ラウンドの残り）の時だけ表示する。 */}
+                          {!isScheduledDateUpcoming(app) && (
                             <div className="scheduling-ball-row">
                               <span className="scheduling-ball-row-label">日程調整中:</span>
                               <SchedulingBallField
@@ -6498,7 +6498,7 @@ const ApplicationModal: React.FC<{
                                 onChange={handleChange}
                             />
                         </div>
-                        {!application.scheduledDate && (
+                        {!isScheduledDateUpcoming(application) && (
                             <div className="scheduling-ball-row">
                                 <span className="scheduling-ball-row-label">日程調整中:</span>
                                 <SchedulingBallField
@@ -7959,6 +7959,14 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
+// scheduledDateが「今日以降」なら本当に確定した今後の予定として扱う。前の選考ラウンドの
+// 予定日がstage変更時にクリアされずに残っている（過去日付のまま）ケースがあり、これを
+// 「確定済み」として扱ってしまうと、日程調整中のボールを選ぶために毎回まず過去日付を手で
+// 消す必要が生じて手間になる（実際にユーザーから指摘があった不具合）。過去日付は実質
+// 「未確定」と同じに扱うことで、その手間を無くす。
+const isScheduledDateUpcoming = (app: CompanyApplication): boolean =>
+  !!app.scheduledDate && app.scheduledDate >= new Date().toLocaleDateString('sv-SE');
+
 // 選考日時調整中: 「候補者ボール」「企業ボール」の2つのチェックボックスを排他選択（一方を
 // チェックすると他方は自動で外れる）で表示する。どちらもチェックされていない = 現在調整中で
 // はない。3箇所（候補者登録フォームの選考一覧、選考情報編集モーダル、候補者詳細カードの
@@ -7998,9 +8006,10 @@ const buildStageTooltip = (app: CompanyApplication, editable: boolean): string =
   const scheduleLine = app.scheduledDate
     ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
     : '';
-  // 選考日時調整中は日程未確定の間だけ意味を持つため、scheduledDateが入っている時は
-  // （schedulingBallOwnerが古い値のまま残っていても）ツールチップには出さない。
-  const ballLine = (!app.scheduledDate && app.schedulingBallOwner)
+  // 選考日時調整中は「今後の予定として確定している」間だけ意味を持たないため、
+  // scheduledDateが今日以降の時は（schedulingBallOwnerが古い値のまま残っていても）
+  // ツールチップには出さない。過去日付（前ラウンドの残り）は未確定と同じ扱い。
+  const ballLine = (!isScheduledDateUpcoming(app) && app.schedulingBallOwner)
     ? `\n日程調整中: ${app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}`
     : '';
   const trackLine = app.stageHistory && app.stageHistory.length > 0
@@ -8040,7 +8049,7 @@ const StageTrack: React.FC<{ history: CompanyApplication['stageHistory'] }> = ({
 // 「候補者ボール/企業ボール」を添える——展開しなくても「今どちらの返信待ちか」が
 // カード一覧の時点で分かるようにするため（buildStageTooltipのホバー表示と同じ条件）。
 const SchedulingBallBadgeSuffix: React.FC<{ app: CompanyApplication }> = ({ app }) => {
-  if (app.scheduledDate || !app.schedulingBallOwner) return null;
+  if (isScheduledDateUpcoming(app) || !app.schedulingBallOwner) return null;
   return (
     <span className="scheduling-ball-indicator">
       ・{app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}
@@ -9185,8 +9194,9 @@ const PipelineCandidateCard: React.FC<{
                                             </span>
                                         )}
                                     </div>
-                                    {/* 選考予定日が確定している間は無関係になるため、未確定の時だけ表示する。 */}
-                                    {!app.scheduledDate && (
+                                    {/* 選考予定日が今後の予定として確定している間は無関係になるため、未確定
+                                        （または前ラウンドの過去日付が残っているだけ）の時だけ表示する。 */}
+                                    {!isScheduledDateUpcoming(app) && (
                                         <div className="detail-card-item">
                                             <span>日程調整中:</span>
                                             {candidateIsOwn ? (
