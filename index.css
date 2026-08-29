@@ -769,21 +769,38 @@ section {
   flex: 0 0 auto;
   width: 7.5rem;
 }
-/* 選考日時調整中（候補者ボール/企業ボール）— 選考予定日が未確定の間だけ、その入力欄の
-   すぐ下に小さく表示する補助行。 */
-.scheduling-ball-row {
+/* 選考予定日時の「確定」「調整中」切り替えチェックボックス。 */
+.scheduling-status-checkboxes {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+}
+.scheduling-status-checkboxes label,
+.scheduling-ball-checkboxes label {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.35rem;
+  font-weight: normal;
+  font-size: 0.85rem;
+}
+.scheduling-ball-checkboxes {
+  display: flex;
+  gap: 1rem;
+}
+/* 調整中の「その他」を選んだ時だけ出す自由記入欄。 */
+.scheduling-note-input {
   margin-top: 0.35rem;
-  font-size: 0.85rem;
+  width: 100%;
 }
-.scheduling-ball-row-label {
-  color: var(--text-muted-color);
-  white-space: nowrap;
-}
-.scheduling-ball-checkboxes label {
-  font-size: 0.85rem;
+/* 候補者詳細カードのインライン編集（detail-card-item）用 — ラベルの右側に確定/調整中の
+   切り替えと、その下の日時 or ボール選択を縦に積む。detail-card-itemは横並び・中央揃えの
+   ため、値側だけ右寄せで縦積みにする。 */
+.scheduling-field-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.3rem;
 }
 /* 選考状況バッジに添える「・候補者ボール/企業ボール」— バッジ本体の色文字より一段目立たなく
    することで、あくまで補足情報であることを示す。 */

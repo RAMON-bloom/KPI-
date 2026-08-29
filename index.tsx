@@ -376,12 +376,19 @@ interface CompanyApplication {
   // Google Tasks title (see buildPipelineTaskContent) since Tasks itself has no time-of-day
   // field, only a due date.
   scheduledTime?: string; // HH:mm, 24-hour
-  // 選考日時調整中: 次回選考の日程調整で、返信・提示待ちのボールがどちら側にあるかを示す。
-  // 'candidate'=候補者からの返信待ち、'company'=企業からの返信待ち。チェックボックスは排他
-  // 選択のため両方が同時に立つことはない。未設定 = 現在調整中ではない（何も表示しない）。
-  // scheduledDateが確定しても自動ではクリアしない——日程確定後も「その日程で企業側の最終
-  // 確認待ち」等、引き続きどちらボールかを追いたいケースがあるため、クリアは手動運用とする。
-  schedulingBallOwner?: 'candidate' | 'company';
+  // 選考日時が「確定」（scheduledDate/scheduledTimeを使う）か「調整中」（schedulingBallOwner/
+  // schedulingNoteを使う）かを明示的に選ぶ。以前はscheduledDateの有無から自動判定していたが、
+  // 前ラウンドの日付が残っている・日付は決まっているが調整中の体裁のまま追いたい、といった
+  // ケースを正しく扱えなかったため、ユーザーが明示的に選ぶ方式にした。未設定 = 既存データとの
+  // 後方互換のため'confirmed'として扱う（scheduledDate入力欄をそのまま表示）。
+  schedulingStatus?: 'confirmed' | 'adjusting';
+  // 選考日時調整中（schedulingStatus==='adjusting'の時のみ意味を持つ）: 返信・提示待ちの
+  // ボールがどちら側にあるかを示す。'candidate'=候補者からの返信待ち、'company'=企業からの
+  // 返信待ち、'other'=どちらでもない状況（schedulingNoteに自由記入）。チェックボックスは
+  // 排他選択のため同時に複数立つことはない。
+  schedulingBallOwner?: 'candidate' | 'company' | 'other';
+  // schedulingBallOwner==='other'の時の自由記入内容。
+  schedulingNote?: string;
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
@@ -5383,22 +5390,16 @@ const CandidateModal: React.FC<{
             // transition is recorded by computeStageAdvanceUpdate when the form is saved.
             target.stageHistory = [{ stage: value as PipelineStage, date: target.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }];
         }
-        if (field === 'scheduledDate' && value) {
-            // 選考日時調整中（候補者ボール/企業ボール）は日程が未確定な間だけ意味を持つ表示——
-            // 日程が確定した瞬間に古いボール状態が残っていると、次にこの選考の日程が再び
-            // 未確定になった時（延期・再調整）に無関係な過去の値が復活して見えてしまうため、
-            // 日程確定と同時にクリアする。
-            target.schedulingBallOwner = undefined;
-        }
         newApplications[index] = target;
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
 
-    // schedulingBallOwnerは'candidate'|'company'|undefined — handleApplicationChangeの
-    // value: stringな引数では素直に表現できないため専用のハンドラにしている。
-    const handleApplicationBallChange = (index: number, value: CompanyApplication['schedulingBallOwner']) => {
+    // 確定/調整中の切り替えやボール選択は複数フィールドを同時に更新する必要があり
+    // （例: 調整中に切り替えると同時にscheduledDate/Timeをクリア）、value: stringな
+    // handleApplicationChangeでは素直に表現できないため専用のハンドラにしている。
+    const handleApplicationSchedulingPatch = (index: number, patch: Partial<CompanyApplication>) => {
         const newApplications = [...candidate.applications];
-        newApplications[index] = { ...newApplications[index], schedulingBallOwner: value };
+        newApplications[index] = { ...newApplications[index], ...patch };
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
 
@@ -6196,33 +6197,38 @@ const CandidateModal: React.FC<{
                        </div>
                        <div className="form-group">
                           <label htmlFor={`scheduledDate-${app.id}`}>選考予定日</label>
-                          <div className="scheduled-date-time-inputs">
-                            <input
-                              id={`scheduledDate-${app.id}`}
-                              type="date"
-                              value={app.scheduledDate || ''}
-                              onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
-                              aria-label={`選考予定日 ${index + 1}`}
-                            />
-                            <input
-                              id={`scheduledTime-${app.id}`}
-                              type="time"
-                              value={app.scheduledTime || ''}
-                              onChange={e => handleApplicationChange(index, 'scheduledTime', e.target.value)}
-                              aria-label={`開始時刻 ${index + 1}`}
-                            />
-                          </div>
-                          {/* 日程が確定していない間だけ「どちらのボールか」が意味を持つため、
-                              選考予定日が未入力または過去日付（前ラウンドの残り）の時だけ表示する。 */}
-                          {!isScheduledDateUpcoming(app) && (
-                            <div className="scheduling-ball-row">
-                              <span className="scheduling-ball-row-label">日程調整中:</span>
-                              <SchedulingBallField
-                                value={app.schedulingBallOwner}
-                                onChange={v => handleApplicationBallChange(index, v)}
-                                idPrefix={`scheduling-ball-${app.id}`}
+                          <SchedulingStatusToggle
+                            status={app.schedulingStatus || 'confirmed'}
+                            onChange={status => handleApplicationSchedulingPatch(index, status === 'confirmed'
+                              ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
+                              : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined })}
+                            idPrefix={`scheduling-status-${app.id}`}
+                          />
+                          {(app.schedulingStatus || 'confirmed') === 'confirmed' ? (
+                            <div className="scheduled-date-time-inputs">
+                              <input
+                                id={`scheduledDate-${app.id}`}
+                                type="date"
+                                value={app.scheduledDate || ''}
+                                onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
+                                aria-label={`選考予定日 ${index + 1}`}
+                              />
+                              <input
+                                id={`scheduledTime-${app.id}`}
+                                type="time"
+                                value={app.scheduledTime || ''}
+                                onChange={e => handleApplicationChange(index, 'scheduledTime', e.target.value)}
+                                aria-label={`開始時刻 ${index + 1}`}
                               />
                             </div>
+                          ) : (
+                            <SchedulingBallField
+                              value={app.schedulingBallOwner}
+                              note={app.schedulingNote}
+                              onChangeBall={v => handleApplicationSchedulingPatch(index, { schedulingBallOwner: v, schedulingNote: v === 'other' ? app.schedulingNote : undefined })}
+                              onChangeNote={note => handleApplicationSchedulingPatch(index, { schedulingNote: note })}
+                              idPrefix={`scheduling-ball-${app.id}`}
+                            />
                           )}
                        </div>
                        <div className="form-group">
@@ -6391,12 +6397,6 @@ const ApplicationModal: React.FC<{
             }));
             return;
         }
-        if (name === 'scheduledDate' && value) {
-            // 選考日時調整中は日程が未確定な間だけ意味を持つため、確定と同時にクリアする
-            // （handleApplicationChangeの同種コメント参照）。
-            setApplication(prev => ({ ...prev, scheduledDate: value, schedulingBallOwner: undefined }));
-            return;
-        }
         setApplication(prev => ({ ...prev, [name]: value }));
     };
 
@@ -6481,32 +6481,42 @@ const ApplicationModal: React.FC<{
                     </div>
                     <div className="form-group">
                         <label htmlFor="scheduledDate">選考予定日</label>
-                        <div className="scheduled-date-time-inputs">
-                            <input
-                                type="date"
-                                id="scheduledDate"
-                                name="scheduledDate"
-                                value={application.scheduledDate || ''}
-                                onChange={handleChange}
-                            />
-                            <input
-                                type="time"
-                                id="scheduledTime"
-                                name="scheduledTime"
-                                aria-label="開始時刻"
-                                value={application.scheduledTime || ''}
-                                onChange={handleChange}
-                            />
-                        </div>
-                        {!isScheduledDateUpcoming(application) && (
-                            <div className="scheduling-ball-row">
-                                <span className="scheduling-ball-row-label">日程調整中:</span>
-                                <SchedulingBallField
-                                    value={application.schedulingBallOwner}
-                                    onChange={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v }))}
-                                    idPrefix="application-modal-scheduling-ball"
+                        <SchedulingStatusToggle
+                            status={application.schedulingStatus || 'confirmed'}
+                            onChange={status => setApplication(prev => ({
+                                ...prev,
+                                ...(status === 'confirmed'
+                                  ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
+                                  : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined }),
+                            }))}
+                            idPrefix="application-modal-scheduling-status"
+                        />
+                        {(application.schedulingStatus || 'confirmed') === 'confirmed' ? (
+                            <div className="scheduled-date-time-inputs">
+                                <input
+                                    type="date"
+                                    id="scheduledDate"
+                                    name="scheduledDate"
+                                    value={application.scheduledDate || ''}
+                                    onChange={handleChange}
+                                />
+                                <input
+                                    type="time"
+                                    id="scheduledTime"
+                                    name="scheduledTime"
+                                    aria-label="開始時刻"
+                                    value={application.scheduledTime || ''}
+                                    onChange={handleChange}
                                 />
                             </div>
+                        ) : (
+                            <SchedulingBallField
+                                value={application.schedulingBallOwner}
+                                note={application.schedulingNote}
+                                onChangeBall={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v, schedulingNote: v === 'other' ? prev.schedulingNote : undefined }))}
+                                onChangeNote={note => setApplication(prev => ({ ...prev, schedulingNote: note }))}
+                                idPrefix="application-modal-scheduling-ball"
+                            />
                         )}
                     </div>
                     <div className="form-group">
@@ -7959,63 +7969,118 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
-// scheduledDateが「今日以降」なら本当に確定した今後の予定として扱う。前の選考ラウンドの
-// 予定日がstage変更時にクリアされずに残っている（過去日付のまま）ケースがあり、これを
-// 「確定済み」として扱ってしまうと、日程調整中のボールを選ぶために毎回まず過去日付を手で
-// 消す必要が生じて手間になる（実際にユーザーから指摘があった不具合）。過去日付は実質
-// 「未確定」と同じに扱うことで、その手間を無くす。
-const isScheduledDateUpcoming = (app: CompanyApplication): boolean =>
-  !!app.scheduledDate && app.scheduledDate >= new Date().toLocaleDateString('sv-SE');
-
-// 選考日時調整中: 「候補者ボール」「企業ボール」の2つのチェックボックスを排他選択（一方を
-// チェックすると他方は自動で外れる）で表示する。どちらもチェックされていない = 現在調整中で
-// はない。3箇所（候補者登録フォームの選考一覧、選考情報編集モーダル、候補者詳細カードの
-// インライン編集）すべてで同じ見た目・挙動になるよう共通化している。
-const SchedulingBallField: React.FC<{
-  value: CompanyApplication['schedulingBallOwner'];
-  onChange: (value: CompanyApplication['schedulingBallOwner']) => void;
+// 選考予定日時の「確定」「調整中」を明示的に切り替えるチェックボックス（排他選択）。
+// 以前はscheduledDateの有無・過去日付かどうかから自動判定していたが、前ラウンドの日付が
+// 残っている・日付は決まっているがまだ調整中の体裁で追いたい、といったケースを正しく
+// 扱えなかった。ユーザーが明示的に選ぶ方式にすることで、日時入力欄とボール選択欄の
+// どちらを出すかが常にはっきりする。既に選ばれている側をもう一度クリックしても
+// 「どちらでもない」状態には戻さない（必ずどちらか一方）——e.target.checked===falseの
+// ケース（＝チェック済みの箱を外そうとした）は無視する。
+const SchedulingStatusToggle: React.FC<{
+  status: NonNullable<CompanyApplication['schedulingStatus']>;
+  onChange: (status: NonNullable<CompanyApplication['schedulingStatus']>) => void;
   idPrefix: string;
-}> = ({ value, onChange, idPrefix }) => (
-  <div className="scheduling-ball-checkboxes" style={{ display: 'flex', gap: '1rem' }}>
-    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontWeight: 'normal' }}>
+}> = ({ status, onChange, idPrefix }) => (
+  <div className="scheduling-status-checkboxes">
+    <label>
       <input
         type="checkbox"
-        id={`${idPrefix}-candidate-ball`}
-        checked={value === 'candidate'}
-        onChange={(e) => onChange(e.target.checked ? 'candidate' : undefined)}
+        id={`${idPrefix}-confirmed`}
+        checked={status === 'confirmed'}
+        onChange={(e) => { if (e.target.checked) onChange('confirmed'); }}
       />
-      候補者ボール
+      確定
     </label>
-    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontWeight: 'normal' }}>
+    <label>
       <input
         type="checkbox"
-        id={`${idPrefix}-company-ball`}
-        checked={value === 'company'}
-        onChange={(e) => onChange(e.target.checked ? 'company' : undefined)}
+        id={`${idPrefix}-adjusting`}
+        checked={status === 'adjusting'}
+        onChange={(e) => { if (e.target.checked) onChange('adjusting'); }}
       />
-      企業ボール
+      調整中
     </label>
   </div>
 );
 
-// カーソルを合わせた時に、日程調整済みの選考予定日時と、これまでの選考トラック（いつどの
-// フェーズに進んだか）をツールチップで見せる（それぞれ未調整/記録なしならその行は省く）—
-// カードの詳細を展開しなくても、バッジにホバーするだけで確認できるようにするため。editable
-// な（＝クリックで編集できる）バッジには末尾に案内文を足す。
+// 選考日時調整中（schedulingStatus==='adjusting'の時だけ表示される）: 「候補者ボール」
+// 「企業ボール」「その他」の3つのチェックボックスを排他選択（一方をチェックすると他方は
+// 自動で外れる）で表示する。「その他」を選んだ時だけ、その下に状況を書ける自由記入欄を
+// 出す。3箇所（候補者登録フォームの選考一覧、選考情報編集モーダル、候補者詳細カードの
+// インライン編集）すべてで同じ見た目・挙動になるよう共通化している。
+const SchedulingBallField: React.FC<{
+  value: CompanyApplication['schedulingBallOwner'];
+  note: string | undefined;
+  onChangeBall: (value: CompanyApplication['schedulingBallOwner']) => void;
+  onChangeNote: (note: string) => void;
+  idPrefix: string;
+}> = ({ value, note, onChangeBall, onChangeNote, idPrefix }) => (
+  <div className="scheduling-ball-field">
+    <div className="scheduling-ball-checkboxes">
+      <label>
+        <input
+          type="checkbox"
+          id={`${idPrefix}-candidate-ball`}
+          checked={value === 'candidate'}
+          onChange={(e) => onChangeBall(e.target.checked ? 'candidate' : undefined)}
+        />
+        候補者ボール
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          id={`${idPrefix}-company-ball`}
+          checked={value === 'company'}
+          onChange={(e) => onChangeBall(e.target.checked ? 'company' : undefined)}
+        />
+        企業ボール
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          id={`${idPrefix}-other-ball`}
+          checked={value === 'other'}
+          onChange={(e) => onChangeBall(e.target.checked ? 'other' : undefined)}
+        />
+        その他
+      </label>
+    </div>
+    {value === 'other' && (
+      <input
+        type="text"
+        className="scheduling-note-input"
+        placeholder="調整状況を自由記入"
+        value={note || ''}
+        onChange={(e) => onChangeNote(e.target.value)}
+        aria-label="調整状況（自由記入）"
+      />
+    )}
+  </div>
+);
+
+// schedulingBallOwnerの表示用ラベル。'other'はschedulingNoteがあればその内容を、無ければ
+// 「その他」とだけ表示する。
+const describeSchedulingBall = (app: CompanyApplication): string => {
+  if (app.schedulingBallOwner === 'candidate') return '候補者ボール';
+  if (app.schedulingBallOwner === 'company') return '企業ボール';
+  if (app.schedulingBallOwner === 'other') return app.schedulingNote ? `その他（${app.schedulingNote}）` : 'その他';
+  return '未選択';
+};
+
+// カーソルを合わせた時に、選考予定日時（確定/調整中いずれか）と、これまでの選考トラック
+// （いつどのフェーズに進んだか）をツールチップで見せる（それぞれ記録なしならその行は省く）
+// — カードの詳細を展開しなくても、バッジにホバーするだけで確認できるようにするため。
+// editableな（＝クリックで編集できる）バッジには末尾に案内文を足す。
 const buildStageTooltip = (app: CompanyApplication, editable: boolean): string => {
-  const scheduleLine = app.scheduledDate
-    ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
-    : '';
-  // 選考日時調整中は「今後の予定として確定している」間だけ意味を持たないため、
-  // scheduledDateが今日以降の時は（schedulingBallOwnerが古い値のまま残っていても）
-  // ツールチップには出さない。過去日付（前ラウンドの残り）は未確定と同じ扱い。
-  const ballLine = (!isScheduledDateUpcoming(app) && app.schedulingBallOwner)
-    ? `\n日程調整中: ${app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}`
-    : '';
+  const scheduleLine = (app.schedulingStatus || 'confirmed') === 'adjusting'
+    ? `\n日程調整中: ${describeSchedulingBall(app)}`
+    : (app.scheduledDate
+        ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+        : '');
   const trackLine = app.stageHistory && app.stageHistory.length > 0
     ? `\n選考トラック: ${app.stageHistory.map(h => `${h.stage}(${h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'})`).join(' → ')}`
     : '';
-  const base = `${app.companyName}: ${app.stage}${scheduleLine}${ballLine}${trackLine}`;
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}${trackLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
 };
 
@@ -8045,14 +8110,14 @@ const StageTrack: React.FC<{ history: CompanyApplication['stageHistory'] }> = ({
 // scheduled interview date/time (if set) via the title tooltip; clicking opens the full
 // ApplicationModal (next action / scheduled date&time / fee / confidence / memo — every field for
 // that company, not just the stage) rather than a quick inline stage-only <select> as before.
-// 選考予定日が未確定でschedulingBallOwnerが立っている選考だけ、バッジ本体に小さく
-// 「候補者ボール/企業ボール」を添える——展開しなくても「今どちらの返信待ちか」が
-// カード一覧の時点で分かるようにするため（buildStageTooltipのホバー表示と同じ条件）。
+// schedulingStatus==='adjusting'でschedulingBallOwnerが立っている選考だけ、バッジ本体に
+// 小さく「候補者ボール/企業ボール/その他」を添える——展開しなくても「今どちらの返信待ちか」
+// がカード一覧の時点で分かるようにするため（buildStageTooltipのホバー表示と同じ条件）。
 const SchedulingBallBadgeSuffix: React.FC<{ app: CompanyApplication }> = ({ app }) => {
-  if (isScheduledDateUpcoming(app) || !app.schedulingBallOwner) return null;
+  if ((app.schedulingStatus || 'confirmed') !== 'adjusting' || !app.schedulingBallOwner) return null;
   return (
     <span className="scheduling-ball-indicator">
-      ・{app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}
+      ・{describeSchedulingBall(app)}
     </span>
   );
 };
@@ -9177,41 +9242,41 @@ const PipelineCandidateCard: React.FC<{
                                     <div className="detail-card-item">
                                         <span>選考予定日:</span>
                                         {candidateIsOwn ? (
-                                            <ScheduledDateTimeField
-                                                date={app.scheduledDate}
-                                                time={app.scheduledTime}
-                                                // 選考日時調整中は日程未確定の間だけ意味を持つ表示のため、日程が確定した
-                                                // 瞬間に古いボール状態が残らないようクリアする（handleApplicationChangeの
-                                                // 同種コメント参照）。
-                                                onCommitDate={(v) => commitApplicationField(app.id, v ? { scheduledDate: v, schedulingBallOwner: undefined } : { scheduledDate: v })}
-                                                onCommitTime={(v) => commitApplicationField(app.id, { scheduledTime: v })}
-                                            />
+                                            <div className="scheduling-field-inline">
+                                                <SchedulingStatusToggle
+                                                    status={app.schedulingStatus || 'confirmed'}
+                                                    onChange={(status) => commitApplicationField(app.id, status === 'confirmed'
+                                                      ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
+                                                      : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined })}
+                                                    idPrefix={`detail-scheduling-status-${app.id}`}
+                                                />
+                                                {(app.schedulingStatus || 'confirmed') === 'confirmed' ? (
+                                                    <ScheduledDateTimeField
+                                                        date={app.scheduledDate}
+                                                        time={app.scheduledTime}
+                                                        onCommitDate={(v) => commitApplicationField(app.id, { scheduledDate: v })}
+                                                        onCommitTime={(v) => commitApplicationField(app.id, { scheduledTime: v })}
+                                                    />
+                                                ) : (
+                                                    <SchedulingBallField
+                                                        value={app.schedulingBallOwner}
+                                                        note={app.schedulingNote}
+                                                        onChangeBall={(v) => commitApplicationField(app.id, { schedulingBallOwner: v, schedulingNote: v === 'other' ? app.schedulingNote : undefined })}
+                                                        onChangeNote={(note) => commitApplicationField(app.id, { schedulingNote: note })}
+                                                        idPrefix={`detail-scheduling-ball-${app.id}`}
+                                                    />
+                                                )}
+                                            </div>
                                         ) : (
                                             <span>
-                                                {app.scheduledDate
-                                                  ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
-                                                  : '未設定'}
+                                                {(app.schedulingStatus || 'confirmed') === 'adjusting'
+                                                  ? `調整中（${describeSchedulingBall(app)}）`
+                                                  : (app.scheduledDate
+                                                      ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+                                                      : '未設定')}
                                             </span>
                                         )}
                                     </div>
-                                    {/* 選考予定日が今後の予定として確定している間は無関係になるため、未確定
-                                        （または前ラウンドの過去日付が残っているだけ）の時だけ表示する。 */}
-                                    {!isScheduledDateUpcoming(app) && (
-                                        <div className="detail-card-item">
-                                            <span>日程調整中:</span>
-                                            {candidateIsOwn ? (
-                                                <SchedulingBallField
-                                                    value={app.schedulingBallOwner}
-                                                    onChange={(v) => commitApplicationField(app.id, { schedulingBallOwner: v })}
-                                                    idPrefix={`detail-scheduling-ball-${app.id}`}
-                                                />
-                                            ) : (
-                                                <span>
-                                                    {app.schedulingBallOwner === 'candidate' ? '候補者ボール' : app.schedulingBallOwner === 'company' ? '企業ボール' : '-'}
-                                                </span>
-                                            )}
-                                        </div>
-                                    )}
                                     <div className="detail-card-item">
                                         <span>意思決定時期:</span>
                                         {candidateIsOwn ? (
