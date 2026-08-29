@@ -376,6 +376,12 @@ interface CompanyApplication {
   // Google Tasks title (see buildPipelineTaskContent) since Tasks itself has no time-of-day
   // field, only a due date.
   scheduledTime?: string; // HH:mm, 24-hour
+  // 選考日時調整中: 次回選考の日程調整で、返信・提示待ちのボールがどちら側にあるかを示す。
+  // 'candidate'=候補者からの返信待ち、'company'=企業からの返信待ち。チェックボックスは排他
+  // 選択のため両方が同時に立つことはない。未設定 = 現在調整中ではない（何も表示しない）。
+  // scheduledDateが確定しても自動ではクリアしない——日程確定後も「その日程で企業側の最終
+  // 確認待ち」等、引き続きどちらボールかを追いたいケースがあるため、クリアは手動運用とする。
+  schedulingBallOwner?: 'candidate' | 'company';
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
@@ -5381,6 +5387,14 @@ const CandidateModal: React.FC<{
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
 
+    // schedulingBallOwnerは'candidate'|'company'|undefined — handleApplicationChangeの
+    // value: stringな引数では素直に表現できないため専用のハンドラにしている。
+    const handleApplicationBallChange = (index: number, value: CompanyApplication['schedulingBallOwner']) => {
+        const newApplications = [...candidate.applications];
+        newApplications[index] = { ...newApplications[index], schedulingBallOwner: value };
+        setCandidate(prev => ({ ...prev, applications: newApplications }));
+    };
+
     const addApplication = () => {
         const newApp: CompanyApplication = {
             id: generateApplicationId(), companyName: '', stage: '打診', nextAction: '',
@@ -6193,6 +6207,14 @@ const CandidateModal: React.FC<{
                           </div>
                        </div>
                        <div className="form-group">
+                          <label>選考日時調整中</label>
+                          <SchedulingBallField
+                            value={app.schedulingBallOwner}
+                            onChange={v => handleApplicationBallChange(index, v)}
+                            idPrefix={`scheduling-ball-${app.id}`}
+                          />
+                       </div>
+                       <div className="form-group">
                           <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
                           <input
                             id={`expectedDecisionDate-${app.id}`}
@@ -6459,6 +6481,14 @@ const ApplicationModal: React.FC<{
                                 onChange={handleChange}
                             />
                         </div>
+                    </div>
+                    <div className="form-group">
+                        <label>選考日時調整中</label>
+                        <SchedulingBallField
+                            value={application.schedulingBallOwner}
+                            onChange={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v }))}
+                            idPrefix="application-modal-scheduling-ball"
+                        />
                     </div>
                     <div className="form-group">
                         <label htmlFor="expectedDecisionDate">意思決定時期</label>
@@ -7910,6 +7940,37 @@ const ScheduledDateTimeField: React.FC<{
   );
 };
 
+// 選考日時調整中: 「候補者ボール」「企業ボール」の2つのチェックボックスを排他選択（一方を
+// チェックすると他方は自動で外れる）で表示する。どちらもチェックされていない = 現在調整中で
+// はない。3箇所（候補者登録フォームの選考一覧、選考情報編集モーダル、候補者詳細カードの
+// インライン編集）すべてで同じ見た目・挙動になるよう共通化している。
+const SchedulingBallField: React.FC<{
+  value: CompanyApplication['schedulingBallOwner'];
+  onChange: (value: CompanyApplication['schedulingBallOwner']) => void;
+  idPrefix: string;
+}> = ({ value, onChange, idPrefix }) => (
+  <div className="scheduling-ball-checkboxes" style={{ display: 'flex', gap: '1rem' }}>
+    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontWeight: 'normal' }}>
+      <input
+        type="checkbox"
+        id={`${idPrefix}-candidate-ball`}
+        checked={value === 'candidate'}
+        onChange={(e) => onChange(e.target.checked ? 'candidate' : undefined)}
+      />
+      候補者ボール
+    </label>
+    <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontWeight: 'normal' }}>
+      <input
+        type="checkbox"
+        id={`${idPrefix}-company-ball`}
+        checked={value === 'company'}
+        onChange={(e) => onChange(e.target.checked ? 'company' : undefined)}
+      />
+      企業ボール
+    </label>
+  </div>
+);
+
 // カーソルを合わせた時に、日程調整済みの選考予定日時と、これまでの選考トラック（いつどの
 // フェーズに進んだか）をツールチップで見せる（それぞれ未調整/記録なしならその行は省く）—
 // カードの詳細を展開しなくても、バッジにホバーするだけで確認できるようにするため。editable
@@ -9080,6 +9141,20 @@ const PipelineCandidateCard: React.FC<{
                                                 {app.scheduledDate
                                                   ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
                                                   : '未設定'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="detail-card-item">
+                                        <span>選考日時調整中:</span>
+                                        {candidateIsOwn ? (
+                                            <SchedulingBallField
+                                                value={app.schedulingBallOwner}
+                                                onChange={(v) => commitApplicationField(app.id, { schedulingBallOwner: v })}
+                                                idPrefix={`detail-scheduling-ball-${app.id}`}
+                                            />
+                                        ) : (
+                                            <span>
+                                                {app.schedulingBallOwner === 'candidate' ? '候補者ボール' : app.schedulingBallOwner === 'company' ? '企業ボール' : '-'}
                                             </span>
                                         )}
                                     </div>
