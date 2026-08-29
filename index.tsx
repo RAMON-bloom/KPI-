@@ -5383,6 +5383,13 @@ const CandidateModal: React.FC<{
             // transition is recorded by computeStageAdvanceUpdate when the form is saved.
             target.stageHistory = [{ stage: value as PipelineStage, date: target.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }];
         }
+        if (field === 'scheduledDate' && value) {
+            // 選考日時調整中（候補者ボール/企業ボール）は日程が未確定な間だけ意味を持つ表示——
+            // 日程が確定した瞬間に古いボール状態が残っていると、次にこの選考の日程が再び
+            // 未確定になった時（延期・再調整）に無関係な過去の値が復活して見えてしまうため、
+            // 日程確定と同時にクリアする。
+            target.schedulingBallOwner = undefined;
+        }
         newApplications[index] = target;
         setCandidate(prev => ({ ...prev, applications: newApplications }));
     };
@@ -6205,14 +6212,18 @@ const CandidateModal: React.FC<{
                               aria-label={`開始時刻 ${index + 1}`}
                             />
                           </div>
-                       </div>
-                       <div className="form-group">
-                          <label>選考日時調整中</label>
-                          <SchedulingBallField
-                            value={app.schedulingBallOwner}
-                            onChange={v => handleApplicationBallChange(index, v)}
-                            idPrefix={`scheduling-ball-${app.id}`}
-                          />
+                          {/* 日程が確定していない間だけ「どちらのボールか」が意味を持つため、
+                              選考予定日が未入力の時だけ表示する。 */}
+                          {!app.scheduledDate && (
+                            <div className="scheduling-ball-row">
+                              <span className="scheduling-ball-row-label">日程調整中:</span>
+                              <SchedulingBallField
+                                value={app.schedulingBallOwner}
+                                onChange={v => handleApplicationBallChange(index, v)}
+                                idPrefix={`scheduling-ball-${app.id}`}
+                              />
+                            </div>
+                          )}
                        </div>
                        <div className="form-group">
                           <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
@@ -6380,6 +6391,12 @@ const ApplicationModal: React.FC<{
             }));
             return;
         }
+        if (name === 'scheduledDate' && value) {
+            // 選考日時調整中は日程が未確定な間だけ意味を持つため、確定と同時にクリアする
+            // （handleApplicationChangeの同種コメント参照）。
+            setApplication(prev => ({ ...prev, scheduledDate: value, schedulingBallOwner: undefined }));
+            return;
+        }
         setApplication(prev => ({ ...prev, [name]: value }));
     };
 
@@ -6481,14 +6498,16 @@ const ApplicationModal: React.FC<{
                                 onChange={handleChange}
                             />
                         </div>
-                    </div>
-                    <div className="form-group">
-                        <label>選考日時調整中</label>
-                        <SchedulingBallField
-                            value={application.schedulingBallOwner}
-                            onChange={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v }))}
-                            idPrefix="application-modal-scheduling-ball"
-                        />
+                        {!application.scheduledDate && (
+                            <div className="scheduling-ball-row">
+                                <span className="scheduling-ball-row-label">日程調整中:</span>
+                                <SchedulingBallField
+                                    value={application.schedulingBallOwner}
+                                    onChange={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v }))}
+                                    idPrefix="application-modal-scheduling-ball"
+                                />
+                            </div>
+                        )}
                     </div>
                     <div className="form-group">
                         <label htmlFor="expectedDecisionDate">意思決定時期</label>
@@ -7979,10 +7998,15 @@ const buildStageTooltip = (app: CompanyApplication, editable: boolean): string =
   const scheduleLine = app.scheduledDate
     ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
     : '';
+  // 選考日時調整中は日程未確定の間だけ意味を持つため、scheduledDateが入っている時は
+  // （schedulingBallOwnerが古い値のまま残っていても）ツールチップには出さない。
+  const ballLine = (!app.scheduledDate && app.schedulingBallOwner)
+    ? `\n日程調整中: ${app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}`
+    : '';
   const trackLine = app.stageHistory && app.stageHistory.length > 0
     ? `\n選考トラック: ${app.stageHistory.map(h => `${h.stage}(${h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'})`).join(' → ')}`
     : '';
-  const base = `${app.companyName}: ${app.stage}${scheduleLine}${trackLine}`;
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}${ballLine}${trackLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
 };
 
@@ -8012,6 +8036,18 @@ const StageTrack: React.FC<{ history: CompanyApplication['stageHistory'] }> = ({
 // scheduled interview date/time (if set) via the title tooltip; clicking opens the full
 // ApplicationModal (next action / scheduled date&time / fee / confidence / memo — every field for
 // that company, not just the stage) rather than a quick inline stage-only <select> as before.
+// 選考予定日が未確定でschedulingBallOwnerが立っている選考だけ、バッジ本体に小さく
+// 「候補者ボール/企業ボール」を添える——展開しなくても「今どちらの返信待ちか」が
+// カード一覧の時点で分かるようにするため（buildStageTooltipのホバー表示と同じ条件）。
+const SchedulingBallBadgeSuffix: React.FC<{ app: CompanyApplication }> = ({ app }) => {
+  if (app.scheduledDate || !app.schedulingBallOwner) return null;
+  return (
+    <span className="scheduling-ball-indicator">
+      ・{app.schedulingBallOwner === 'candidate' ? '候補者ボール' : '企業ボール'}
+    </span>
+  );
+};
+
 const ApplicationStageBadge: React.FC<{
   app: CompanyApplication;
   onClick: () => void;
@@ -8026,6 +8062,7 @@ const ApplicationStageBadge: React.FC<{
     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
   >
     {app.companyName}: {app.stage}
+    <SchedulingBallBadgeSuffix app={app} />
   </span>
 );
 
@@ -8714,6 +8751,7 @@ const PipelineCandidateCard: React.FC<{
                                     title={buildStageTooltip(app, false)}
                                 >
                                     {app.companyName}: {app.stage}
+                                    <SchedulingBallBadgeSuffix app={app} />
                                 </span>
                             )
                         ))
@@ -9133,7 +9171,10 @@ const PipelineCandidateCard: React.FC<{
                                             <ScheduledDateTimeField
                                                 date={app.scheduledDate}
                                                 time={app.scheduledTime}
-                                                onCommitDate={(v) => commitApplicationField(app.id, { scheduledDate: v })}
+                                                // 選考日時調整中は日程未確定の間だけ意味を持つ表示のため、日程が確定した
+                                                // 瞬間に古いボール状態が残らないようクリアする（handleApplicationChangeの
+                                                // 同種コメント参照）。
+                                                onCommitDate={(v) => commitApplicationField(app.id, v ? { scheduledDate: v, schedulingBallOwner: undefined } : { scheduledDate: v })}
                                                 onCommitTime={(v) => commitApplicationField(app.id, { scheduledTime: v })}
                                             />
                                         ) : (
@@ -9144,20 +9185,23 @@ const PipelineCandidateCard: React.FC<{
                                             </span>
                                         )}
                                     </div>
-                                    <div className="detail-card-item">
-                                        <span>選考日時調整中:</span>
-                                        {candidateIsOwn ? (
-                                            <SchedulingBallField
-                                                value={app.schedulingBallOwner}
-                                                onChange={(v) => commitApplicationField(app.id, { schedulingBallOwner: v })}
-                                                idPrefix={`detail-scheduling-ball-${app.id}`}
-                                            />
-                                        ) : (
-                                            <span>
-                                                {app.schedulingBallOwner === 'candidate' ? '候補者ボール' : app.schedulingBallOwner === 'company' ? '企業ボール' : '-'}
-                                            </span>
-                                        )}
-                                    </div>
+                                    {/* 選考予定日が確定している間は無関係になるため、未確定の時だけ表示する。 */}
+                                    {!app.scheduledDate && (
+                                        <div className="detail-card-item">
+                                            <span>日程調整中:</span>
+                                            {candidateIsOwn ? (
+                                                <SchedulingBallField
+                                                    value={app.schedulingBallOwner}
+                                                    onChange={(v) => commitApplicationField(app.id, { schedulingBallOwner: v })}
+                                                    idPrefix={`detail-scheduling-ball-${app.id}`}
+                                                />
+                                            ) : (
+                                                <span>
+                                                    {app.schedulingBallOwner === 'candidate' ? '候補者ボール' : app.schedulingBallOwner === 'company' ? '企業ボール' : '-'}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
                                     <div className="detail-card-item">
                                         <span>意思決定時期:</span>
                                         {candidateIsOwn ? (

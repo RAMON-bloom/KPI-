@@ -769,6 +769,28 @@ section {
   flex: 0 0 auto;
   width: 7.5rem;
 }
+/* 選考日時調整中（候補者ボール/企業ボール）— 選考予定日が未確定の間だけ、その入力欄の
+   すぐ下に小さく表示する補助行。 */
+.scheduling-ball-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+}
+.scheduling-ball-row-label {
+  color: var(--text-muted-color);
+  white-space: nowrap;
+}
+.scheduling-ball-checkboxes label {
+  font-size: 0.85rem;
+}
+/* 選考状況バッジに添える「・候補者ボール/企業ボール」— バッジ本体の色文字より一段目立たなく
+   することで、あくまで補足情報であることを示す。 */
+.scheduling-ball-indicator {
+  opacity: 0.85;
+  font-weight: normal;
+}
 .detail-card-item-memo {
   align-items: flex-start;
 }
