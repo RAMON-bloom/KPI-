@@ -21,7 +21,7 @@ import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } fr
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
-import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError } from './services/googleTasks';
+import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildCandidateDraftsFromGrid, extractDistinctColumnValues, CANDIDATE_IMPORT_FIELD_CATALOG, CandidateImportFieldKey, BuildCandidateDraftsResult } from './services/pipelineSpreadsheetImport';
 
 ChartJS.register(
@@ -3839,7 +3839,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-09-01',
     items: [
-      '【不具合修正】選考ステータスを「お見送り」「選考辞退」「内定承諾後辞退」にしても、選考予定日が入ったままだとGoogleカレンダーのタスクに保留中のまま表示され続けてしまう不具合を修正。以後はこれらのステータスに変更すると、対応するGoogleタスクを自動的に削除するようにした（すでに残ってしまっている過去分は、「今すぐ同期」ボタンで一括クリーンアップされます）',
+      '【不具合修正】選考ステータスを「お見送り」「選考辞退」「内定承諾後辞退」にしても、選考予定日が入ったままだとGoogleカレンダーのタスクに保留中のまま表示され続けてしまう不具合を修正。以後はこれらのステータスに変更すると、対応するGoogleタスクを自動的に削除するようにした。また「今すぐ同期」ボタンに、すでに残ってしまっている古いタスク（現在の選考状況ではもう不要なもの）や、同じ選考について重複して作成されてしまったタスクを一括で削除するクリーンアップ機能を追加した',
     ],
   },
   {
@@ -13727,19 +13727,63 @@ const App: React.FC = () => {
       let existingTasksLookup: Map<string, string> | undefined;
       try {
         const existingTasks = await listPipelineTasks(session.accessToken);
-        existingTasksLookup = new Map();
-        // Keyed by the syncKey embedded in each task's notes (see services/googleTasks.ts), not
-        // by title+due-date text — a task whose candidate name, company name, or scheduled time
-        // has since changed still keeps the SAME syncKey, so it's still recognized. Tasks with no
-        // syncKey (created before this marker existed, or unrelated tasks in the same list) are
-        // skipped — they simply won't be reused, same as before this fix for that one task.
-        // Earlier entries win on a duplicate key — if Google's own list already has two tasks
-        // for the same syncKey (e.g. a leftover from a past occurrence of this bug), resync
-        // settles on one of them rather than alternating, and the other is left for cleanup.
+        // Group by the syncKey embedded in each task's notes (see services/googleTasks.ts) — a
+        // task whose candidate name, company name, or scheduled time has since changed still
+        // keeps the SAME syncKey, so it's still recognized. Tasks with no syncKey (created
+        // before this marker existed, or unrelated tasks in the same list) are left alone
+        // entirely — never touched by this reconciliation.
+        const tasksBySyncKey = new Map<string, ExistingPipelineTask[]>();
         existingTasks.forEach(t => {
           if (!t.syncKey) return;
-          if (!existingTasksLookup!.has(t.syncKey)) existingTasksLookup!.set(t.syncKey, t.id);
+          const list = tasksBySyncKey.get(t.syncKey);
+          if (list) list.push(t); else tasksBySyncKey.set(t.syncKey, [t]);
         });
+        // The syncKeys that SHOULD have exactly one open task right now, derived straight from
+        // the current candidate data — mirrors queueCandidateTasksSync's own create/keep
+        // conditions (not hidden, has a scheduledDate, not an EXIT_PIPELINE_STAGES stage; a
+        // revival reminder wants its task regardless of the hidden flag).
+        const wantedSyncKeys = new Set<string>();
+        (currentUserData?.candidates || []).forEach(c => {
+          if (!c.isHidden) {
+            (c.applications || []).forEach(a => {
+              if (a.scheduledDate && !EXIT_PIPELINE_STAGES.includes(a.stage)) wantedSyncKeys.add(a.id);
+            });
+          }
+          if (c.revival) wantedSyncKeys.add(`revival:${c.id}`);
+        });
+        // Reconcile Google's actual task list against that wanted set — this recovers from a
+        // stale idMap (e.g. the duplicate-Drive-file data hygiene issue tracked separately),
+        // which is how a syncKey can end up with more than one task, or with a task nothing
+        // wants anymore, in the first place:
+        // - a syncKey nothing wants any more (application removed, or moved to an exit stage,
+        //   or its candidate got hidden) has ALL of its tasks deleted, not just one;
+        // - a syncKey that's still wanted keeps exactly one task (the one idMap already points
+        //   to, if it's among them, so downstream diffing doesn't recreate it needlessly) and
+        //   any extra duplicates are deleted.
+        existingTasksLookup = new Map();
+        for (const [syncKey, tasks] of tasksBySyncKey) {
+          if (!wantedSyncKeys.has(syncKey)) {
+            for (const t of tasks) {
+              try {
+                await deletePipelineTask(session.accessToken, t.id);
+              } catch (error) {
+                console.error('Failed to delete an orphaned Google Task during resync', error);
+              }
+            }
+            continue;
+          }
+          const trackedId = googleTaskIdsRef.current[syncKey];
+          const keep = tasks.find(t => t.id === trackedId) || tasks[0];
+          existingTasksLookup.set(syncKey, keep.id);
+          for (const t of tasks) {
+            if (t.id === keep.id) continue;
+            try {
+              await deletePipelineTask(session.accessToken, t.id);
+            } catch (error) {
+              console.error('Failed to delete a duplicate Google Task during resync', error);
+            }
+          }
+        }
       } catch (error) {
         console.error('Failed to list existing Google Tasks before resync', error);
         // Non-fatal — resync still proceeds using only the locally-cached idMap, same as before
