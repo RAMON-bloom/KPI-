@@ -13614,6 +13614,17 @@ const App: React.FC = () => {
                 delete idMap[app.id];
                 changed = true;
               }
+              // idMapがstaleでもGoogle側に同じsyncKeyのタスクが実在することがある
+              // （今すぐ同期のexistingTasksLookup、上のcreateOrReuseTaskと同じ理由）。
+              // ここで拾っておかないと、そのタスクは再利用も削除もされずGoogleカレンダーに
+              // 残り続けてしまう。
+              const orphanedTaskId = opts?.existingTasksLookup?.get(app.id);
+              if (orphanedTaskId) {
+                opts!.existingTasksLookup!.delete(app.id);
+                if (orphanedTaskId !== existingTaskId) {
+                  await deletePipelineTask(accessToken, orphanedTaskId);
+                }
+              }
               continue;
             }
             // タスクへの再登録（作成/更新）は選考フェーズ・日時が変わった時だけ行う —
