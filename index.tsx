@@ -14538,6 +14538,19 @@ const App: React.FC = () => {
     return Array.from(new Set(resolved)).filter(isEmailInSelectedDivision);
   }, [teams, selectedTeamId, displayedAllUsersData, isEmailInSelectedDivision]);
 
+  // 同じ解決ロジックだが、ヘッダーの事業部フィルターは適用しない — Google Chatへのレポート
+  // 送信（TeamChatReportPanel）専用。オンスクリーンのダッシュボード表示は「今見ている事業部」
+  // に絞り込むのが正しい一方、実績を報告するメッセージからヘッダーの表示状態のせいでメンバーが
+  // 消えるのは意図しない挙動（選択中の事業部にそのメンバーの所属部署が一致しないだけで、
+  // レポートから丸ごと抜け落ちてしまっていた）。そのためレポート送信では常にチーム全員を対象と
+  // する。
+  const selectedTeamAllMemberEmails = useMemo(() => {
+    if (!selectedTeamId) return [];
+    const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
+    const resolved = memberEmails.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email);
+    return Array.from(new Set(resolved));
+  }, [teams, selectedTeamId, displayedAllUsersData]);
+
   // A stale per-member selection from a previously-viewed team would otherwise silently narrow
   // (or entirely empty out, if none of its emails overlap) the newly-selected team's dashboard.
   useEffect(() => { setTeamComparisonUserEmails([]); }, [selectedTeamId]);
@@ -15625,7 +15638,7 @@ const App: React.FC = () => {
             {selectedTeamId && (
               <TeamChatReportPanel
                 team={teams.find(t => t.id === selectedTeamId)}
-                memberEmails={selectedTeamMemberEmails}
+                memberEmails={selectedTeamAllMemberEmails}
                 allUsersData={displayedAllUsersData}
                 allMedia={allMedia}
                 weekStartsOn={weekStartsOn}
