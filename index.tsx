@@ -11307,11 +11307,14 @@ const AllUsersDashboard: React.FC<{
               <thead>
                 <tr>
                   <th>ユーザー</th>
+                  <th>返信数</th>
                   <th>スカウト返信率</th>
+                  <th>有効返信数</th>
                   <th>有効返信率</th>
                   <th>書類回収合計</th>
                   <th>有効書類回収合計</th>
                   <th>初回面談数</th>
+                  <th>有効面談数</th>
                   <th>有効面談率</th>
                   {(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(key => (
                       <th key={key}>{GENERAL_KPIS[key].label}</th>
@@ -11321,7 +11324,7 @@ const AllUsersDashboard: React.FC<{
               <tbody>
                 {perUserProgressStats.map(stat => {
                   if (!stat.userData) {
-                    return <tr key={stat.user}><td colSpan={Object.keys(GENERAL_KPIS).length + 7}>{stat.displayName}のデータがありません。</td></tr>;
+                    return <tr key={stat.user}><td colSpan={Object.keys(GENERAL_KPIS).length + 10}>{stat.displayName}のデータがありません。</td></tr>;
                   }
                   const {
                     user, displayName, sent, replies, effectiveReplies, replyRate, effectiveReplyRate,
@@ -11336,6 +11339,7 @@ const AllUsersDashboard: React.FC<{
                   return (
                     <tr key={user}>
                       <td>{displayName}</td>
+                      <td>{replies}</td>
                       <td className="progress-cell">
                         <span>{replyRate.toFixed(1)}%</span>
                         <div className="mini-progress-bar">
@@ -11343,6 +11347,7 @@ const AllUsersDashboard: React.FC<{
                         </div>
                         <small>({replies}/{sent})</small>
                       </td>
+                      <td>{effectiveReplies}</td>
                       <td className="progress-cell">
                         <span>{effectiveReplyRate.toFixed(1)}%</span>
                         <div className="mini-progress-bar">
@@ -11374,6 +11379,7 @@ const AllUsersDashboard: React.FC<{
                             </div>
                           )}
                       </td>
+                      <td>{effectiveInitialInterviews}</td>
                       <td className="progress-cell">
                         <span>{effectiveInterviewRate.toFixed(1)}%</span>
                         <div className="mini-progress-bar">
@@ -11399,7 +11405,7 @@ const AllUsersDashboard: React.FC<{
                 })}
                  {users.length === 0 && (
                     <tr>
-                        <td colSpan={Object.keys(GENERAL_KPIS).length + 7}>表示するユーザーがいません。</td>
+                        <td colSpan={Object.keys(GENERAL_KPIS).length + 10}>表示するユーザーがいません。</td>
                     </tr>
                  )}
               </tbody>
