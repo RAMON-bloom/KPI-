@@ -210,6 +210,61 @@ const calculateTotalsForRange = (entries: KpiEntry[], allMedia: MediaEntry[], st
     return totals;
 };
 
+/** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, from each member's own
+ * entries — used by the チーム別タブの「Google Chatに送信」機能（TeamChatReportPanel）で、選択中の
+ * チーム全体の実数を出すために。個人ごとの目標値は使わない（送るのは実数のみのため）。
+ */
+const computeTeamReplyInterviewTotals = (
+  memberEmails: string[],
+  allUsersData: Record<string, UserData>,
+  allMedia: MediaEntry[],
+  startDate: Date,
+  endDate: Date
+): { replies: number; interviews: number } => {
+  let replies = 0;
+  let interviews = 0;
+  memberEmails.forEach(email => {
+    const userData = allUsersData[email];
+    if (!userData) return;
+    const totals = calculateTotalsForRange(userData.entries || [], allMedia, startDate, endDate);
+    replies += getTotalFromLump(totals, '_scoutReplies', allMedia);
+    interviews += getTotalFromLump(totals, '_initialInterviews', allMedia);
+  });
+  return { replies, interviews };
+};
+
+const formatChatReportDate = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+
+/** Builds the Google Chat message text for a team's reply/interview report over [start, end]. */
+const buildTeamChatReportText = (
+  teamName: string,
+  periodLabel: string,
+  start: Date,
+  end: Date,
+  replies: number,
+  interviews: number
+): string => {
+  const rangeLabel = formatChatReportDate(start) === formatChatReportDate(end)
+    ? formatChatReportDate(start)
+    : `${formatChatReportDate(start)} 〜 ${formatChatReportDate(end)}`;
+  return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n・返信数: ${replies}\n・面談数: ${interviews}`;
+};
+
+/** POSTs a text message to a Google Chatの受信Webhook、/api/send-chat-webhookのサーバー側プロキシ
+ * 経由で行う（ブラウザから直接chat.googleapis.comへPOSTするとCORSで弾かれるため）。
+ */
+const sendChatWebhookMessage = async (webhookUrl: string, text: string): Promise<void> => {
+  const response = await fetch('/api/send-chat-webhook', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webhookUrl, text }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(body.error || `送信に失敗しました（${response.status}）`);
+  }
+};
+
 
 // Types for Weekly Summary
 interface WeeklyMediaStats {
@@ -922,6 +977,10 @@ interface Team {
   // （UserData.weekStartDayのコメント・App内のweekStartsOn算出参照）。複数チームに所属する
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   weekStartDay?: 'saturday';
+  // Google Chatの受信Webhook URL（https://chat.googleapis.com/v1/spaces/...）。設定すると、
+  // チーム別タブの「Google Chatに送信」から、このチームの返信数・面談数レポートをここに送信
+  // できるようになる。未設定なら送信不可（チーム管理で編集権限を持つ人が設定する）。
+  chatWebhookUrl?: string;
 }
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
@@ -4502,11 +4561,13 @@ const TeamsModal: React.FC<{
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
     onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay }) => {
+    onSetTeamChatWebhookUrl: (teamId: string, url: string) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
+    const [webhookInputs, setWebhookInputs] = useState<Record<string, string>>({});
     const [newEditorEmail, setNewEditorEmail] = useState('');
     // Collapsed by default — most visits are just to add/remove a team member, so these three
     // (rarely touched) sections shouldn't force scrolling past them every time.
@@ -4849,6 +4910,27 @@ const TeamsModal: React.FC<{
                                             </select>
                                         ) : (
                                             <span style={{ fontSize: '0.9rem' }}>{team.weekStartDay === 'saturday' ? '土曜始まり' : '日曜始まり'}</span>
+                                        )}
+                                    </div>
+                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>Google Chat通知の送信先（Webhook URL）</span>
+                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                            設定すると、チーム別タブの「Google Chatに送信」から、このチームの返信数・面談数レポートを送信できるようになります。Google Chatのスペースで「アプリを追加」→「Webhookを管理」から発行したURLを貼り付けてください。
+                                        </p>
+                                        {isEditable ? (
+                                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                                <input
+                                                    type="url"
+                                                    value={webhookInputs[team.id] ?? team.chatWebhookUrl ?? ''}
+                                                    onChange={(e) => setWebhookInputs(prev => ({ ...prev, [team.id]: e.target.value }))}
+                                                    onBlur={(e) => onSetTeamChatWebhookUrl(team.id, e.target.value)}
+                                                    placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
+                                                    style={{ flex: 1 }}
+                                                    aria-label={`${team.name}のGoogle Chat Webhook URL`}
+                                                />
+                                            </div>
+                                        ) : (
+                                            <span style={{ fontSize: '0.9rem' }}>{team.chatWebhookUrl ? '設定済み' : '未設定'}</span>
                                         )}
                                     </div>
                                 </li>
@@ -11077,6 +11159,112 @@ const FunnelAnalysisSection: React.FC<{
 
 const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()}`;
 
+/**
+ * チーム別タブに表示する「Google Chatに送信」パネル。前日・今週（週初〜今日）・今月（月初〜
+ * 今日）・指定期間（ページ上部の「表示・出力期間」バーで有効化した期間をそのまま使う）の
+ * いずれかを選ぶと、そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上で
+ * team.chatWebhookUrl（チーム管理で設定）宛にGoogle Chatメッセージとして送信する。
+ * webhookUrl未設定のチームでは送信不可（チーム管理での設定を促すメッセージのみ表示）。
+ */
+const TeamChatReportPanel: React.FC<{
+  team: Team | undefined;
+  memberEmails: string[];
+  allUsersData: Record<string, UserData>;
+  allMedia: MediaEntry[];
+  weekStartsOn: 0 | 6;
+  customPeriodOverride: { start: Date; end: Date } | null;
+}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, customPeriodOverride }) => {
+  const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
+  const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  if (!team) return null;
+
+  const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
+    setSendStatus('idle');
+    setSendError(null);
+    if (type === 'yesterday') {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      d.setHours(0, 0, 0, 0);
+      const end = new Date(d);
+      end.setHours(23, 59, 59, 999);
+      setPendingPeriod({ label: '前日', start: d, end });
+    } else if (type === 'week') {
+      const start = getStartOfWeek(new Date(), weekStartsOn);
+      const end = new Date();
+      end.setHours(23, 59, 59, 999);
+      setPendingPeriod({ label: '今週', start, end });
+    } else if (type === 'month') {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const end = new Date(now);
+      end.setHours(23, 59, 59, 999);
+      setPendingPeriod({ label: '今月', start, end });
+    } else {
+      if (!customPeriodOverride) {
+        alert('先に上の「表示・出力期間」で開始日・終了日を指定し、「期間で絞り込みを有効にする」を押してください。');
+        return;
+      }
+      setPendingPeriod({ label: '指定期間', start: customPeriodOverride.start, end: customPeriodOverride.end });
+    }
+  };
+
+  const totals = pendingPeriod
+    ? computeTeamReplyInterviewTotals(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end)
+    : null;
+  const messageText = pendingPeriod && totals
+    ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, totals.replies, totals.interviews)
+    : '';
+
+  const handleSend = async () => {
+    if (!team.chatWebhookUrl || !pendingPeriod) return;
+    setSendStatus('sending');
+    setSendError(null);
+    try {
+      await sendChatWebhookMessage(team.chatWebhookUrl, messageText);
+      setSendStatus('sent');
+      setPendingPeriod(null);
+    } catch (err: any) {
+      setSendStatus('error');
+      setSendError(err?.message || '送信に失敗しました。');
+    }
+  };
+
+  return (
+    <div className="custom-period-export-bar" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+      <span>Google Chatに送信（返信数・面談数）:</span>
+      {!team.chatWebhookUrl ? (
+        <p className="no-data-message" style={{ margin: 0 }}>
+          このチームにはGoogle ChatのWebhook URLが未設定です。「チーム管理」から設定してください。
+        </p>
+      ) : (
+        <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <button type="button" onClick={() => handlePickPeriod('yesterday')} className="secondary-action-button">前日</button>
+            <button type="button" onClick={() => handlePickPeriod('week')} className="secondary-action-button">今週</button>
+            <button type="button" onClick={() => handlePickPeriod('month')} className="secondary-action-button">今月</button>
+            <button type="button" onClick={() => handlePickPeriod('custom')} className="secondary-action-button">指定期間（上の表示・出力期間）</button>
+          </div>
+          {pendingPeriod && (
+            <div style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.5rem' }}>
+              <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{messageText}</pre>
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="submit-button">
+                  {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
+                </button>
+                <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
+              </div>
+            </div>
+          )}
+          {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
+          {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
+        </>
+      )}
+    </div>
+  );
+};
+
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -13007,6 +13195,12 @@ const App: React.FC = () => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
   };
 
+  // Google Chatへの実績通知の送信先Webhook URL。空文字を渡すと未設定（undefined）に戻す。
+  const handleSetTeamChatWebhookUrl = (teamId: string, url: string) => {
+    const trimmed = url.trim();
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, chatWebhookUrl: trimmed || undefined } : t)));
+  };
+
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
   // Writes through to a local cache immediately so the UI never waits on the network.
   //
@@ -14434,6 +14628,7 @@ const App: React.FC = () => {
           onToggleMiddle={handleToggleMiddle}
           onSetTeamMedia={handleSetTeamMedia}
           onSetTeamWeekStartDay={handleSetTeamWeekStartDay}
+          onSetTeamChatWebhookUrl={handleSetTeamChatWebhookUrl}
         />
       )}
       {isChangelogModalOpen && (
@@ -15281,6 +15476,16 @@ const App: React.FC = () => {
                 {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
               </button>
             </div>
+            {selectedTeamId && (
+              <TeamChatReportPanel
+                team={teams.find(t => t.id === selectedTeamId)}
+                memberEmails={selectedTeamMemberEmails}
+                allUsersData={displayedAllUsersData}
+                allMedia={allMedia}
+                weekStartsOn={weekStartsOn}
+                customPeriodOverride={dashboardPeriodOverride}
+              />
+            )}
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
             ) : isLoadingAllUsers ? (
