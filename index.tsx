@@ -210,10 +210,11 @@ const calculateTotalsForRange = (entries: KpiEntry[], allMedia: MediaEntry[], st
     return totals;
 };
 
-/** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, both as a team total and
- * broken down per member — used by the チーム別タブの「Google Chatに送信」機能（TeamChatReport
- * Panel）で、チーム全体の実数とメンバーごとの内訳を出すために。個人ごとの目標値は使わない
- * （送るのは実数のみのため）。メンバーの並び順はmemberEmailsの順（team.memberEmailsの登録順）。
+/** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, broken down per member —
+ * used by the チーム別タブの「Google Chatに送信」機能（TeamChatReportPanel）。チーム合計は送信
+ * メッセージに含めない（メンバー別の内訳のみで十分という要望のため）ので、ここでも合計は返さ
+ * ない。個人ごとの目標値も使わない（送るのは実数のみのため）。メンバーの並び順はmemberEmails
+ * の順（team.memberEmailsの登録順）。
  */
 const computeTeamReplyInterviewBreakdown = (
   memberEmails: string[],
@@ -221,44 +222,36 @@ const computeTeamReplyInterviewBreakdown = (
   allMedia: MediaEntry[],
   startDate: Date,
   endDate: Date
-): {
-  total: { replies: number; interviews: number };
-  members: { email: string; displayName: string; replies: number; interviews: number }[];
-} => {
-  let totalReplies = 0;
-  let totalInterviews = 0;
-  const members = memberEmails.map(email => {
+): { email: string; displayName: string; replies: number; interviews: number }[] => {
+  return memberEmails.map(email => {
     const userData = allUsersData[email];
     const displayName = userData?.displayName || email;
     if (!userData) return { email, displayName, replies: 0, interviews: 0 };
     const totals = calculateTotalsForRange(userData.entries || [], allMedia, startDate, endDate);
     const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
     const interviews = getTotalFromLump(totals, '_initialInterviews', allMedia);
-    totalReplies += replies;
-    totalInterviews += interviews;
     return { email, displayName, replies, interviews };
   });
-  return { total: { replies: totalReplies, interviews: totalInterviews }, members };
 };
 
 const formatChatReportDate = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 
-/** Builds the Google Chat message text for a team's reply/interview report over [start, end],
- * including the team total and a per-member breakdown. */
+/** Builds the Google Chat message text for a team's per-member reply/interview breakdown over
+ * [start, end]. */
 const buildTeamChatReportText = (
   teamName: string,
   periodLabel: string,
   start: Date,
   end: Date,
-  breakdown: { total: { replies: number; interviews: number }; members: { displayName: string; replies: number; interviews: number }[] }
+  members: { displayName: string; replies: number; interviews: number }[]
 ): string => {
   const rangeLabel = formatChatReportDate(start) === formatChatReportDate(end)
     ? formatChatReportDate(start)
     : `${formatChatReportDate(start)} 〜 ${formatChatReportDate(end)}`;
-  const memberLines = breakdown.members.length > 0
-    ? breakdown.members.map(m => `・${m.displayName}: 返信数 ${m.replies} / 面談数 ${m.interviews}`).join('\n')
+  const memberLines = members.length > 0
+    ? members.map(m => `・${m.displayName}: 返信数 ${m.replies} / 面談数 ${m.interviews}`).join('\n')
     : '（メンバーがいません）';
-  return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n\n合計　返信数: ${breakdown.total.replies} / 面談数: ${breakdown.total.interviews}\n\nメンバー別\n${memberLines}`;
+  return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n\nメンバー別\n${memberLines}`;
 };
 
 /** POSTs a text message to a Google Chatの受信Webhook、/api/send-chat-webhookのサーバー側プロキシ
@@ -11183,11 +11176,15 @@ const TeamChatReportPanel: React.FC<{
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
   weekStartsOn: 0 | 6;
-  customPeriodOverride: { start: Date; end: Date } | null;
-}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, customPeriodOverride }) => {
+}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn }) => {
   const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
+  // 「期間を指定」ボタンを押したときに開くポップアップ専用の入力欄。上部の「表示・出力期間」
+  // バー（CSV出力・歩留まり分析用）とは独立しており、このパネルの送信にしか影響しない。
+  const [isCustomPeriodPopupOpen, setIsCustomPeriodPopupOpen] = useState(false);
+  const [customStartInput, setCustomStartInput] = useState('');
+  const [customEndInput, setCustomEndInput] = useState('');
 
   if (!team) return null;
 
@@ -11213,19 +11210,28 @@ const TeamChatReportPanel: React.FC<{
       end.setHours(23, 59, 59, 999);
       setPendingPeriod({ label: '今月', start, end });
     } else {
-      if (!customPeriodOverride) {
-        alert('先に上の「表示・出力期間」で開始日・終了日を指定し、「期間で絞り込みを有効にする」を押してください。');
-        return;
-      }
-      setPendingPeriod({ label: '指定期間', start: customPeriodOverride.start, end: customPeriodOverride.end });
+      setIsCustomPeriodPopupOpen(true);
     }
   };
 
-  const breakdown = pendingPeriod
+  const handleApplyCustomPeriod = () => {
+    if (!customStartInput || !customEndInput) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    setPendingPeriod({
+      label: '指定期間',
+      start: new Date(customStartInput + 'T00:00:00'),
+      end: new Date(customEndInput + 'T23:59:59'),
+    });
+    setIsCustomPeriodPopupOpen(false);
+  };
+
+  const members = pendingPeriod
     ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end)
     : null;
-  const messageText = pendingPeriod && breakdown
-    ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, breakdown)
+  const messageText = pendingPeriod && members
+    ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, members)
     : '';
 
   const handleSend = async () => {
@@ -11255,7 +11261,7 @@ const TeamChatReportPanel: React.FC<{
             <button type="button" onClick={() => handlePickPeriod('yesterday')} className="chat-report-period-button">前日</button>
             <button type="button" onClick={() => handlePickPeriod('week')} className="chat-report-period-button">今週</button>
             <button type="button" onClick={() => handlePickPeriod('month')} className="chat-report-period-button">今月</button>
-            <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">指定期間（上の表示・出力期間）</button>
+            <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">期間を指定</button>
           </div>
           {pendingPeriod && (
             <div className="chat-report-preview">
@@ -11271,6 +11277,30 @@ const TeamChatReportPanel: React.FC<{
           {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
           {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
         </>
+      )}
+      {isCustomPeriodPopupOpen && (
+        <div className="modal-overlay" onClick={() => setIsCustomPeriodPopupOpen(false)} role="dialog" aria-modal="true" aria-labelledby="chat-report-custom-period-title">
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '360px' }}>
+            <div className="modal-header">
+              <h3 id="chat-report-custom-period-title">期間を指定</h3>
+              <button onClick={() => setIsCustomPeriodPopupOpen(false)} className="close-button" aria-label="閉じる">&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label htmlFor="chat-report-custom-start">開始日</label>
+                <input id="chat-report-custom-start" type="date" value={customStartInput} onChange={(e) => setCustomStartInput(e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label htmlFor="chat-report-custom-end">終了日</label>
+                <input id="chat-report-custom-end" type="date" value={customEndInput} onChange={(e) => setCustomEndInput(e.target.value)} />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button type="button" onClick={() => setIsCustomPeriodPopupOpen(false)} className="cancel-button">キャンセル</button>
+              <button type="button" onClick={handleApplyCustomPeriod} className="chat-report-send-button">この期間で選択</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -15494,7 +15524,6 @@ const App: React.FC = () => {
                 allUsersData={displayedAllUsersData}
                 allMedia={allMedia}
                 weekStartsOn={weekStartsOn}
-                customPeriodOverride={dashboardPeriodOverride}
               />
             )}
             {!selectedTeamId ? (
