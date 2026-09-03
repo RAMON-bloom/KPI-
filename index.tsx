@@ -11243,8 +11243,8 @@ const TeamChatReportPanel: React.FC<{
   };
 
   return (
-    <div className="custom-period-export-bar" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
-      <span>Google Chatに送信（返信数・面談数）:</span>
+    <div className="custom-period-export-bar team-chat-report-panel" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+      <span className="team-chat-report-panel-title">💬 Google Chatに送信（返信数・面談数）</span>
       {!team.chatWebhookUrl ? (
         <p className="no-data-message" style={{ margin: 0 }}>
           このチームにはGoogle ChatのWebhook URLが未設定です。「チーム管理」から設定してください。
@@ -11252,16 +11252,16 @@ const TeamChatReportPanel: React.FC<{
       ) : (
         <>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <button type="button" onClick={() => handlePickPeriod('yesterday')} className="secondary-action-button">前日</button>
-            <button type="button" onClick={() => handlePickPeriod('week')} className="secondary-action-button">今週</button>
-            <button type="button" onClick={() => handlePickPeriod('month')} className="secondary-action-button">今月</button>
-            <button type="button" onClick={() => handlePickPeriod('custom')} className="secondary-action-button">指定期間（上の表示・出力期間）</button>
+            <button type="button" onClick={() => handlePickPeriod('yesterday')} className="chat-report-period-button">前日</button>
+            <button type="button" onClick={() => handlePickPeriod('week')} className="chat-report-period-button">今週</button>
+            <button type="button" onClick={() => handlePickPeriod('month')} className="chat-report-period-button">今月</button>
+            <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">指定期間（上の表示・出力期間）</button>
           </div>
           {pendingPeriod && (
-            <div style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.5rem' }}>
+            <div className="chat-report-preview">
               <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{messageText}</pre>
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="submit-button">
+                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
                   {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
                 </button>
                 <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>

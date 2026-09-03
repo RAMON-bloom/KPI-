@@ -1746,6 +1746,44 @@ section {
   color: var(--text-muted-color);
 }
 
+/* Google Chat通知パネル（TeamChatReportPanel）— 実績の入力・集計まわりの中立トーンなボタン群
+   （.secondary-action-button等の灰色・.month-shift-buttonの橙色）と一目で見分けがつくよう、
+   青系で統一する。パネル自体も薄い水色のカードにして、実績表示から独立した操作であることを
+   強調する。 */
+.team-chat-report-panel {
+  background-color: #eaf6fb;
+  border: 1px solid #bfe4ef;
+  border-left: 4px solid var(--info-color);
+  border-radius: var(--border-radius);
+  padding: 0.85rem 1rem;
+  justify-content: flex-start;
+  color: var(--text-color);
+}
+.team-chat-report-panel-title {
+  font-weight: 600;
+  color: #0c6480;
+}
+.chat-report-period-button {
+  background-color: var(--info-color);
+  color: white;
+}
+.chat-report-period-button:hover {
+  background-color: #12889b;
+}
+.chat-report-send-button {
+  background-color: var(--primary-color);
+  color: white;
+}
+.chat-report-send-button:hover {
+  background-color: var(--primary-color-dark);
+}
+.chat-report-preview {
+  background-color: white;
+  border: 1px solid #bfe4ef;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+
 .candidate-list {
   display: grid;
   gap: 1.5rem;
