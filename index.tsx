@@ -210,44 +210,55 @@ const calculateTotalsForRange = (entries: KpiEntry[], allMedia: MediaEntry[], st
     return totals;
 };
 
-/** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, from each member's own
- * entries — used by the チーム別タブの「Google Chatに送信」機能（TeamChatReportPanel）で、選択中の
- * チーム全体の実数を出すために。個人ごとの目標値は使わない（送るのは実数のみのため）。
+/** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, both as a team total and
+ * broken down per member — used by the チーム別タブの「Google Chatに送信」機能（TeamChatReport
+ * Panel）で、チーム全体の実数とメンバーごとの内訳を出すために。個人ごとの目標値は使わない
+ * （送るのは実数のみのため）。メンバーの並び順はmemberEmailsの順（team.memberEmailsの登録順）。
  */
-const computeTeamReplyInterviewTotals = (
+const computeTeamReplyInterviewBreakdown = (
   memberEmails: string[],
   allUsersData: Record<string, UserData>,
   allMedia: MediaEntry[],
   startDate: Date,
   endDate: Date
-): { replies: number; interviews: number } => {
-  let replies = 0;
-  let interviews = 0;
-  memberEmails.forEach(email => {
+): {
+  total: { replies: number; interviews: number };
+  members: { email: string; displayName: string; replies: number; interviews: number }[];
+} => {
+  let totalReplies = 0;
+  let totalInterviews = 0;
+  const members = memberEmails.map(email => {
     const userData = allUsersData[email];
-    if (!userData) return;
+    const displayName = userData?.displayName || email;
+    if (!userData) return { email, displayName, replies: 0, interviews: 0 };
     const totals = calculateTotalsForRange(userData.entries || [], allMedia, startDate, endDate);
-    replies += getTotalFromLump(totals, '_scoutReplies', allMedia);
-    interviews += getTotalFromLump(totals, '_initialInterviews', allMedia);
+    const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
+    const interviews = getTotalFromLump(totals, '_initialInterviews', allMedia);
+    totalReplies += replies;
+    totalInterviews += interviews;
+    return { email, displayName, replies, interviews };
   });
-  return { replies, interviews };
+  return { total: { replies: totalReplies, interviews: totalInterviews }, members };
 };
 
 const formatChatReportDate = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 
-/** Builds the Google Chat message text for a team's reply/interview report over [start, end]. */
+/** Builds the Google Chat message text for a team's reply/interview report over [start, end],
+ * including the team total and a per-member breakdown. */
 const buildTeamChatReportText = (
   teamName: string,
   periodLabel: string,
   start: Date,
   end: Date,
-  replies: number,
-  interviews: number
+  breakdown: { total: { replies: number; interviews: number }; members: { displayName: string; replies: number; interviews: number }[] }
 ): string => {
   const rangeLabel = formatChatReportDate(start) === formatChatReportDate(end)
     ? formatChatReportDate(start)
     : `${formatChatReportDate(start)} 〜 ${formatChatReportDate(end)}`;
-  return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n・返信数: ${replies}\n・面談数: ${interviews}`;
+  const memberLines = breakdown.members.length > 0
+    ? breakdown.members.map(m => `・${m.displayName}: 返信数 ${m.replies} / 面談数 ${m.interviews}`).join('\n')
+    : '（メンバーがいません）';
+  return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n\n合計　返信数: ${breakdown.total.replies} / 面談数: ${breakdown.total.interviews}\n\nメンバー別\n${memberLines}`;
 };
 
 /** POSTs a text message to a Google Chatの受信Webhook、/api/send-chat-webhookのサーバー側プロキシ
@@ -11210,11 +11221,11 @@ const TeamChatReportPanel: React.FC<{
     }
   };
 
-  const totals = pendingPeriod
-    ? computeTeamReplyInterviewTotals(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end)
+  const breakdown = pendingPeriod
+    ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end)
     : null;
-  const messageText = pendingPeriod && totals
-    ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, totals.replies, totals.interviews)
+  const messageText = pendingPeriod && breakdown
+    ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, breakdown)
     : '';
 
   const handleSend = async () => {
