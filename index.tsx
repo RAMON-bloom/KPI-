@@ -981,10 +981,6 @@ interface Team {
   // （UserData.weekStartDayのコメント・App内のweekStartsOn算出参照）。複数チームに所属する
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   weekStartDay?: 'saturday';
-  // Google Chatの受信Webhook URL（https://chat.googleapis.com/v1/spaces/...）。設定すると、
-  // チーム別タブの「Google Chatに送信」から、このチームの返信数・面談数レポートをここに送信
-  // できるようになる。未設定なら送信不可（チーム管理で編集権限を持つ人が設定する）。
-  chatWebhookUrl?: string;
 }
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
@@ -1002,6 +998,14 @@ interface TeamsConfig {
   // themselves belong to. Scope of authority is derived from Team membership, not stored here —
   // this list only says WHO holds the role, not which members they manage.
   middleEmails?: string[];
+  // Google Chatへの実績通知は「全チームが同じスペースを共有している」前提のため、Webhook URL
+  // とスレッドキーはTeam単位ではなくスペース全体で1つだけ持つ（以前はTeam.chatWebhookUrlだった
+  // が、チームごとに別々の値を持たせる意味がなかったため統合した）。reportChatThreadKeyが
+  // 設定されていれば、「Google Chatに送信」のすべての送信（どのチームのレポートでも）がこの
+  // 同じキーで送信され、Google Chat側で同一スレッドへの返信としてまとまる。未設定の間は
+  // まだスレッドが作成されていない状態（チーム管理の「スレッドを作成」で作る）。
+  reportChatWebhookUrl?: string;
+  reportChatThreadKey?: string;
 }
 
 // weekStartsOn: 0 = 日曜始まり（既定）, 6 = 土曜始まり。週間サマリー・各カレンダーの表示形式
@@ -4565,18 +4569,36 @@ const TeamsModal: React.FC<{
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
     onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
-    onSetTeamChatWebhookUrl: (teamId: string, url: string) => void;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl }) => {
+    reportChatWebhookUrl: string | undefined;
+    reportChatThreadKey: string | undefined;
+    onSetReportChatWebhookUrl: (url: string) => void;
+    onCreateOrResetReportThread: (openingText: string) => Promise<void>;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
     const [memberInputs, setMemberInputs] = useState<Record<string, string>>({});
-    const [webhookInputs, setWebhookInputs] = useState<Record<string, string>>({});
     const [newEditorEmail, setNewEditorEmail] = useState('');
-    // Collapsed by default — most visits are just to add/remove a team member, so these three
+    // Collapsed by default — most visits are just to add/remove a team member, so these four
     // (rarely touched) sections shouldn't force scrolling past them every time.
-    const [openSections, setOpenSections] = useState({ permissions: false, departments: false, middle: false });
+    const [openSections, setOpenSections] = useState({ permissions: false, departments: false, middle: false, chat: false });
     const toggleSection = (key: keyof typeof openSections) => setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
+
+    const [reportWebhookInput, setReportWebhookInput] = useState(reportChatWebhookUrl || '');
+    const [reportThreadOpeningText, setReportThreadOpeningText] = useState('返信数・面談数報告');
+    const [isCreatingThread, setIsCreatingThread] = useState(false);
+    const [createThreadError, setCreateThreadError] = useState<string | null>(null);
+    const handleCreateThreadClick = async () => {
+        setIsCreatingThread(true);
+        setCreateThreadError(null);
+        try {
+            await onCreateOrResetReportThread(reportThreadOpeningText.trim() || '返信数・面談数報告');
+        } catch (err: any) {
+            setCreateThreadError(err?.message || 'スレッドの作成に失敗しました。');
+        } finally {
+            setIsCreatingThread(false);
+        }
+    };
 
     const labelByEmail = useMemo(() => new Map(userOptions.map(u => [u.email, u.label])), [userOptions]);
 
@@ -4916,30 +4938,72 @@ const TeamsModal: React.FC<{
                                             <span style={{ fontSize: '0.9rem' }}>{team.weekStartDay === 'saturday' ? '土曜始まり' : '日曜始まり'}</span>
                                         )}
                                     </div>
-                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
-                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>Google Chat通知の送信先（Webhook URL）</span>
-                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
-                                            設定すると、チーム別タブの「Google Chatに送信」から、このチームの返信数・面談数レポートを送信できるようになります。Google Chatのスペースで「アプリを追加」→「Webhookを管理」から発行したURLを貼り付けてください。
-                                        </p>
-                                        {isEditable ? (
-                                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                                <input
-                                                    type="url"
-                                                    value={webhookInputs[team.id] ?? team.chatWebhookUrl ?? ''}
-                                                    onChange={(e) => setWebhookInputs(prev => ({ ...prev, [team.id]: e.target.value }))}
-                                                    onBlur={(e) => onSetTeamChatWebhookUrl(team.id, e.target.value)}
-                                                    placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
-                                                    style={{ flex: 1 }}
-                                                    aria-label={`${team.name}のGoogle Chat Webhook URL`}
-                                                />
-                                            </div>
-                                        ) : (
-                                            <span style={{ fontSize: '0.9rem' }}>{team.chatWebhookUrl ? '設定済み' : '未設定'}</span>
-                                        )}
-                                    </div>
                                 </li>
                             ))}
                         </ul>
+                    )}
+                    {isEditable && (
+                        <div className="teams-permission-section">
+                            <hr style={{ margin: '1rem 0' }} />
+                            <h4
+                                className="sub-section-title teams-permission-section-header"
+                                onClick={() => toggleSection('chat')}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('chat'); } }}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openSections.chat}
+                            >
+                                <span>Google Chat通知設定</span>
+                                <span className={`toggle-icon ${openSections.chat ? 'open' : ''}`}>▼</span>
+                            </h4>
+                            <div className={`collapsible-content ${openSections.chat ? 'open' : ''}`}>
+                                <p className="modal-description">
+                                    全チームが同じGoogle Chatスペースを使っている前提の設定です。チーム別タブの「Google
+                                    Chatに送信」は、ここで設定したWebhook URL・スレッドをチームに関わらず共通で使います
+                                    （送信されたレポートはすべて同じスレッドへの返信としてまとまります）。
+                                </p>
+                                <div className="form-group">
+                                    <label htmlFor="report-chat-webhook-url">Webhook URL</label>
+                                    <input
+                                        id="report-chat-webhook-url"
+                                        type="url"
+                                        value={reportWebhookInput}
+                                        onChange={(e) => setReportWebhookInput(e.target.value)}
+                                        onBlur={(e) => onSetReportChatWebhookUrl(e.target.value)}
+                                        placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
+                                    />
+                                    <p className="form-helper-text" style={{ marginTop: '0.4rem' }}>
+                                        Google Chatのスペースで「アプリを追加」→「Webhookを管理」から発行したURLを貼り付けてください。
+                                    </p>
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="report-thread-opening-text">
+                                        {reportChatThreadKey ? 'スレッドを作り直す（新しい1通目のメッセージ）' : 'スレッドの1通目のメッセージ'}
+                                    </label>
+                                    <input
+                                        id="report-thread-opening-text"
+                                        type="text"
+                                        value={reportThreadOpeningText}
+                                        onChange={(e) => setReportThreadOpeningText(e.target.value)}
+                                    />
+                                    <p className="form-helper-text" style={{ marginTop: '0.4rem' }}>
+                                        {reportChatThreadKey
+                                            ? 'すでにスレッドは作成済みです。押すと新しいスレッドに切り替わり、以降の送信は新しい方に投稿されます。'
+                                            : 'このメッセージがスレッドの1通目として投稿され、スレッドが作成されます。'}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={handleCreateThreadClick}
+                                        disabled={!reportWebhookInput.trim() || isCreatingThread}
+                                        className="submit-button"
+                                        style={{ marginTop: '0.4rem' }}
+                                    >
+                                        {isCreatingThread ? '送信中...' : reportChatThreadKey ? 'スレッドを作り直す' : 'スレッドを作成'}
+                                    </button>
+                                    {createThreadError && <p className="no-data-message" style={{ marginTop: '0.4rem' }}>{createThreadError}</p>}
+                                </div>
+                            </div>
+                        </div>
                     )}
                 </div>
                 <div className="modal-footer">
@@ -11165,10 +11229,13 @@ const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()
 
 /**
  * チーム別タブに表示する「Google Chatに送信」パネル。前日・今週（週初〜今日）・今月（月初〜
- * 今日）・指定期間（ページ上部の「表示・出力期間」バーで有効化した期間をそのまま使う）の
- * いずれかを選ぶと、そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上で
- * team.chatWebhookUrl（チーム管理で設定）宛にGoogle Chatメッセージとして送信する。
- * webhookUrl未設定のチームでは送信不可（チーム管理での設定を促すメッセージのみ表示）。
+ * 今日）・期間を指定（このパネル専用のポップアップで開始日・終了日を入力）のいずれかを選ぶと、
+ * そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上でreportChatWebhookUrl
+ * 宛にGoogle Chatメッセージとして送信する。全チームが同じスペースを共有している前提のため、
+ * Webhook URL・スレッドキー（reportChatThreadKey）はチームごとではなくスペース全体で1つだけ
+ * （チーム管理の「Google Chat通知設定」で設定）— そのため、どのチームから送っても同じスレッド
+ * への返信としてまとまる。どちらか未設定の間は送信不可（チーム管理での設定を促すメッセージ
+ * のみ表示）。
  */
 const TeamChatReportPanel: React.FC<{
   team: Team | undefined;
@@ -11176,7 +11243,10 @@ const TeamChatReportPanel: React.FC<{
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
   weekStartsOn: 0 | 6;
-}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn }) => {
+  // スペース全体で共有（チームごとではない）— チーム管理の「Google Chat通知設定」で設定する。
+  reportChatWebhookUrl: string | undefined;
+  reportChatThreadKey: string | undefined;
+}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey }) => {
   const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -11235,14 +11305,14 @@ const TeamChatReportPanel: React.FC<{
     : '';
 
   const handleSend = async () => {
-    if (!team.chatWebhookUrl || !pendingPeriod) return;
+    if (!reportChatWebhookUrl || !pendingPeriod) return;
     setSendStatus('sending');
     setSendError(null);
     try {
-      // チームごとに固定のthreadKeyを使うことで、このチームのレポートは毎回同じスレッドへの
-      // 返信として投稿される（初回はスレッドが新規作成される）。期間の種類が変わっても同じ
-      // スレッドにまとまる。
-      await sendChatWebhookMessage(team.chatWebhookUrl, messageText, `team-report-${team.id}`);
+      // 全チーム共通のthreadKeyを使うことで、どのチームのレポートも毎回同じスレッドへの返信
+      // として投稿される（スレッド自体はチーム管理の「スレッドを作成」で立てたもの）。期間の
+      // 種類やチームが変わっても同じスレッドにまとまる。
+      await sendChatWebhookMessage(reportChatWebhookUrl, messageText, reportChatThreadKey);
       setSendStatus('sent');
       setPendingPeriod(null);
     } catch (err: any) {
@@ -11254,9 +11324,9 @@ const TeamChatReportPanel: React.FC<{
   return (
     <div className="custom-period-export-bar team-chat-report-panel" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
       <span className="team-chat-report-panel-title">💬 Google Chatに送信（返信数・面談数）</span>
-      {!team.chatWebhookUrl ? (
+      {!reportChatWebhookUrl || !reportChatThreadKey ? (
         <p className="no-data-message" style={{ margin: 0 }}>
-          このチームにはGoogle ChatのWebhook URLが未設定です。「チーム管理」から設定してください。
+          Google Chatの通知先・スレッドが未設定です。「チーム管理」の「Google Chat通知設定」から設定してください。
         </p>
       ) : (
         <>
@@ -12176,6 +12246,10 @@ const App: React.FC = () => {
   const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
   const [memberDepartments, setMemberDepartments] = useState<Record<string, Department>>({});
   const [middleEmails, setMiddleEmails] = useState<string[]>([]);
+  // Google Chat通知（スペース全体で共有、チーム別ではない — TeamsConfig.reportChatWebhookUrl
+  // 参照）。
+  const [reportChatWebhookUrl, setReportChatWebhookUrl] = useState<string | undefined>(undefined);
+  const [reportChatThreadKey, setReportChatThreadKey] = useState<string | undefined>(undefined);
   // Guards the individual-Drive-permission reconciliation effect (see driveFileIdByEmail below)
   // from running against an empty middleEmails/teams before loadTeamsConfig has actually
   // finished even once — without this, "no teams yet" and "teams config still loading" would be
@@ -12677,6 +12751,8 @@ const App: React.FC = () => {
         setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
         setMemberDepartments(result.data?.memberDepartments || {});
         setMiddleEmails(result.data?.middleEmails || []);
+        setReportChatWebhookUrl(result.data?.reportChatWebhookUrl);
+        setReportChatThreadKey(result.data?.reportChatThreadKey);
         if (!hasAppliedDefaultDivisionRef.current) {
           hasAppliedDefaultDivisionRef.current = true;
           const ownDepartment = result.data?.memberDepartments?.[currentIdentity.email];
@@ -13137,16 +13213,23 @@ const App: React.FC = () => {
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
 
+  // 末尾2つ（Google Chat通知のWebhook URL・スレッドキー）はデフォルトで現在値を引き継ぐ —
+  // 既存の呼び出し元（チーム作成・部署設定など）はこの2つに一切関知しないので、渡さなければ
+  // そのまま維持される。Chat通知設定を変更するハンドラだけが明示的に新しい値を渡す。
   const persistTeamsConfig = (
     updatedTeams: Team[],
     updatedAuthorizedEditors: string[],
     updatedDepartments: Record<string, Department>,
-    updatedMiddleEmails: string[]
+    updatedMiddleEmails: string[],
+    updatedReportChatWebhookUrl: string | undefined = reportChatWebhookUrl,
+    updatedReportChatThreadKey: string | undefined = reportChatThreadKey
   ) => {
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
     setMemberDepartments(updatedDepartments);
     setMiddleEmails(updatedMiddleEmails);
+    setReportChatWebhookUrl(updatedReportChatWebhookUrl);
+    setReportChatThreadKey(updatedReportChatThreadKey);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
@@ -13157,6 +13240,8 @@ const App: React.FC = () => {
           authorizedEditorEmails: updatedAuthorizedEditors,
           memberDepartments: updatedDepartments,
           middleEmails: updatedMiddleEmails,
+          reportChatWebhookUrl: updatedReportChatWebhookUrl,
+          reportChatThreadKey: updatedReportChatThreadKey,
         };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
@@ -13239,10 +13324,24 @@ const App: React.FC = () => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
   };
 
-  // Google Chatへの実績通知の送信先Webhook URL。空文字を渡すと未設定（undefined）に戻す。
-  const handleSetTeamChatWebhookUrl = (teamId: string, url: string) => {
+  // Google Chatへの実績通知の送信先Webhook URL（スペース全体で共有・チームごとではない）。
+  // 空文字を渡すと未設定（undefined）に戻す。
+  const handleSetReportChatWebhookUrl = (url: string) => {
     const trimmed = url.trim();
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, chatWebhookUrl: trimmed || undefined } : t)));
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, trimmed || undefined, reportChatThreadKey);
+  };
+
+  // スペース内に返信数・面談数報告用のスレッドを作成する（既にある場合は作り直す＝以降の
+  // 送信を新しいスレッドに切り替える）。新しいthreadKeyを生成し、そのキーで最初の1通
+  // （openingText）を実際に送信できてから初めてthreadKeyを保存する — 送信に失敗したのに
+  // 設定だけ書き換わり「スレッドがあることになっているが実在しない」状態になるのを防ぐため。
+  // 以降の「Google Chatに送信」はチームを問わずこのthreadKeyで送るため、同じスレッドへの
+  // 返信としてまとまる。
+  const handleCreateOrResetReportThread = async (openingText: string) => {
+    if (!reportChatWebhookUrl) throw new Error('先にWebhook URLを設定してください。');
+    const newThreadKey = `report-thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await sendChatWebhookMessage(reportChatWebhookUrl, openingText, newThreadKey);
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, newThreadKey);
   };
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
@@ -14672,7 +14771,10 @@ const App: React.FC = () => {
           onToggleMiddle={handleToggleMiddle}
           onSetTeamMedia={handleSetTeamMedia}
           onSetTeamWeekStartDay={handleSetTeamWeekStartDay}
-          onSetTeamChatWebhookUrl={handleSetTeamChatWebhookUrl}
+          reportChatWebhookUrl={reportChatWebhookUrl}
+          reportChatThreadKey={reportChatThreadKey}
+          onSetReportChatWebhookUrl={handleSetReportChatWebhookUrl}
+          onCreateOrResetReportThread={handleCreateOrResetReportThread}
         />
       )}
       {isChangelogModalOpen && (
@@ -15527,6 +15629,8 @@ const App: React.FC = () => {
                 allUsersData={displayedAllUsersData}
                 allMedia={allMedia}
                 weekStartsOn={weekStartsOn}
+                reportChatWebhookUrl={reportChatWebhookUrl}
+                reportChatThreadKey={reportChatThreadKey}
               />
             )}
             {!selectedTeamId ? (
