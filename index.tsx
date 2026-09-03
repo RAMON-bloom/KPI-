@@ -11112,7 +11112,7 @@ const AllUsersDashboard: React.FC<{
 }> = ({
   users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
   funnelPeriodOverride = null,
-  progressPeriodOverride, onPrevProgressMonth, onNextProgressMonth,
+  progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
   dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
 }) => {
@@ -11123,6 +11123,41 @@ const AllUsersDashboard: React.FC<{
     setTimeout(() => setJustSavedSectionDefaults(false), 2500);
   };
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
+
+  // 「全ユーザーの進捗」カード専用のカスタム期間指定（任意の開始日〜終了日）。前月/次月の
+  // 月送りナビゲーション（progressPeriodOverrideProp、親のprogressMonthOffset由来）とは別に、
+  // ここで日付を指定して有効化すると、そちらより優先して実績を絞り込める。無効化すると
+  // 月送りナビゲーションの表示に戻る。全ユーザー/チーム別タブの両方で共有されるこの
+  // コンポーネント内の状態なので、両タブに同時に適用される。
+  const [customProgressStartDate, setCustomProgressStartDate] = useState('');
+  const [customProgressEndDate, setCustomProgressEndDate] = useState('');
+  const [isCustomProgressPeriodEnabled, setIsCustomProgressPeriodEnabled] = useState(false);
+  const customProgressPeriodOverride = useMemo(() => {
+    if (!isCustomProgressPeriodEnabled || !customProgressStartDate || !customProgressEndDate) return null;
+    return { start: new Date(customProgressStartDate + 'T00:00:00'), end: new Date(customProgressEndDate + 'T23:59:59') };
+  }, [isCustomProgressPeriodEnabled, customProgressStartDate, customProgressEndDate]);
+  const handleToggleCustomProgressPeriod = () => {
+    if (customProgressPeriodOverride) {
+      setIsCustomProgressPeriodEnabled(false);
+      return;
+    }
+    if (!customProgressStartDate || !customProgressEndDate) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    setIsCustomProgressPeriodEnabled(true);
+  };
+  const handleShiftCustomProgressMonth = (offset: number) => {
+    const reference = customProgressStartDate ? new Date(customProgressStartDate + 'T00:00:00') : new Date();
+    const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
+    const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    setCustomProgressStartDate(fmt(monthStart));
+    setCustomProgressEndDate(fmt(monthEnd));
+    setIsCustomProgressPeriodEnabled(true);
+  };
+  const progressPeriodOverride = customProgressPeriodOverride ?? progressPeriodOverrideProp;
+
   // 歩留まり分析（periodOverride=funnelPeriodOverride）専用のラベル。進捗・想定粗利・曜日別
   // 返信率はそれぞれ自分専用のラベル（下記）を使う。
   const periodLabel = funnelPeriodOverride ? `${formatPeriodDate(funnelPeriodOverride.start)}〜${formatPeriodDate(funnelPeriodOverride.end)}` : '今月';
@@ -11248,10 +11283,21 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.progress ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-            <button type="button" onClick={onPrevProgressMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <button type="button" onClick={onPrevProgressMonth} disabled={isCustomProgressPeriodEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
             <span className="gmail-scout-message" style={{ margin: 0 }}>{progressPeriodLabel}</span>
-            <button type="button" onClick={onNextProgressMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            <button type="button" onClick={onNextProgressMonth} disabled={isCustomProgressPeriodEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
+          </div>
+          <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
+            <span>期間を指定して絞り込み:</span>
+            <button type="button" onClick={() => handleShiftCustomProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+            <input type="date" value={customProgressStartDate} onChange={(e) => setCustomProgressStartDate(e.target.value)} aria-label="開始日" />
+            <span>〜</span>
+            <input type="date" value={customProgressEndDate} onChange={(e) => setCustomProgressEndDate(e.target.value)} aria-label="終了日" />
+            <button type="button" onClick={() => handleShiftCustomProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            <button type="button" onClick={handleToggleCustomProgressPeriod} className="secondary-action-button">
+              {isCustomProgressPeriodEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
+            </button>
           </div>
           {progressPeriodOverride && (
             <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
