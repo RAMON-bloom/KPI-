@@ -257,11 +257,11 @@ const buildTeamChatReportText = (
 /** POSTs a text message to a Google Chatの受信Webhook、/api/send-chat-webhookのサーバー側プロキシ
  * 経由で行う（ブラウザから直接chat.googleapis.comへPOSTするとCORSで弾かれるため）。
  */
-const sendChatWebhookMessage = async (webhookUrl: string, text: string): Promise<void> => {
+const sendChatWebhookMessage = async (webhookUrl: string, text: string, threadKey?: string): Promise<void> => {
   const response = await fetch('/api/send-chat-webhook', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ webhookUrl, text }),
+    body: JSON.stringify(threadKey ? { webhookUrl, text, threadKey } : { webhookUrl, text }),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({} as { error?: string }));
@@ -11239,7 +11239,10 @@ const TeamChatReportPanel: React.FC<{
     setSendStatus('sending');
     setSendError(null);
     try {
-      await sendChatWebhookMessage(team.chatWebhookUrl, messageText);
+      // チームごとに固定のthreadKeyを使うことで、このチームのレポートは毎回同じスレッドへの
+      // 返信として投稿される（初回はスレッドが新規作成される）。期間の種類が変わっても同じ
+      // スレッドにまとまる。
+      await sendChatWebhookMessage(team.chatWebhookUrl, messageText, `team-report-${team.id}`);
       setSendStatus('sent');
       setPendingPeriod(null);
     } catch (err: any) {

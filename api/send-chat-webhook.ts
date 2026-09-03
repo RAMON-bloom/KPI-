@@ -10,9 +10,13 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const { webhookUrl, text } = req.body || {};
+  const { webhookUrl, text, threadKey } = req.body || {};
   if (typeof webhookUrl !== 'string' || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'webhookUrl and text are required' });
+    return;
+  }
+  if (threadKey !== undefined && typeof threadKey !== 'string') {
+    res.status(400).json({ error: 'threadKey must be a string' });
     return;
   }
 
@@ -28,11 +32,19 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
+  // threadKeyを指定すると、同じキーの初回投稿でスレッドが作られ、以降の投稿はそのスレッドへの
+  // 返信として投稿される（Chat REST APIのspaces.messages.create — 受信Webhookも同じエンド
+  // ポイントなので同じ仕組みが使える）。messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD
+  // で「既存スレッドがあれば返信、なければ新規スレッドを作る」動作にする。
+  if (threadKey) {
+    parsed.searchParams.set('messageReplyOption', 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD');
+  }
+
   try {
-    const chatResponse = await fetch(webhookUrl, {
+    const chatResponse = await fetch(parsed.toString(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(threadKey ? { text, thread: { threadKey } } : { text }),
     });
     const bodyText = await chatResponse.text();
     if (!chatResponse.ok) {
