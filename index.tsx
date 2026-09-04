@@ -849,6 +849,11 @@ interface UserData {
   // 所属チームの設定に関わらずそちらが常に優先される（ヘッダーの「週の始まり」セレクトで変更）。
   // App内のweekStartsOn算出、getStartOfWeek呼び出し側すべてがこの解決結果を参照する。
   weekStartDay?: 'sunday' | 'saturday';
+  // 個人実績タブの「月別パフォーマンストレンド」で、デフォルトでチェックを入れる項目
+  // （TrendMetricDef.key、複数可）。MonthlyTrendChartの「現在の選択をデフォルトとして保存」
+  // で保存する（他のXxxDefaultsと同じ「今の状態をそのままデフォルトとして保存」パターン）。
+  // 未設定/空配列ならこれまで通りDEFAULT_TREND_METRIC_KEYS（スカウト返信数のみ）から始まる。
+  monthlyTrendMetricDefaults?: string[];
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -1183,10 +1188,28 @@ const buildZeroKpiTotals = (allMedia: MediaEntry[]): KpiTotals => {
  * fixes on a single metric and draws one line per user, so trends are directly comparable
  * between people/teams. The 合計-only mode is used when there's nothing to compare (personal tab).
  */
-const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: KpiEntry[] }[]; allMedia: MediaEntry[] }> = ({ perUserEntries, allMedia }) => {
+const MonthlyTrendChart: React.FC<{
+    perUserEntries: { label: string; entries: KpiEntry[] }[];
+    allMedia: MediaEntry[];
+    // このユーザーが「現在の選択をデフォルトとして保存」した項目（UserData.
+    // monthlyTrendMetricDefaults）。未指定/空配列ならこれまで通りDEFAULT_TREND_METRIC_KEYS
+    // （スカウト返信数のみ）から始まる。呼び出し元がcurrentUserDataを読み込み済みの状態でしか
+    // このコンポーネントをマウントしないため、他の「保存済み既定値」と同じくlazy initial state
+    // で足りる（マウント後の値変化を追いかけて再適用する必要はない）。
+    defaultMetricKeys?: string[];
+    onSaveDefaultMetricKeys?: (keys: string[]) => void;
+}> = ({ perUserEntries, allMedia, defaultMetricKeys, onSaveDefaultMetricKeys }) => {
     const [compareMode, setCompareMode] = useState<'total' | 'byUser'>('total');
-    const [selectedKeys, setSelectedKeys] = useState<string[]>(DEFAULT_TREND_METRIC_KEYS);
+    const [selectedKeys, setSelectedKeys] = useState<string[]>(() =>
+        defaultMetricKeys && defaultMetricKeys.length > 0 ? defaultMetricKeys : DEFAULT_TREND_METRIC_KEYS
+    );
     const [selectedUserMetricKey, setSelectedUserMetricKey] = useState<string>(DEFAULT_TREND_METRIC_KEYS[0]);
+    const [justSavedMetricDefaults, setJustSavedMetricDefaults] = useState(false);
+    const handleSaveMetricDefaultsClick = () => {
+        onSaveDefaultMetricKeys?.(selectedKeys);
+        setJustSavedMetricDefaults(true);
+        setTimeout(() => setJustSavedMetricDefaults(false), 2500);
+    };
     // 'all' sums across every media (existing behavior); a specific media id scopes every
     // metric's getValue to just that media. GENERAL_KPIS-derived metrics (候補者推薦数 onward)
     // aren't tagged by sourcing media at all, so they're hidden while a specific media is
@@ -1364,6 +1387,16 @@ const MonthlyTrendChart: React.FC<{ perUserEntries: { label: string; entries: Kp
                             {def.label}
                         </label>
                     ))}
+                </div>
+            )}
+            {onSaveDefaultMetricKeys && compareMode !== 'byUser' && (
+                <div className="section-defaults-bar">
+                    <button type="button" onClick={handleSaveMetricDefaultsClick} className="secondary-action-button">
+                        現在の選択をデフォルトとして保存
+                    </button>
+                    {justSavedMetricDefaults && (
+                        <span className="section-defaults-saved-message">保存しました。次回以降この項目にチェックが入った状態で表示されます。</span>
+                    )}
                 </div>
             )}
             {!hasAnyData ? (
@@ -3919,6 +3952,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'Google Chat通知の送信先を、チームごとに専用のスペースへ振り分けられるようにした。各チームの設定欄に「このチーム専用」のWebhook URL・スレッドを任意で登録でき、未設定のチームはこれまで通り「Google Chat通知設定」の共通スペースを使います',
       '「ミドル」権限の名称を「BP/ミドル」に変更した（チーム管理の権限管理画面・使い方ガイドの表記）。権限の中身や割り当て方法に変更はありません',
       '【不具合修正】チーム専用のGoogle Chat送信先を過去に設定したものの、その後スレッドが未作成のままだったチームで、共通スペースへのフォールバックが働かず「Google Chatに送信」パネルが送信不可（未設定）と表示されてしまう不具合を修正。専用のWebhook URL・スレッドの両方が揃って初めて専用スペース宛に送るようにし、どちらか一方でも未設定の間は共通スペースを使うようにした',
+      '個人実績タブの「月別パフォーマンストレンド」に「現在の選択をデフォルトとして保存」を追加。チェックしておきたい項目を選んで保存しておくと、次回このタブを開いた時から自動でその項目にチェックが入った状態で表示されます（他のユーザーには影響しません）',
     ],
   },
   {
@@ -12635,6 +12669,13 @@ const App: React.FC = () => {
     } : prev));
   };
 
+  // 個人実績タブの「月別パフォーマンストレンド」で、現在チェックしている項目をこのユーザーの
+  // デフォルトとして保存する（上のhandleSavePipelineStageFilterDefaultsと同じ「今の状態を
+  // そのままデフォルトとして保存」パターン）。
+  const handleSaveMonthlyTrendMetricDefaults = (keys: string[]) => {
+    setCurrentUserData(prev => (prev ? { ...prev, monthlyTrendMetricDefaults: keys } : prev));
+  };
+
 
   // Restore the Google session on load. If the access token from earlier in this browser tab's
   // session is still valid, use it directly (instant, no network). If it's already expired —
@@ -12723,6 +12764,9 @@ const App: React.FC = () => {
       pipelineStageFilterDefaults: d.pipelineStageFilterDefaults,
       // 同じ理由: 週の始まり設定も許可リストに無いと保存直後は効いていても再読み込みで消える。
       weekStartDay: d.weekStartDay,
+      // 同じ理由: 月別パフォーマンストレンドのデフォルトチェック項目も許可リストに無いと保存
+      // 直後は効いていても再読み込みで消える。
+      monthlyTrendMetricDefaults: d.monthlyTrendMetricDefaults,
     });
 
     const cached = readLocalCache<UserData>(email);
@@ -15317,7 +15361,12 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="month-over-month-performance-content" className={`collapsible-content ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>
-                 <MonthlyTrendChart perUserEntries={[{ label: currentUserData?.displayName || currentIdentity?.name || '自分', entries }]} allMedia={allMedia} />
+                 <MonthlyTrendChart
+                    perUserEntries={[{ label: currentUserData?.displayName || currentIdentity?.name || '自分', entries }]}
+                    allMedia={allMedia}
+                    defaultMetricKeys={currentUserData?.monthlyTrendMetricDefaults}
+                    onSaveDefaultMetricKeys={handleSaveMonthlyTrendMetricDefaults}
+                 />
               </div>
             </section>
             
