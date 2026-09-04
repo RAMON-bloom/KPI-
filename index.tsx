@@ -3918,6 +3918,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '「チーム管理」のチーム一覧を、チームごとに折り畳めるようにした。メンバーが増えて縦に長くなっていた表示が、既定でチーム名・人数だけの1行に畳まれ、必要なチームだけ開いて確認できます',
       'Google Chat通知の送信先を、チームごとに専用のスペースへ振り分けられるようにした。各チームの設定欄に「このチーム専用」のWebhook URL・スレッドを任意で登録でき、未設定のチームはこれまで通り「Google Chat通知設定」の共通スペースを使います',
       '「ミドル」権限の名称を「BP/ミドル」に変更した（チーム管理の権限管理画面・使い方ガイドの表記）。権限の中身や割り当て方法に変更はありません',
+      '【不具合修正】チーム専用のGoogle Chat送信先を過去に設定したものの、その後スレッドが未作成のままだったチームで、共通スペースへのフォールバックが働かず「Google Chatに送信」パネルが送信不可（未設定）と表示されてしまう不具合を修正。専用のWebhook URL・スレッドの両方が揃って初めて専用スペース宛に送るようにし、どちらか一方でも未設定の間は共通スペースを使うようにした',
     ],
   },
   {
@@ -5015,7 +5016,18 @@ const TeamsModal: React.FC<{
                                                 aria-label={`${team.name}専用のGoogle Chat Webhook URL`}
                                             />
                                         ) : (
-                                            <span style={{ fontSize: '0.9rem' }}>{team.chatWebhookUrl ? '設定済み（専用スペース）' : '未設定（共通スペースを使用）'}</span>
+                                            <span style={{ fontSize: '0.9rem' }}>
+                                                {team.chatWebhookUrl && team.chatThreadKey
+                                                    ? '設定済み（専用スペース）'
+                                                    : team.chatWebhookUrl
+                                                    ? '設定中（スレッド未作成のため、まだ共通スペースを使用）'
+                                                    : '未設定（共通スペースを使用）'}
+                                            </span>
+                                        )}
+                                        {isEditable && team.chatWebhookUrl && !team.chatThreadKey && (
+                                            <p className="form-helper-text" style={{ marginTop: '0.4rem', marginBottom: 0 }}>
+                                                専用URLは設定されましたが、まだスレッドが未作成のため、このチームの通知は引き続き共通スペースに送られます。下のボタンでスレッドを作成すると専用スペースへの送信に切り替わります。
+                                            </p>
                                         )}
                                         {isEditable && team.chatWebhookUrl && (
                                             <div className="form-group" style={{ marginTop: '0.5rem' }}>
@@ -11336,12 +11348,14 @@ const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()
  * チーム別タブに表示する「Google Chatに送信」パネル。前日・今週（週初〜今日）・今月（月初〜
  * 今日）・期間を指定（このパネル専用のポップアップで開始日・終了日を入力）のいずれかを選ぶと、
  * そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上でGoogle Chatメッセージ
- * として送信する。送信先は、このチーム専用のWebhook URL（team.chatWebhookUrl、チーム管理の
- * 各チームの設定欄で任意設定）があればそちらを優先し、無ければ全チーム共通のスペース
- * （reportChatWebhookUrl、チーム管理の「Google Chat通知設定」で設定）にフォールバックする。
- * スレッドキーも送信先と同じ単位（専用スペースなら専用のchatThreadKey、共通スペースなら
- * 共通のreportChatThreadKey）で管理しており、どちらも未設定の間は送信不可（チーム管理での
- * 設定を促すメッセージのみ表示）。
+ * として送信する。送信先は、このチーム専用のWebhook URL・スレッドキー（team.chatWebhookUrl/
+ * chatThreadKey、チーム管理の各チームの設定欄で任意設定）が両方とも揃っていればそちらを優先し、
+ * どちらか一方でも未設定（専用スペースを使っていない、または設定途中でまだスレッド未作成）の
+ * 場合は全チーム共通のスペース（reportChatWebhookUrl/reportChatThreadKey、チーム管理の
+ * 「Google Chat通知設定」で設定）にフォールバックする——中途半端に専用URLだけ設定されている
+ * 状態を「専用スペース有効」と扱うと、まだ移行が済んでいないだけのチームの通知が送信不可に
+ * なってしまうため。共通スペースの方も未設定の間だけ送信不可（チーム管理での設定を促す
+ * メッセージのみ表示）。
  */
 const TeamChatReportPanel: React.FC<{
   team: Team | undefined;
@@ -11365,11 +11379,14 @@ const TeamChatReportPanel: React.FC<{
 
   if (!team) return null;
 
-  // このチーム専用のスペースが設定されていればそちらを使い、無ければ共通スペースにフォール
-  // バックする。専用スペースを使う場合はスレッドキーも専用の方（未作成ならundefined）を見る
-  // ——共通のreportChatThreadKeyを誤って使うと別スペースのスレッドID宛に送ってしまい壊れるため。
-  const effectiveWebhookUrl = team.chatWebhookUrl || reportChatWebhookUrl;
-  const effectiveThreadKey = team.chatWebhookUrl ? team.chatThreadKey : reportChatThreadKey;
+  // このチーム専用のスペースへの切り替えは、Webhook URLとスレッドキーの両方が揃って初めて
+  // 有効にする。URLだけ設定されてスレッド未作成の（チーム管理での専用スペース設定が途中の、
+  // または一度設定した後に使わなくなった）状態を「専用スペース有効」と誤判定すると、共通
+  // スペースには実際には届くはずの通知が送信不可になってしまう——チームのwebhook移行が
+  // 完了していない間は、これまで通り共通スペースにフォールバックさせる。
+  const hasCompleteTeamOverride = !!(team.chatWebhookUrl && team.chatThreadKey);
+  const effectiveWebhookUrl = hasCompleteTeamOverride ? team.chatWebhookUrl : reportChatWebhookUrl;
+  const effectiveThreadKey = hasCompleteTeamOverride ? team.chatThreadKey : reportChatThreadKey;
 
   const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
     setSendStatus('idle');
