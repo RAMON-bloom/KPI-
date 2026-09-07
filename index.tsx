@@ -291,13 +291,13 @@ interface WeeklyData {
 
 
 // --- Candidate Pipeline Types ---
-const PIPELINE_STAGES = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾', '内定承諾後辞退', 'お見送り', '選考辞退'] as const;
+const PIPELINE_STAGES = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談', '内定', '内定承諾', '内定承諾後辞退', 'お見送り', '選考辞退'] as const;
 type PipelineStage = typeof PIPELINE_STAGES[number];
 
 // The forward-progressing subset of PIPELINE_STAGES, in order — excludes お見送り/選考辞退,
 // which are exit branches off the main path rather than steps in it, so "how far forward did
 // this move" has no meaningful answer for them.
-const FORWARD_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定', '内定承諾'];
+const FORWARD_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談', '内定', '内定承諾'];
 
 // A candidate's application counts as still "in selection" at any of these stages — 内定承諾
 // is deliberately excluded (that company's process has concluded, successfully) alongside
@@ -305,7 +305,7 @@ const FORWARD_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適
 // whether it's too early to reflect an お見送り/選考辞退 on any ONE application: if the
 // candidate still has another application actively in progress elsewhere, that particular
 // rejection/withdrawal isn't counted into KPI actuals yet.
-const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', '内定'];
+const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談', '内定'];
 // 内定承諾後辞退 is included alongside お見送り/選考辞退 — all three are terminal, unsuccessful
 // (from a placement standpoint) branches off the main path.
 const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '内定承諾後辞退'];
@@ -318,7 +318,9 @@ const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '
 // sit between 書類選考 and 1次面接 without a dedicated KPI. お見送り/選考辞退 are exit branches,
 // not forward progress — handled separately in getStageAdvanceKpiKeys below (moving INTO one
 // fires its own KPI directly, regardless of which stage the application was coming from). 打診
-// itself has no entry — nothing to have "just passed" to reach the very first stage.
+// itself has no entry — nothing to have "just passed" to reach the very first stage. オファー面談
+// also has no entry (no dedicated funnel counter of its own); finalInterviewPassed still fires
+// whenever 内定 is reached, whether or not the application passed through オファー面談 on the way.
 const STAGE_ADVANCE_KPI_KEYS: Partial<Record<PipelineStage, (keyof typeof GENERAL_KPIS)[]>> = {
   '書類選考': ['candidatesSubmitted'],
   '適性検査': ['documentScreeningPassed'],
@@ -370,6 +372,7 @@ const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
     '1次面接': 'dodgerblue',
     '2次面接': 'royalblue',
     '最終面接': 'mediumblue',
+    'オファー面談': 'goldenrod',
     '内定': 'orange',
     '内定承諾': 'limegreen',
     '内定承諾後辞退': 'firebrick',
@@ -386,6 +389,7 @@ const STAGE_SHORT_LABELS: Record<PipelineStage, string> = {
     '1次面接': '1次',
     '2次面接': '2次',
     '最終面接': '最終',
+    'オファー面談': 'オファー面',
     '内定': 'オファー',
     '内定承諾': '承諾',
     '内定承諾後辞退': '入社辞退',
@@ -7163,8 +7167,9 @@ const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }
         '1次面接': 5,
         '2次面接': 6,
         '最終面接': 7,
-        '内定': 8,
-        '内定承諾': 9,
+        'オファー面談': 8,
+        '内定': 9,
+        '内定承諾': 10,
         '内定承諾後辞退': 0,
         'お見送り': 0,
         '選考辞退': 0,
@@ -10121,7 +10126,7 @@ const CandidatePipelineView: React.FC<{
         // --- Pipeline Summary Calculation: overall total + per-owner breakdown ---
         const STAGE_WEIGHTS: Record<PipelineStage, number> = {
             '打診': 1, '書類選考': 2, '適性検査': 3, 'カジュアル面談': 4, '1次面接': 5, '2次面接': 6,
-            '最終面接': 7, '内定': 8, '内定承諾': 9, '内定承諾後辞退': 0, 'お見送り': 0, '選考辞退': 0,
+            '最終面接': 7, 'オファー面談': 8, '内定': 9, '内定承諾': 10, '内定承諾後辞退': 0, 'お見送り': 0, '選考辞退': 0,
         };
         const computeStageCounts = (list: Candidate[]): Record<PipelineStage, number> => {
             const counts = PIPELINE_STAGES.reduce((acc, stage) => {
