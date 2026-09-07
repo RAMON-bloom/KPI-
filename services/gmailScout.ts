@@ -2,7 +2,9 @@
 // candidates by date + a broad "スカウト" subject keyword (cheap, one API call), then each
 // candidate's exact Subject header is fetched and matched client-side against the known
 // notification-email templates per media. This two-step approach avoids depending on Gmail's
-// imperfect Japanese tokenization for the actual classification.
+// imperfect Japanese tokenization for the actual classification. RDS is handled separately by
+// fetchRdsReplyMatches below, since its notification emails need cross-day dedup by candidate
+// name rather than the plain per-message classification used for the other media.
 
 export class GmailPermissionError extends Error {}
 
@@ -130,43 +132,6 @@ function extractRdsCandidateName(bodyText: string): string | null {
   return name.length > 0 ? name : null;
 }
 
-/**
- * RDS sends a separate notification email for every reply, so the same candidate replying more
- * than once on the same day was previously counted once per email. Collapses same-day RDS
- * matches down to one per distinct candidate name (extracted from the body) — a body fetch
- * failure or unrecognized format leaves that message ungrouped (counted on its own) rather than
- * risking merging two different candidates together.
- */
-async function dedupeRdsRepliesBySameDayCandidate(
-  accessToken: string,
-  matches: { dateISO: string; mediaId: string; messageId: string }[]
-): Promise<{ dateISO: string; mediaId: string; messageId: string }[]> {
-  const rdsMatches = matches.filter((m) => m.mediaId === 'rds');
-  if (rdsMatches.length === 0) return matches;
-
-  const bodies = await mapWithConcurrency(rdsMatches, 8, async (m) => {
-    try {
-      return await gmailFetch(accessToken, `messages/${m.messageId}?format=full`);
-    } catch {
-      return null;
-    }
-  });
-
-  const seenKeys = new Set<string>();
-  const keptMessageIds = new Set<string>();
-  rdsMatches.forEach((m, i) => {
-    const detail = bodies[i];
-    const candidateName = detail ? extractRdsCandidateName(extractMessageBody(detail.payload)) : null;
-    const dedupeKey = candidateName ? `${m.dateISO}|${candidateName}` : `__unmatched__${m.messageId}`;
-    if (!seenKeys.has(dedupeKey)) {
-      seenKeys.add(dedupeKey);
-      keptMessageIds.add(m.messageId);
-    }
-  });
-
-  return matches.filter((m) => m.mediaId !== 'rds' || keptMessageIds.has(m.messageId));
-}
-
 async function fetchAndClassifyMessages(
   accessToken: string,
   q: string,
@@ -189,18 +154,87 @@ async function fetchAndClassifyMessages(
     onProgress
   );
 
+  // rds is deliberately excluded here — fetchRdsReplyMatches below handles it separately with
+  // its own cross-day dedup logic instead of the plain per-message classification used here.
   const matches: { dateISO: string; mediaId: string; messageId: string }[] = [];
   details.forEach((detail, i) => {
     const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
     const subject: string = subjectHeader?.value || '';
-    const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.test(subject));
+    const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.mediaId !== 'rds' && m.test(subject));
     if (matched) {
       matches.push({ dateISO: toDateISO(Number(detail.internalDate)), mediaId: matched.mediaId, messageId: messages[i].id });
     }
   });
 
-  const dedupedMatches = await dedupeRdsRepliesBySameDayCandidate(accessToken, matches);
-  return { matches: dedupedMatches, totalScanned: messages.length };
+  return { matches, totalScanned: messages.length };
+}
+
+const RDS_SUBJECT_QUERY = 'subject:リクルートダイレクトスカウト subject:スカウト送付';
+// RDS sends a fresh notification email for every message a candidate sends — not just their
+// first-ever reply — so an ongoing exchange (the notification itself asks recruiters to respond
+// within 5 business days, implying exchanges can span that long) produces one "返信が来ました"
+// email per message, on whatever day each message happens to land. Counting every such email as
+// a new reply overcounts vs. the actual number of candidates who replied. This scans a window
+// widened RDS_HISTORY_LOOKBACK_DAYS before the requested range, extracts each message's
+// candidate name from the body, and keeps only each candidate's chronologically first message —
+// dropping every later message from the same candidate (same day or weeks later) and anything
+// whose first-ever appearance predates the requested range. A body fetch failure or unrecognized
+// format leaves that message ungrouped (counted on its own) rather than risking merging two
+// different candidates together.
+const RDS_HISTORY_LOOKBACK_DAYS = 30;
+
+async function fetchRdsReplyMatches(
+  accessToken: string,
+  startDateISO: string,
+  endDateISOInclusive: string,
+  onProgress?: GmailScanProgress
+): Promise<{ matches: { dateISO: string; mediaId: string; messageId: string }[]; totalScanned: number }> {
+  const rangeStart = new Date(startDateISO + 'T00:00:00');
+  const rangeEndExclusive = new Date(endDateISOInclusive + 'T00:00:00');
+  rangeEndExclusive.setDate(rangeEndExclusive.getDate() + 1);
+  const scanStart = new Date(rangeStart);
+  scanStart.setDate(scanStart.getDate() - RDS_HISTORY_LOOKBACK_DAYS);
+
+  const q = `after:${toGmailDate(scanStart)} before:${toGmailDate(rangeEndExclusive)} ${RDS_SUBJECT_QUERY}`;
+  let messages: { id: string }[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({ q, maxResults: '100' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const listRes = await gmailFetch(accessToken, `messages?${params.toString()}`);
+    messages = messages.concat(listRes.messages || []);
+    pageToken = listRes.nextPageToken;
+  } while (pageToken);
+
+  const details = await mapWithConcurrency(
+    messages,
+    8,
+    (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=full`),
+    onProgress
+  );
+
+  const entries = details
+    .map((detail, i) => ({
+      messageId: messages[i].id,
+      internalDate: Number(detail.internalDate),
+      dateISO: toDateISO(Number(detail.internalDate)),
+      candidateName: extractRdsCandidateName(extractMessageBody(detail.payload)),
+    }))
+    .sort((a, b) => a.internalDate - b.internalDate);
+
+  const rangeStartMs = rangeStart.getTime();
+  const seenCandidates = new Set<string>();
+  const matches: { dateISO: string; mediaId: string; messageId: string }[] = [];
+  entries.forEach((entry) => {
+    if (entry.candidateName) {
+      if (seenCandidates.has(entry.candidateName)) return;
+      seenCandidates.add(entry.candidateName);
+    }
+    if (entry.internalDate < rangeStartMs) return; // first appearance predates the requested range
+    matches.push({ dateISO: entry.dateISO, mediaId: 'rds', messageId: entry.messageId });
+  });
+
+  return { matches, totalScanned: messages.length };
 }
 
 /** Fetches per-media scout-reply-notification-email counts for a single calendar date (local time). */
@@ -214,10 +248,14 @@ export async function fetchScoutReplyCounts(
   dayEnd.setDate(dayEnd.getDate() + 1);
   const q = `after:${toGmailDate(dayStart)} before:${toGmailDate(dayEnd)} subject:スカウト`;
 
-  const { matches, totalScanned } = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  const [general, rds] = await Promise.all([
+    fetchAndClassifyMessages(accessToken, q, onProgress),
+    fetchRdsReplyMatches(accessToken, dateISO, dateISO),
+  ]);
+  const matches = [...general.matches, ...rds.matches];
   const counts: Record<string, number> = {};
   matches.forEach((m) => { counts[m.mediaId] = (counts[m.mediaId] || 0) + 1; });
-  return { counts, totalMatched: matches.length, totalScanned };
+  return { counts, totalMatched: matches.length, totalScanned: general.totalScanned + rds.totalScanned };
 }
 
 export interface FullMessage {
@@ -285,11 +323,15 @@ export async function fetchScoutReplyCountsForRange(
   endExclusive.setDate(endExclusive.getDate() + 1);
   const q = `after:${toGmailDate(start)} before:${toGmailDate(endExclusive)} subject:スカウト`;
 
-  const { matches, totalScanned } = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  // Run sequentially (not in parallel) so onProgress reports one coherent 0→total sweep at a
+  // time instead of two competing counters interleaving on the same callback.
+  const general = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  const rds = await fetchRdsReplyMatches(accessToken, startDateISO, endDateISOInclusive, onProgress);
+  const matches = [...general.matches, ...rds.matches];
   const countsByDate: Record<string, Record<string, number>> = {};
   matches.forEach((m) => {
     countsByDate[m.dateISO] = countsByDate[m.dateISO] || {};
     countsByDate[m.dateISO][m.mediaId] = (countsByDate[m.dateISO][m.mediaId] || 0) + 1;
   });
-  return { countsByDate, totalMatched: matches.length, totalScanned };
+  return { countsByDate, totalMatched: matches.length, totalScanned: general.totalScanned + rds.totalScanned };
 }
