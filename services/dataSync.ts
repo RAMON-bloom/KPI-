@@ -236,6 +236,25 @@ function enqueueOnWriteQueue<T>(task: () => Promise<T>): Promise<T> {
   return result;
 }
 
+/**
+ * Merges two copies of `entries` (each at most one entry per `date`) into one, keeping — per
+ * date — whichever of the two has the larger `id`. Every entry writer in this codebase
+ * (persistEntry, overwriteTeammateEntry, the bulk-import paths, etc.) assigns a fresh
+ * `id: Date.now()` whenever a date's entry is created OR replaced, so `id` doubles as a
+ * per-date "last written at" timestamp even though the two copies being merged were never
+ * compared entry-by-entry before. This makes the merge order-independent and safe to use even
+ * when neither side is known to be "the newer one" up front.
+ */
+function mergeEntriesByLatestId(a: any[] = [], b: any[] = []): any[] {
+  const byDate = new Map<string, any>();
+  [...a, ...b].forEach((entry) => {
+    if (!entry || !entry.date) return;
+    const existing = byDate.get(entry.date);
+    if (!existing || (entry.id ?? 0) >= (existing.id ?? 0)) byDate.set(entry.date, entry);
+  });
+  return Array.from(byDate.values()).sort((x, y) => x.date.localeCompare(y.date));
+}
+
 async function performSave(
   email: string,
   driveFileId: string | null,
@@ -246,21 +265,30 @@ async function performSave(
     let payload: Record<string, unknown> = { ...(data as object), schemaVersion: SCHEMA_VERSION };
     if (driveFileId) {
       // This is a blind whole-document overwrite of whatever this browser's local state happens
-      // to hold — fine for every field this browser is the sole writer of, but feedbackPosts is
-      // also written directly by OTHER clients (a developer's reply via
-      // appendTeammateFeedbackMessage, or even this same account's own appendOwnFeedbackPost from
-      // a moment ago) and this browser never re-fetches feedbackPosts mid-session to learn about
-      // that. Without this, ANY unrelated edit (a KPI entry, a candidate edit — anything that
-      // touches currentUserData and re-triggers this debounce) would silently revert
-      // feedbackPosts back to this browser's stale copy, erasing a reply that had already landed
-      // on Drive. Re-reading it fresh immediately before writing closes that gap; if the read
-      // itself fails, fall through and write the local snapshot as before rather than blocking
-      // the rest of this save on it.
+      // to hold — fine for every field this browser is the sole writer of, but feedbackPosts and
+      // entries are also written directly by OTHER clients: feedbackPosts by a developer's reply
+      // (appendTeammateFeedbackMessage) or this same account's own appendOwnFeedbackPost from a
+      // moment ago, and entries by a ミドル's proxy entry (overwriteTeammateEntry) writing
+      // straight to this file while this browser's tab stays open with an older in-memory
+      // snapshot. This browser never re-fetches either mid-session to learn about that. Without
+      // this, ANY unrelated edit (a KPI entry on a different date, a candidate edit — anything
+      // that touches currentUserData and re-triggers this debounce) would silently revert
+      // feedbackPosts/entries back to this browser's stale copy, erasing a reply or a ミドル's
+      // proxy entry that had already landed on Drive (the reported "ミドルが入力した実績が翌日には
+      // 消えている" bug). Re-reading both fresh immediately before writing closes that gap —
+      // feedbackPosts is trusted outright since this browser is never its primary editor, while
+      // entries is merged per-date (mergeEntriesByLatestId above) since this browser IS normally
+      // the one editing its own entries and a blind "trust Drive" here would drop whatever this
+      // very save is trying to persist. If the read itself fails, fall through and write the
+      // local snapshot as before rather than blocking the rest of this save on it.
       try {
-        const latest = await readFileContent<{ feedbackPosts?: unknown[] }>(driveFileId);
+        const latest = await readFileContent<{ feedbackPosts?: unknown[]; entries?: any[] }>(driveFileId);
         if (latest && latest.feedbackPosts) payload = { ...payload, feedbackPosts: latest.feedbackPosts };
+        if (latest && latest.entries) {
+          payload = { ...payload, entries: mergeEntriesByLatestId(payload.entries as any[], latest.entries) };
+        }
       } catch (readErr) {
-        console.error('Failed to re-fetch feedbackPosts before saving own data — writing local snapshot instead', readErr);
+        console.error('Failed to re-fetch feedbackPosts/entries before saving own data — writing local snapshot instead', readErr);
       }
       await updateFileContent(driveFileId, payload);
     } else {
