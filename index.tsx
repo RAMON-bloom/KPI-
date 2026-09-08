@@ -13484,9 +13484,20 @@ const App: React.FC = () => {
     if (selectedTeamId === teamId) setSelectedTeamId(null);
   };
 
+  // A member belongs to at most one team at a time (myTeamId/entryActiveMedia/
+  // myTeamForWeekStart all resolve "my team" by scanning for the first team whose
+  // memberEmails includes the user's email). Adding someone to a team here therefore also
+  // strips them from every other team's memberEmails in the same write, so a "team change"
+  // (done by adding to the new team) can't leave them stranded in two teams at once with the
+  // old team's media/settings still silently winning the lookup.
   const handleAddTeamMember = (teamId: string, email: string) => {
     persistTeams(
-      teams.map(t => (t.id === teamId && !t.memberEmails.includes(email) ? { ...t, memberEmails: [...t.memberEmails, email] } : t))
+      teams.map(t => {
+        if (t.id === teamId) {
+          return t.memberEmails.includes(email) ? t : { ...t, memberEmails: [...t.memberEmails, email] };
+        }
+        return t.memberEmails.includes(email) ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t;
+      })
     );
   };
 
