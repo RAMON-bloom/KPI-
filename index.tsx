@@ -569,6 +569,13 @@ interface Candidate {
   // 自由に追加できる。updatedAtはそのエントリが保存されるたびに自動設定される（手入力しない）。
   memos?: MemoEntry[];
   createdAt: string; // ISO string
+  // epoch ms, bumped by computeStageAdvanceUpdate and by every direct isHidden toggle (own or
+  // ミドル代理) — lets performSave's Drive-write merge (dataSync.ts) tell which of two candidate
+  // copies for the same id is more recent when merging in a ミドル's proxy edit that this
+  // browser's local snapshot doesn't know about yet. Optional/absent on older candidates that
+  // predate this field — treated as 0 (oldest), which only matters if the OTHER copy has a real
+  // value, in which case that one correctly wins.
+  lastModifiedAt?: number;
   isHidden?: boolean;
   // 掘り起しリスト: presence means this candidate is parked for future re-engagement rather
   // than actively pursued right now. Adding a candidate here also sets isHidden — it's a
@@ -817,7 +824,7 @@ function computeStageAdvanceUpdate(
     }
   }
 
-  if (Object.keys(kpiDeltas).length === 0) return { candidate: nextCandidate, kpiDeltas };
+  if (Object.keys(kpiDeltas).length === 0) return { candidate: { ...nextCandidate, lastModifiedAt: Date.now() }, kpiDeltas };
   return {
     candidate: {
       ...nextCandidate,
@@ -828,6 +835,7 @@ function computeStageAdvanceUpdate(
       exitPhase: exitJustRecorded ? exitPhase : nextCandidate.exitPhase,
       exitPhaseAt: exitJustRecorded ? exitPhaseAt : nextCandidate.exitPhaseAt,
       exitKpiKey: exitJustRecorded ? exitKpiKey : nextCandidate.exitKpiKey,
+      lastModifiedAt: Date.now(),
     },
     kpiDeltas,
   };
@@ -14761,7 +14769,7 @@ const App: React.FC = () => {
       setCurrentUserData(prevData => {
           if (!prevData) return null;
           const updatedCandidates = prevData.candidates.map(c =>
-              c.id === candidateId ? { ...c, isHidden: !c.isHidden } : c
+              c.id === candidateId ? { ...c, isHidden: !c.isHidden, lastModifiedAt: Date.now() } : c
           );
           return { ...prevData, candidates: updatedCandidates };
       });

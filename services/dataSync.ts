@@ -255,6 +255,26 @@ function mergeEntriesByLatestId(a: any[] = [], b: any[] = []): any[] {
   return Array.from(byDate.values()).sort((x, y) => x.date.localeCompare(y.date));
 }
 
+/**
+ * Same idea as mergeEntriesByLatestId above, but for `candidates` (keyed by `id`, freshness
+ * compared via `lastModifiedAt` — a candidate's own `id` never changes on edit the way an
+ * entry's does, so it can't double as a timestamp; `lastModifiedAt` is bumped explicitly instead
+ * by computeStageAdvanceUpdate and by every isHidden toggle, own or ミドル代理, see the
+ * Candidate interface in index.tsx). Unlike entries, candidates are never hard-deleted (only
+ * archived via isHidden — see the Candidate.revival/isHidden comments in index.tsx), so a plain
+ * union of both sides by id is safe here too: it can only ever add a candidate neither side
+ * would otherwise have dropped on purpose, never resurrect one that was deliberately removed.
+ */
+function mergeCandidatesByLatest(a: any[] = [], b: any[] = []): any[] {
+  const byId = new Map<string, any>();
+  [...a, ...b].forEach((candidate) => {
+    if (!candidate || candidate.id == null) return;
+    const existing = byId.get(candidate.id);
+    if (!existing || (candidate.lastModifiedAt ?? 0) >= (existing.lastModifiedAt ?? 0)) byId.set(candidate.id, candidate);
+  });
+  return Array.from(byId.values());
+}
+
 async function performSave(
   email: string,
   driveFileId: string | null,
@@ -265,30 +285,36 @@ async function performSave(
     let payload: Record<string, unknown> = { ...(data as object), schemaVersion: SCHEMA_VERSION };
     if (driveFileId) {
       // This is a blind whole-document overwrite of whatever this browser's local state happens
-      // to hold — fine for every field this browser is the sole writer of, but feedbackPosts and
-      // entries are also written directly by OTHER clients: feedbackPosts by a developer's reply
-      // (appendTeammateFeedbackMessage) or this same account's own appendOwnFeedbackPost from a
-      // moment ago, and entries by a ミドル's proxy entry (overwriteTeammateEntry) writing
-      // straight to this file while this browser's tab stays open with an older in-memory
-      // snapshot. This browser never re-fetches either mid-session to learn about that. Without
-      // this, ANY unrelated edit (a KPI entry on a different date, a candidate edit — anything
-      // that touches currentUserData and re-triggers this debounce) would silently revert
-      // feedbackPosts/entries back to this browser's stale copy, erasing a reply or a ミドル's
-      // proxy entry that had already landed on Drive (the reported "ミドルが入力した実績が翌日には
-      // 消えている" bug). Re-reading both fresh immediately before writing closes that gap —
-      // feedbackPosts is trusted outright since this browser is never its primary editor, while
-      // entries is merged per-date (mergeEntriesByLatestId above) since this browser IS normally
-      // the one editing its own entries and a blind "trust Drive" here would drop whatever this
-      // very save is trying to persist. If the read itself fails, fall through and write the
-      // local snapshot as before rather than blocking the rest of this save on it.
+      // to hold — fine for every field this browser is the sole writer of, but feedbackPosts,
+      // entries and candidates are also written directly by OTHER clients: feedbackPosts by a
+      // developer's reply (appendTeammateFeedbackMessage) or this same account's own
+      // appendOwnFeedbackPost from a moment ago, and entries/candidates by a ミドル's proxy entry
+      // (overwriteTeammateEntry / overwriteTeammateCandidateVisibility / overwriteTeammateCandidatePatch
+      // / addTeammateCandidate(sBulk)) writing straight to this file while this browser's tab
+      // stays open with an older in-memory snapshot. This browser never re-fetches any of these
+      // mid-session to learn about that. Without this, ANY unrelated edit (a KPI entry on a
+      // different date, an unrelated candidate edit — anything that touches currentUserData and
+      // re-triggers this debounce) would silently revert feedbackPosts/entries/candidates back to
+      // this browser's stale copy, erasing a reply or a ミドル's proxy entry/candidate that had
+      // already landed on Drive (the reported "ミドルが入力した実績が翌日には消えている" bug).
+      // Re-reading all three fresh immediately before writing closes that gap — feedbackPosts is
+      // trusted outright since this browser is never its primary editor, while entries/candidates
+      // are merged per-item (mergeEntriesByLatestId / mergeCandidatesByLatest above) since this
+      // browser IS normally the one editing its own entries/candidates and a blind "trust Drive"
+      // here would drop whatever this very save is trying to persist. If the read itself fails,
+      // fall through and write the local snapshot as before rather than blocking the rest of this
+      // save on it.
       try {
-        const latest = await readFileContent<{ feedbackPosts?: unknown[]; entries?: any[] }>(driveFileId);
+        const latest = await readFileContent<{ feedbackPosts?: unknown[]; entries?: any[]; candidates?: any[] }>(driveFileId);
         if (latest && latest.feedbackPosts) payload = { ...payload, feedbackPosts: latest.feedbackPosts };
         if (latest && latest.entries) {
           payload = { ...payload, entries: mergeEntriesByLatestId(payload.entries as any[], latest.entries) };
         }
+        if (latest && latest.candidates) {
+          payload = { ...payload, candidates: mergeCandidatesByLatest(payload.candidates as any[], latest.candidates) };
+        }
       } catch (readErr) {
-        console.error('Failed to re-fetch feedbackPosts/entries before saving own data — writing local snapshot instead', readErr);
+        console.error('Failed to re-fetch feedbackPosts/entries/candidates before saving own data — writing local snapshot instead', readErr);
       }
       await updateFileContent(driveFileId, payload);
     } else {
@@ -522,7 +548,7 @@ export async function overwriteTeammateCandidateVisibility<T extends { candidate
 ): Promise<T> {
   const latest = await readFileContent<T>(driveFileId);
   const updatedCandidates = (latest.candidates || []).map((c: any) =>
-    c.id === candidateId ? { ...c, isHidden: nextIsHidden } : c
+    c.id === candidateId ? { ...c, isHidden: nextIsHidden, lastModifiedAt: Date.now() } : c
   );
   const updated = { ...latest, candidates: updatedCandidates };
   await updateFileContent(driveFileId, updated);
