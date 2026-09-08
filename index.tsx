@@ -1012,6 +1012,12 @@ interface TeamChatWebhookConfig {
   // 実際に1通送信できてから初めて保存される（送信に失敗したのに「スレッドがある」ことに
   // なってしまうのを防ぐため）。
   threadKey?: string;
+  // この機能で最後に送信済みの日付（YYYY-MM-DD、ローカル日付）。「1日1回だけ送る」系の
+  // 機能（前日KPI未入力リマインドの自動送信）が二重送信を防ぐために使う。手動送信
+  // （TeamChatReminderPanelの「この内容で送信する」）でも同じ日付を書き込み、自動送信と
+  // 手動送信のどちらが先でも当日はもう一方が重複送信しないようにする。'report'のような
+  // 手動送信専用の機能では書き込まれない（未使用のままでよい）。
+  lastAutoSentDate?: string;
 }
 
 /**
@@ -1063,7 +1069,7 @@ const CHAT_WEBHOOK_FEATURES: ChatWebhookFeature[] = [
   {
     id: 'reminder',
     label: '前日KPI未入力リマインド',
-    helperText: 'このチーム専用のスペースにのみ送信されます（実績レポートと違い、共通スペースへのフォールバックはありません）。設定すると、チーム別タブから前日分のKPI未入力メンバーへのリマインドを送れるようになります。',
+    helperText: 'このチーム専用のスペースにのみ送信されます（実績レポートと違い、共通スペースへのフォールバックはありません）。設定すると、チーム別タブから前日分のKPI未入力メンバーへのリマインドを手動で送れるほか、毎日9時以降に誰かが最初にこのアプリにログインしたタイミングで自動送信されます（1日1回まで）。',
     unsetStatusLabel: '未設定（送信されません）',
     defaultOpeningText: '前日KPI未入力リマインド',
   },
@@ -11676,7 +11682,11 @@ const TeamChatReminderPanel: React.FC<{
   team: Team | undefined;
   memberEmails: string[];
   allUsersData: Record<string, UserData>;
-}> = ({ team, memberEmails, allUsersData }) => {
+  // 送信成功後にlastAutoSentDate（今日の日付）を書き込むためのコールバック。9時以降の
+  // 自動送信（App内のuseEffect）と同じ「1日1回」の目印を共有し、手動でこのボタンから送った
+  // 日は自動送信の方がその日もう一度送らないようにする。
+  onSent: (teamId: string, dateStr: string) => void;
+}> = ({ team, memberEmails, allUsersData, onSent }) => {
   const [preview, setPreview] = useState<{ dateLabel: string; text: string; missingCount: number } | null>(null);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -11704,6 +11714,7 @@ const TeamChatReminderPanel: React.FC<{
       await sendChatWebhookMessage(cfg.url, preview.text, cfg.threadKey);
       setSendStatus('sent');
       setPreview(null);
+      onSent(team.id, new Date().toLocaleDateString('sv-SE'));
     } catch (err: any) {
       setSendStatus('error');
       setSendError(err?.message || '送信に失敗しました。');
@@ -13771,6 +13782,82 @@ const App: React.FC = () => {
     await sendChatWebhookMessage(reportChatWebhookUrl, openingText, newThreadKey);
     persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, newThreadKey);
   };
+
+  // TeamChatReminderPanelの「この内容で送信する」（手動送信）が成功した直後に呼ばれ、
+  // lastAutoSentDateを今日の日付にする——下の自動送信useEffectと同じ目印を共有することで、
+  // 手動で送った日は自動送信の方がその日もう一度送らないようにする。
+  const handleTeamReminderSent = (teamId: string, dateStr: string) => {
+    const team = teams.find(t => t.id === teamId);
+    const cfg = team ? getTeamChatWebhookConfig(team, 'reminder') : undefined;
+    if (!cfg) return;
+    updateTeamChatWebhook(teamId, 'reminder', { ...cfg, lastAutoSentDate: dateStr });
+  };
+
+  // 前日KPI未入力リマインドの「9時以降・1日1回」自動送信。サーバー側にGoogle認証情報を持たない
+  // 構成（kpi-mgr-auto-deploy参照）のため、真の定時cronではなく「9時以降に誰かが最初に
+  // サインインしてこのアプリを開いたら、その人のセッションから代わりに送る」ベストエフォート
+  // 方式——その日誰もログインしなければその日は送信されない。1セッションにつき1回だけ判定
+  // する（autoReminderCheckedRef）。
+  //
+  // 判定はteamsConfigLoaded（TeamsConfig読み込み完了）だけをトリガーにし、view/モーダルの
+  // 状態は問わない——「誰かがアプリにログインしてさえいれば送信されるように」という要望どおり、
+  // どのタブを開いていても発火する。対象チームが無ければドメイン全体のユーザーデータ取得
+  // （重い処理）自体をスキップするので、その日最初の1人以外のログインではTeamsConfigの
+  // 読み込み以上のコストはかからない。
+  const autoReminderCheckedRef = useRef(false);
+  useEffect(() => {
+    if (!currentIdentity || !isInitialized || !teamsConfigLoaded) return;
+    if (autoReminderCheckedRef.current) return;
+    autoReminderCheckedRef.current = true;
+
+    const now = new Date();
+    if (now.getHours() < 9) return; // 9時より前は対象外（このセッション中に9時を跨いでも再判定はしない）
+    const todayStr = now.toLocaleDateString('sv-SE');
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString('sv-SE');
+    const yesterdayLabel = formatReminderDateLabel(yesterday);
+
+    const dueTeams = teams.filter(t => {
+      const cfg = getTeamChatWebhookConfig(t, 'reminder');
+      return !!(cfg?.url && cfg?.threadKey) && cfg.lastAutoSentDate !== todayStr;
+    });
+    if (dueTeams.length === 0) return;
+
+    (async () => {
+      let teammates: { email: string; data: UserData }[];
+      try {
+        teammates = await loadAllTeammatesData<UserData>();
+      } catch (error) {
+        console.error('Failed to load teammates data for auto reminder', error);
+        return;
+      }
+      const dataByEmail: Record<string, UserData> = {};
+      teammates.forEach(({ email, data }) => { dataByEmail[email] = { ...data, entries: data.entries || [] }; });
+
+      const sentTeamIds: string[] = [];
+      for (const team of dueTeams) {
+        const cfg = getTeamChatWebhookConfig(team, 'reminder')!;
+        try {
+          const missing = computeMembersMissingEntryForDate(team.memberEmails, dataByEmail, yesterdayStr);
+          if (missing.length > 0) {
+            const text = buildTeamReminderText(team.name, yesterdayLabel, missing);
+            await sendChatWebhookMessage(cfg.url, text, cfg.threadKey);
+          }
+          sentTeamIds.push(team.id);
+        } catch (error) {
+          console.error(`Failed to auto-send reminder for team ${team.id}`, error);
+        }
+      }
+      if (sentTeamIds.length > 0) {
+        persistTeams(teams.map(t => {
+          if (!sentTeamIds.includes(t.id)) return t;
+          const cfg = getTeamChatWebhookConfig(t, 'reminder')!;
+          return { ...t, chatWebhooks: { ...(t.chatWebhooks || {}), reminder: { ...cfg, lastAutoSentDate: todayStr } } };
+        }));
+      }
+    })();
+  }, [currentIdentity, isInitialized, teamsConfigLoaded, teams]);
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
   // Writes through to a local cache immediately so the UI never waits on the network.
@@ -16085,6 +16172,7 @@ const App: React.FC = () => {
                   team={teams.find(t => t.id === selectedTeamId)}
                   memberEmails={selectedTeamAllMemberEmails}
                   allUsersData={displayedAllUsersData}
+                  onSent={handleTeamReminderSent}
                 />
               </>
             )}
