@@ -990,19 +990,14 @@ interface Team {
   // （UserData.weekStartDayのコメント・App内のweekStartsOn算出参照）。複数チームに所属する
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   weekStartDay?: 'saturday';
-  // レガシー: 2026-09以前は「実績レポート」専用スペースの設定をこの2フィールドだけで持っていた
-  // （チーム管理の「Google Chatの送信先」欄で設定）。CHAT_WEBHOOK_FEATURES導入後は
-  // chatWebhooks.report に統合されており、新規の書き込みはもう行わない（読み取りは
-  // getTeamChatWebhookConfigがchatWebhooksに値が無い場合のフォールバックとして参照する）。
-  // 型からもう削除して良さそうに見えるが、Driveの生JSONには過去の値が残り続けるため
-  // （kpi-mgr-team-chat-webhook-history参照）、読み取り経路を残すためにフィールド自体は残す。
-  chatWebhookUrl?: string;
-  chatThreadKey?: string;
   // チームごとのGoogle Chat通知を「機能」単位で複数持てるようにする入れ物。キーは
-  // CHAT_WEBHOOK_FEATURESの各idと対応する（例: 'report'=実績レポート、'reminder'=前日KPI
-  // 未入力リマインド）。新しい通知機能を追加したい場合はCHAT_WEBHOOK_FEATURESに1エントリ
-  // 足すだけでよく、この型・チーム管理UIの変更は不要（getTeamChatWebhookConfig・
-  // TeamsModalのループ参照）。
+  // CHAT_WEBHOOK_FEATURESの各idと対応する（例: 'reminder'=前日KPI未入力リマインド）。
+  // 新しい通知機能を追加したい場合はCHAT_WEBHOOK_FEATURESに1エントリ足すだけでよく、
+  // この型・チーム管理UIの変更は不要（getTeamChatWebhookConfig・TeamsModalのループ参照）。
+  // 実績レポート（返信数・面談数）はこの仕組みから外れており、常に全チーム共通スペース
+  // （TeamsConfig.reportChatWebhookUrl/reportChatThreadKey）にのみ送信する
+  // （2026-09-08、チームごとの専用スペースをやめて共通スペースに一本化する方針に変更。
+  // kpi-mgr-team-chat-webhook-history参照）。
   chatWebhooks?: Partial<Record<string, TeamChatWebhookConfig>>;
 }
 
@@ -1015,25 +1010,18 @@ interface TeamChatWebhookConfig {
   // この機能で最後に送信済みの日付（YYYY-MM-DD、ローカル日付）。「1日1回だけ送る」系の
   // 機能（前日KPI未入力リマインドの自動送信）が二重送信を防ぐために使う。手動送信
   // （TeamChatReminderPanelの「この内容で送信する」）でも同じ日付を書き込み、自動送信と
-  // 手動送信のどちらが先でも当日はもう一方が重複送信しないようにする。'report'のような
-  // 手動送信専用の機能では書き込まれない（未使用のままでよい）。
+  // 手動送信のどちらが先でも当日はもう一方が重複送信しないようにする。自動送信を持たない
+  // 機能では書き込まれない（未使用のままでよい）。
   lastAutoSentDate?: string;
 }
 
 /**
  * ある「機能」（CHAT_WEBHOOK_FEATURES.id）についての、このチーム専用のGoogle Chat送信先を
- * 解決する。chatWebhooks[featureId]があればそれを使い、無ければ'report'機能に限りレガシーの
- * team.chatWebhookUrl/chatThreadKeyにフォールバックする（'report'以外の機能にはレガシー
- * フィールドが存在しないので対象外）。ここで値が取れない場合、呼び出し元（TeamChatReportPanel
- * 等）がさらに機能ごとの共通スペースへのフォールバック要否を判断する。
+ * 解決する。値が無ければundefined——呼び出し側が機能ごとに「未設定ならどうするか」
+ * （例: 送信しない）を判断する。
  */
 const getTeamChatWebhookConfig = (team: Team, featureId: string): TeamChatWebhookConfig | undefined => {
-  const configured = team.chatWebhooks?.[featureId];
-  if (configured) return configured;
-  if (featureId === 'report' && team.chatWebhookUrl) {
-    return { url: team.chatWebhookUrl, threadKey: team.chatThreadKey };
-  }
-  return undefined;
+  return team.chatWebhooks?.[featureId];
 };
 
 interface ChatWebhookFeature {
@@ -1053,19 +1041,14 @@ interface ChatWebhookFeature {
  * そのチーム専用の設定欄（Webhook URL・スレッド作成）が自動で増え、送信側は
  * getTeamChatWebhookConfig(team, feature.id) で解決できるようになる——Team型・
  * TeamsModalの改修は不要（今後追加する新しい通知機能はすべてこの配列に足すだけでよい）。
- * 'report'（実績レポート）だけは、未設定時にTeamsConfig.reportChatWebhookUrl/
- * reportChatThreadKey（全チーム共通スペース）へフォールバックする従来挙動を維持する
- * （呼び出し側であるTeamChatReportPanelが個別に処理）。それ以外の新規機能には共通スペースと
- * いう概念が無く、未設定ならそのチームには単に送信されない。
+ * 実績レポート（返信数・面談数）はこの配列に含まれない——2026-09-08にチーム専用スペースの
+ * 選択肢をやめ、常に全チーム共通スペース（TeamsConfig.reportChatWebhookUrl/
+ * reportChatThreadKey、チーム管理の「Google Chat通知設定」で設定）にのみ送信する方針に
+ * 変更したため（TeamChatReportPanel参照）。ここに追加する新規機能に共通スペースという
+ * 概念を持たせたい場合は、機能ごとに個別のフォールバック先を呼び出し側で用意すること
+ * （汎用の仕組みとしては持たせていない）。
  */
 const CHAT_WEBHOOK_FEATURES: ChatWebhookFeature[] = [
-  {
-    id: 'report',
-    label: '実績レポート（返信数・面談数）',
-    helperText: '未設定の場合は下の「Google Chat通知設定」で設定した共通のスペースを使います。このチームだけ別のGoogle Chatスペースに送りたい場合は、ここに専用のWebhook URLを設定してください。',
-    unsetStatusLabel: '未設定（共通スペースを使用）',
-    defaultOpeningText: '返信数・面談数報告',
-  },
   {
     id: 'reminder',
     label: '前日KPI未入力リマインド',
@@ -11471,15 +11454,10 @@ const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()
  * チーム別タブに表示する「Google Chatに送信」パネル。前日・今週（週初〜今日）・今月（月初〜
  * 今日）・期間を指定（このパネル専用のポップアップで開始日・終了日を入力）のいずれかを選ぶと、
  * そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上でGoogle Chatメッセージ
- * として送信する。送信先は、このチーム専用のWebhook URL・スレッドキー（CHAT_WEBHOOK_FEATURESの
- * 'report'、チーム管理の各チームの設定欄で任意設定、getTeamChatWebhookConfigで解決）が両方
- * とも揃っていればそちらを優先し、
- * どちらか一方でも未設定（専用スペースを使っていない、または設定途中でまだスレッド未作成）の
- * 場合は全チーム共通のスペース（reportChatWebhookUrl/reportChatThreadKey、チーム管理の
- * 「Google Chat通知設定」で設定）にフォールバックする——中途半端に専用URLだけ設定されている
- * 状態を「専用スペース有効」と扱うと、まだ移行が済んでいないだけのチームの通知が送信不可に
- * なってしまうため。共通スペースの方も未設定の間だけ送信不可（チーム管理での設定を促す
- * メッセージのみ表示）。
+ * として送信する。送信先は常に全チーム共通のスペース（reportChatWebhookUrl/
+ * reportChatThreadKey、チーム管理の「Google Chat通知設定」で設定）——2026-09-08、チーム専用
+ * スペースへの送り分けをやめて共通スペースに一本化する方針に変更した（kpi-mgr-team-chat-
+ * webhook-history参照）。未設定の間だけ送信不可（チーム管理での設定を促すメッセージのみ表示）。
  */
 const TeamChatReportPanel: React.FC<{
   team: Team | undefined;
@@ -11487,8 +11465,7 @@ const TeamChatReportPanel: React.FC<{
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
   weekStartsOn: 0 | 6;
-  // 全チーム共通のフォールバック先（チーム専用のCHAT_WEBHOOK_FEATURES 'report' 設定が未設定の
-  // 場合に使う）— チーム管理の「Google Chat通知設定」で設定する。
+  // 全チーム共通の送信先 — チーム管理の「Google Chat通知設定」で設定する。
   reportChatWebhookUrl: string | undefined;
   reportChatThreadKey: string | undefined;
 }> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey }) => {
@@ -11503,15 +11480,8 @@ const TeamChatReportPanel: React.FC<{
 
   if (!team) return null;
 
-  // このチーム専用のスペースへの切り替えは、Webhook URLとスレッドキーの両方が揃って初めて
-  // 有効にする。URLだけ設定されてスレッド未作成の（チーム管理での専用スペース設定が途中の、
-  // または一度設定した後に使わなくなった）状態を「専用スペース有効」と誤判定すると、共通
-  // スペースには実際には届くはずの通知が送信不可になってしまう——チームのwebhook移行が
-  // 完了していない間は、これまで通り共通スペースにフォールバックさせる。
-  const teamReportChatConfig = getTeamChatWebhookConfig(team, 'report');
-  const hasCompleteTeamOverride = !!(teamReportChatConfig?.url && teamReportChatConfig?.threadKey);
-  const effectiveWebhookUrl = hasCompleteTeamOverride ? teamReportChatConfig!.url : reportChatWebhookUrl;
-  const effectiveThreadKey = hasCompleteTeamOverride ? teamReportChatConfig!.threadKey : reportChatThreadKey;
+  const effectiveWebhookUrl = reportChatWebhookUrl;
+  const effectiveThreadKey = reportChatThreadKey;
 
   const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
     setSendStatus('idle');
@@ -13720,25 +13690,20 @@ const App: React.FC = () => {
 
   // teams配列内の1チームについて、CHAT_WEBHOOK_FEATURES.idごとのGoogle Chat送信先
   // （chatWebhooks[featureId]）を更新する共通ヘルパー。config=undefinedでその機能の設定を
-  // 削除する。featureId==='report'のときはレガシーのteam.chatWebhookUrl/chatThreadKeyも
-  // 同時にクリアする——新しい書き込みは常にchatWebhooksへ一本化し、以後
-  // getTeamChatWebhookConfigのレガシーフォールバック経路は二度と使われないようにする
-  // （残したままだと、後で古い値を誤って拾ってしまう。kpi-mgr-team-chat-webhook-history参照）。
+  // 削除する。
   const updateTeamChatWebhook = (teamId: string, featureId: string, config: TeamChatWebhookConfig | undefined) => {
     persistTeams(teams.map(t => {
       if (t.id !== teamId) return t;
       const chatWebhooks = { ...(t.chatWebhooks || {}) };
       if (config) chatWebhooks[featureId] = config; else delete chatWebhooks[featureId];
-      const legacyClear = featureId === 'report' ? { chatWebhookUrl: undefined, chatThreadKey: undefined } : {};
-      return { ...t, ...legacyClear, chatWebhooks };
+      return { ...t, chatWebhooks };
     }));
   };
 
   // このチーム専用・機能ごとのGoogle Chat Webhook URL（任意）。空にすると未設定（undefined）に
-  // 戻る。'report'機能のみ、未設定の間は共通スペース（reportChatWebhookUrl）にフォールバック
-  // する（TeamChatReportPanel参照）。専用スペースをやめる際は紐づいていた専用スレッドキーも
-  // 一緒に破棄する——残したままだと、後で別の専用スペースを設定したりcreateOrResetTeamThreadを
-  // 呼ばずに戻した場合に、別スペースのスレッドID宛に送ってしまい壊れるため。
+  // 戻る。専用スペースをやめる際は紐づいていた専用スレッドキーも一緒に破棄する——残したままだと、
+  // 後で別の専用スペースを設定したりcreateOrResetTeamThreadを呼ばずに戻した場合に、別スペースの
+  // スレッドID宛に送ってしまい壊れるため。
   const handleSetTeamChatWebhookUrl = (teamId: string, featureId: string, url: string) => {
     const trimmed = url.trim();
     if (!trimmed) {
