@@ -990,16 +990,84 @@ interface Team {
   // （UserData.weekStartDayのコメント・App内のweekStartsOn算出参照）。複数チームに所属する
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   weekStartDay?: 'saturday';
-  // このチーム専用のGoogle Chat Webhook URL（任意）。未設定ならTeamsConfig.reportChatWebhookUrl
-  // （全チーム共通のスペース）にフォールバックする。設定すると、このチームの「Google Chatに
-  // 送信」だけ別のGoogle Chatスペースに投稿できる（例: チームごとに分かれたスペースがある場合）。
+  // レガシー: 2026-09以前は「実績レポート」専用スペースの設定をこの2フィールドだけで持っていた
+  // （チーム管理の「Google Chatの送信先」欄で設定）。CHAT_WEBHOOK_FEATURES導入後は
+  // chatWebhooks.report に統合されており、新規の書き込みはもう行わない（読み取りは
+  // getTeamChatWebhookConfigがchatWebhooksに値が無い場合のフォールバックとして参照する）。
+  // 型からもう削除して良さそうに見えるが、Driveの生JSONには過去の値が残り続けるため
+  // （kpi-mgr-team-chat-webhook-history参照）、読み取り経路を残すためにフィールド自体は残す。
   chatWebhookUrl?: string;
-  // chatWebhookUrlを使う場合の、このチーム専用のスレッドキー。専用スペースが未設定の間は
-  // 使われない（共通のreportChatThreadKeyが使われる）。chatWebhookUrlを空にした際は必ず
-  // これも一緒に破棄すること——古いスレッドキーを残すと、後で共通スペースに戻したときに
-  // 別スペースのスレッドID宛に送ってしまい壊れる。
   chatThreadKey?: string;
+  // チームごとのGoogle Chat通知を「機能」単位で複数持てるようにする入れ物。キーは
+  // CHAT_WEBHOOK_FEATURESの各idと対応する（例: 'report'=実績レポート、'reminder'=前日KPI
+  // 未入力リマインド）。新しい通知機能を追加したい場合はCHAT_WEBHOOK_FEATURESに1エントリ
+  // 足すだけでよく、この型・チーム管理UIの変更は不要（getTeamChatWebhookConfig・
+  // TeamsModalのループ参照）。
+  chatWebhooks?: Partial<Record<string, TeamChatWebhookConfig>>;
 }
+
+interface TeamChatWebhookConfig {
+  url: string;
+  // 設定済みだがスレッド未作成の間はundefined。TeamsModalの「スレッドを作成」ボタンで
+  // 実際に1通送信できてから初めて保存される（送信に失敗したのに「スレッドがある」ことに
+  // なってしまうのを防ぐため）。
+  threadKey?: string;
+}
+
+/**
+ * ある「機能」（CHAT_WEBHOOK_FEATURES.id）についての、このチーム専用のGoogle Chat送信先を
+ * 解決する。chatWebhooks[featureId]があればそれを使い、無ければ'report'機能に限りレガシーの
+ * team.chatWebhookUrl/chatThreadKeyにフォールバックする（'report'以外の機能にはレガシー
+ * フィールドが存在しないので対象外）。ここで値が取れない場合、呼び出し元（TeamChatReportPanel
+ * 等）がさらに機能ごとの共通スペースへのフォールバック要否を判断する。
+ */
+const getTeamChatWebhookConfig = (team: Team, featureId: string): TeamChatWebhookConfig | undefined => {
+  const configured = team.chatWebhooks?.[featureId];
+  if (configured) return configured;
+  if (featureId === 'report' && team.chatWebhookUrl) {
+    return { url: team.chatWebhookUrl, threadKey: team.chatThreadKey };
+  }
+  return undefined;
+};
+
+interface ChatWebhookFeature {
+  id: string;
+  // チーム管理画面・送信パネルでの表示名。
+  label: string;
+  // チーム管理画面の設定欄に出す説明文（未設定時の挙動を含む）。
+  helperText: string;
+  // 未設定時に表示する短い状態ラベル（「未設定（共通スペースを使用）」等）。
+  unsetStatusLabel: string;
+  // スレッド作成時の1通目のデフォルト文言。
+  defaultOpeningText: string;
+}
+
+/**
+ * チームごとのGoogle Chat通知機能の一覧。ここに1エントリ追加するだけで、チーム管理画面に
+ * そのチーム専用の設定欄（Webhook URL・スレッド作成）が自動で増え、送信側は
+ * getTeamChatWebhookConfig(team, feature.id) で解決できるようになる——Team型・
+ * TeamsModalの改修は不要（今後追加する新しい通知機能はすべてこの配列に足すだけでよい）。
+ * 'report'（実績レポート）だけは、未設定時にTeamsConfig.reportChatWebhookUrl/
+ * reportChatThreadKey（全チーム共通スペース）へフォールバックする従来挙動を維持する
+ * （呼び出し側であるTeamChatReportPanelが個別に処理）。それ以外の新規機能には共通スペースと
+ * いう概念が無く、未設定ならそのチームには単に送信されない。
+ */
+const CHAT_WEBHOOK_FEATURES: ChatWebhookFeature[] = [
+  {
+    id: 'report',
+    label: '実績レポート（返信数・面談数）',
+    helperText: '未設定の場合は下の「Google Chat通知設定」で設定した共通のスペースを使います。このチームだけ別のGoogle Chatスペースに送りたい場合は、ここに専用のWebhook URLを設定してください。',
+    unsetStatusLabel: '未設定（共通スペースを使用）',
+    defaultOpeningText: '返信数・面談数報告',
+  },
+  {
+    id: 'reminder',
+    label: '前日KPI未入力リマインド',
+    helperText: 'このチーム専用のスペースにのみ送信されます（実績レポートと違い、共通スペースへのフォールバックはありません）。設定すると、チーム別タブから前日分のKPI未入力メンバーへのリマインドを送れるようになります。',
+    unsetStatusLabel: '未設定（送信されません）',
+    defaultOpeningText: '前日KPI未入力リマインド',
+  },
+];
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
 // unassigned); "BCA" itself isn't a real assignment, just the header switcher's "show both
@@ -4625,8 +4693,8 @@ const TeamsModal: React.FC<{
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
     onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
-    onSetTeamChatWebhookUrl: (teamId: string, url: string) => void;
-    onCreateOrResetTeamThread: (teamId: string, openingText: string) => Promise<void>;
+    onSetTeamChatWebhookUrl: (teamId: string, featureId: string, url: string) => void;
+    onCreateOrResetTeamThread: (teamId: string, featureId: string, openingText: string) => Promise<void>;
     reportChatWebhookUrl: string | undefined;
     reportChatThreadKey: string | undefined;
     onSetReportChatWebhookUrl: (url: string) => void;
@@ -4649,19 +4717,23 @@ const TeamsModal: React.FC<{
     const toggleTeamCollapsed = (teamId: string) => setCollapsedTeamIds(prev => ({ ...prev, [teamId]: !isTeamCollapsed(teamId) }));
 
     // チーム専用のGoogle Chat送信先（任意）の編集用ドラフト・スレッド作成の状態。共通スペース
-    // 用のreportWebhookInput等と同じ考え方だが、チームごとにキーで持つ。
+    // 用のreportWebhookInput等と同じ考え方だが、チーム×機能（CHAT_WEBHOOK_FEATURES.id）ごとに
+    // `${teamId}:${featureId}` をキーにして持つ——1チームが複数の機能（実績レポート／
+    // 未入力リマインド／…）を同時に持てるようになったため。
     const [teamWebhookInputs, setTeamWebhookInputs] = useState<Record<string, string>>({});
     const [teamThreadOpeningTextInputs, setTeamThreadOpeningTextInputs] = useState<Record<string, string>>({});
     const [creatingTeamThreadId, setCreatingTeamThreadId] = useState<string | null>(null);
     const [teamCreateThreadErrors, setTeamCreateThreadErrors] = useState<Record<string, string | null>>({});
-    const handleCreateTeamThreadClick = async (teamId: string) => {
-        setCreatingTeamThreadId(teamId);
-        setTeamCreateThreadErrors(prev => ({ ...prev, [teamId]: null }));
+    const handleCreateTeamThreadClick = async (teamId: string, featureId: string) => {
+        const key = `${teamId}:${featureId}`;
+        setCreatingTeamThreadId(key);
+        setTeamCreateThreadErrors(prev => ({ ...prev, [key]: null }));
         try {
-            const openingText = (teamThreadOpeningTextInputs[teamId] ?? '').trim() || '返信数・面談数報告';
-            await onCreateOrResetTeamThread(teamId, openingText);
+            const feature = CHAT_WEBHOOK_FEATURES.find(f => f.id === featureId);
+            const openingText = (teamThreadOpeningTextInputs[key] ?? '').trim() || feature?.defaultOpeningText || '';
+            await onCreateOrResetTeamThread(teamId, featureId, openingText);
         } catch (err: any) {
-            setTeamCreateThreadErrors(prev => ({ ...prev, [teamId]: err?.message || 'スレッドの作成に失敗しました。' }));
+            setTeamCreateThreadErrors(prev => ({ ...prev, [key]: err?.message || 'スレッドの作成に失敗しました。' }));
         } finally {
             setCreatingTeamThreadId(null);
         }
@@ -5039,58 +5111,64 @@ const TeamsModal: React.FC<{
                                             <span style={{ fontSize: '0.9rem' }}>{team.weekStartDay === 'saturday' ? '土曜始まり' : '日曜始まり'}</span>
                                         )}
                                     </div>
-                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
-                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>Google Chatの送信先（このチーム専用・任意）</span>
-                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
-                                            未設定の場合は下の「Google Chat通知設定」で設定した共通のスペースを使います。このチームだけ別のGoogle Chatスペースに送りたい場合は、ここに専用のWebhook URLを設定してください。
-                                        </p>
-                                        {isEditable ? (
-                                            <input
-                                                type="url"
-                                                value={teamWebhookInputs[team.id] ?? team.chatWebhookUrl ?? ''}
-                                                onChange={(e) => setTeamWebhookInputs(prev => ({ ...prev, [team.id]: e.target.value }))}
-                                                onBlur={(e) => onSetTeamChatWebhookUrl(team.id, e.target.value)}
-                                                placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
-                                                aria-label={`${team.name}専用のGoogle Chat Webhook URL`}
-                                            />
-                                        ) : (
-                                            <span style={{ fontSize: '0.9rem' }}>
-                                                {team.chatWebhookUrl && team.chatThreadKey
-                                                    ? '設定済み（専用スペース）'
-                                                    : team.chatWebhookUrl
-                                                    ? '設定中（スレッド未作成のため、まだ共通スペースを使用）'
-                                                    : '未設定（共通スペースを使用）'}
-                                            </span>
-                                        )}
-                                        {isEditable && team.chatWebhookUrl && !team.chatThreadKey && (
-                                            <p className="form-helper-text" style={{ marginTop: '0.4rem', marginBottom: 0 }}>
-                                                専用URLは設定されましたが、まだスレッドが未作成のため、このチームの通知は引き続き共通スペースに送られます。下のボタンでスレッドを作成すると専用スペースへの送信に切り替わります。
+                                    {CHAT_WEBHOOK_FEATURES.map(feature => {
+                                        const cfg = getTeamChatWebhookConfig(team, feature.id);
+                                        const inputKey = `${team.id}:${feature.id}`;
+                                        return (
+                                        <div key={feature.id} style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                            <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>{feature.label}（このチーム専用・任意）</span>
+                                            <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                                {feature.helperText}
                                             </p>
-                                        )}
-                                        {isEditable && team.chatWebhookUrl && (
-                                            <div className="form-group" style={{ marginTop: '0.5rem' }}>
-                                                <label htmlFor={`team-thread-opening-${team.id}`}>
-                                                    {team.chatThreadKey ? 'スレッドを作り直す（このチーム専用スペース向け）' : 'スレッドの1通目のメッセージ（このチーム専用スペース向け）'}
-                                                </label>
+                                            {isEditable ? (
                                                 <input
-                                                    id={`team-thread-opening-${team.id}`}
-                                                    type="text"
-                                                    value={teamThreadOpeningTextInputs[team.id] ?? '返信数・面談数報告'}
-                                                    onChange={(e) => setTeamThreadOpeningTextInputs(prev => ({ ...prev, [team.id]: e.target.value }))}
+                                                    type="url"
+                                                    value={teamWebhookInputs[inputKey] ?? cfg?.url ?? ''}
+                                                    onChange={(e) => setTeamWebhookInputs(prev => ({ ...prev, [inputKey]: e.target.value }))}
+                                                    onBlur={(e) => onSetTeamChatWebhookUrl(team.id, feature.id, e.target.value)}
+                                                    placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=..."
+                                                    aria-label={`${team.name}専用の${feature.label}Webhook URL`}
                                                 />
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleCreateTeamThreadClick(team.id)}
-                                                    disabled={creatingTeamThreadId === team.id}
-                                                    className="submit-button"
-                                                    style={{ marginTop: '0.4rem' }}
-                                                >
-                                                    {creatingTeamThreadId === team.id ? '送信中...' : team.chatThreadKey ? 'スレッドを作り直す' : 'スレッドを作成'}
-                                                </button>
-                                                {teamCreateThreadErrors[team.id] && <p className="no-data-message" style={{ marginTop: '0.4rem' }}>{teamCreateThreadErrors[team.id]}</p>}
-                                            </div>
-                                        )}
-                                    </div>
+                                            ) : (
+                                                <span style={{ fontSize: '0.9rem' }}>
+                                                    {cfg?.url && cfg?.threadKey
+                                                        ? '設定済み（専用スペース）'
+                                                        : cfg?.url
+                                                        ? '設定中（スレッド未作成）'
+                                                        : feature.unsetStatusLabel}
+                                                </span>
+                                            )}
+                                            {isEditable && cfg?.url && !cfg?.threadKey && (
+                                                <p className="form-helper-text" style={{ marginTop: '0.4rem', marginBottom: 0 }}>
+                                                    専用URLは設定されましたが、まだスレッドが未作成のため送信できません。下のボタンでスレッドを作成してください。
+                                                </p>
+                                            )}
+                                            {isEditable && cfg?.url && (
+                                                <div className="form-group" style={{ marginTop: '0.5rem' }}>
+                                                    <label htmlFor={`team-thread-opening-${inputKey}`}>
+                                                        {cfg.threadKey ? 'スレッドを作り直す（このチーム専用スペース向け）' : 'スレッドの1通目のメッセージ（このチーム専用スペース向け）'}
+                                                    </label>
+                                                    <input
+                                                        id={`team-thread-opening-${inputKey}`}
+                                                        type="text"
+                                                        value={teamThreadOpeningTextInputs[inputKey] ?? feature.defaultOpeningText}
+                                                        onChange={(e) => setTeamThreadOpeningTextInputs(prev => ({ ...prev, [inputKey]: e.target.value }))}
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleCreateTeamThreadClick(team.id, feature.id)}
+                                                        disabled={creatingTeamThreadId === inputKey}
+                                                        className="submit-button"
+                                                        style={{ marginTop: '0.4rem' }}
+                                                    >
+                                                        {creatingTeamThreadId === inputKey ? '送信中...' : cfg.threadKey ? 'スレッドを作り直す' : 'スレッドを作成'}
+                                                    </button>
+                                                    {teamCreateThreadErrors[inputKey] && <p className="no-data-message" style={{ marginTop: '0.4rem' }}>{teamCreateThreadErrors[inputKey]}</p>}
+                                                </div>
+                                            )}
+                                        </div>
+                                        );
+                                    })}
                                     </div>
                                 </li>
                                 );
@@ -11387,8 +11465,9 @@ const formatPeriodDate = (d: Date): string => `${d.getMonth() + 1}/${d.getDate()
  * チーム別タブに表示する「Google Chatに送信」パネル。前日・今週（週初〜今日）・今月（月初〜
  * 今日）・期間を指定（このパネル専用のポップアップで開始日・終了日を入力）のいずれかを選ぶと、
  * そのチームの返信数・面談数の実数を集計してプレビュー表示し、確認の上でGoogle Chatメッセージ
- * として送信する。送信先は、このチーム専用のWebhook URL・スレッドキー（team.chatWebhookUrl/
- * chatThreadKey、チーム管理の各チームの設定欄で任意設定）が両方とも揃っていればそちらを優先し、
+ * として送信する。送信先は、このチーム専用のWebhook URL・スレッドキー（CHAT_WEBHOOK_FEATURESの
+ * 'report'、チーム管理の各チームの設定欄で任意設定、getTeamChatWebhookConfigで解決）が両方
+ * とも揃っていればそちらを優先し、
  * どちらか一方でも未設定（専用スペースを使っていない、または設定途中でまだスレッド未作成）の
  * 場合は全チーム共通のスペース（reportChatWebhookUrl/reportChatThreadKey、チーム管理の
  * 「Google Chat通知設定」で設定）にフォールバックする——中途半端に専用URLだけ設定されている
@@ -11402,7 +11481,7 @@ const TeamChatReportPanel: React.FC<{
   allUsersData: Record<string, UserData>;
   allMedia: MediaEntry[];
   weekStartsOn: 0 | 6;
-  // 全チーム共通のフォールバック先（チーム専用のteam.chatWebhookUrl/chatThreadKeyが未設定の
+  // 全チーム共通のフォールバック先（チーム専用のCHAT_WEBHOOK_FEATURES 'report' 設定が未設定の
   // 場合に使う）— チーム管理の「Google Chat通知設定」で設定する。
   reportChatWebhookUrl: string | undefined;
   reportChatThreadKey: string | undefined;
@@ -11423,9 +11502,10 @@ const TeamChatReportPanel: React.FC<{
   // または一度設定した後に使わなくなった）状態を「専用スペース有効」と誤判定すると、共通
   // スペースには実際には届くはずの通知が送信不可になってしまう——チームのwebhook移行が
   // 完了していない間は、これまで通り共通スペースにフォールバックさせる。
-  const hasCompleteTeamOverride = !!(team.chatWebhookUrl && team.chatThreadKey);
-  const effectiveWebhookUrl = hasCompleteTeamOverride ? team.chatWebhookUrl : reportChatWebhookUrl;
-  const effectiveThreadKey = hasCompleteTeamOverride ? team.chatThreadKey : reportChatThreadKey;
+  const teamReportChatConfig = getTeamChatWebhookConfig(team, 'report');
+  const hasCompleteTeamOverride = !!(teamReportChatConfig?.url && teamReportChatConfig?.threadKey);
+  const effectiveWebhookUrl = hasCompleteTeamOverride ? teamReportChatConfig!.url : reportChatWebhookUrl;
+  const effectiveThreadKey = hasCompleteTeamOverride ? teamReportChatConfig!.threadKey : reportChatThreadKey;
 
   const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
     setSendStatus('idle');
@@ -11543,6 +11623,119 @@ const TeamChatReportPanel: React.FC<{
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+};
+
+/** 指定日（YYYY-MM-DD）についてKpiEntryが1件も無いメンバーを一覧で返す——前日KPI未入力
+ * リマインド機能で使う。値がすべて0のentryでも「保存されていれば入力済み」扱い（todayTotals
+ * 算出やGoogle Chatレポートと同じ、entriesの有無だけを見る考え方）。allUsersDataにまだその
+ * メンバーのデータ自体が読み込めていない場合も、判定できないので保守的に「未入力」扱いにする。
+ */
+const computeMembersMissingEntryForDate = (
+  memberEmails: string[],
+  allUsersData: Record<string, UserData>,
+  dateStr: string
+): { email: string; displayName: string }[] => {
+  return memberEmails
+    .filter(email => {
+      const userData = allUsersData[email];
+      if (!userData) return true;
+      return !(userData.entries || []).some(e => e.date === dateStr);
+    })
+    .map(email => ({ email, displayName: allUsersData[email]?.displayName || email }));
+};
+
+const formatReminderDateLabel = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+
+/** 前日KPI未入力リマインドのGoogle Chatメッセージ本文を組み立てる。未入力者がいない日は
+ * その旨だけ知らせる（空メッセージを送らないため）。 */
+const buildTeamReminderText = (
+  teamName: string,
+  dateLabel: string,
+  missing: { displayName: string }[]
+): string => {
+  if (missing.length === 0) {
+    return `*${teamName} 前日KPI未入力リマインド（${dateLabel}）*\n${dateLabel}分は全員入力済みです。`;
+  }
+  const memberLines = missing.map(m => `・${m.displayName}`).join('\n');
+  return `*${teamName} 前日KPI未入力リマインド（${dateLabel}）*\n以下のメンバーは${dateLabel}分の実績が未入力です。入力をお願いします。\n\n${memberLines}`;
+};
+
+/**
+ * チーム別タブに表示する「前日KPI未入力リマインドを送信」パネル。ボタンを押すと前日分の
+ * entriesが無いメンバーを集計してプレビュー表示し、確認の上でこのチーム専用のGoogle Chat
+ * スペース（CHAT_WEBHOOK_FEATURES の'reminder'、チーム管理の各チームの設定欄で設定）へ
+ * 送信する。TeamChatReportPanel（実績レポート）と違い、未設定時に全チーム共通スペースへ
+ * フォールバックすることはない——「実績を送信する全体スペースではなく、チームごとのスペースに
+ * 送りたい」という要望どおり、このチーム専用の送信先が無ければ送信不可のまま（チーム管理での
+ * 設定を促すメッセージのみ表示）。
+ */
+const TeamChatReminderPanel: React.FC<{
+  team: Team | undefined;
+  memberEmails: string[];
+  allUsersData: Record<string, UserData>;
+}> = ({ team, memberEmails, allUsersData }) => {
+  const [preview, setPreview] = useState<{ dateLabel: string; text: string; missingCount: number } | null>(null);
+  const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  if (!team) return null;
+
+  const cfg = getTeamChatWebhookConfig(team, 'reminder');
+
+  const handlePreview = () => {
+    setSendStatus('idle');
+    setSendError(null);
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const dateStr = d.toLocaleDateString('sv-SE'); // YYYY-MM-DD format（KpiEntry.dateと同じ形式）
+    const dateLabel = formatReminderDateLabel(d);
+    const missing = computeMembersMissingEntryForDate(memberEmails, allUsersData, dateStr);
+    setPreview({ dateLabel, text: buildTeamReminderText(team.name, dateLabel, missing), missingCount: missing.length });
+  };
+
+  const handleSend = async () => {
+    if (!cfg?.url || !preview) return;
+    setSendStatus('sending');
+    setSendError(null);
+    try {
+      await sendChatWebhookMessage(cfg.url, preview.text, cfg.threadKey);
+      setSendStatus('sent');
+      setPreview(null);
+    } catch (err: any) {
+      setSendStatus('error');
+      setSendError(err?.message || '送信に失敗しました。');
+    }
+  };
+
+  return (
+    <div className="custom-period-export-bar team-chat-report-panel" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+      <span className="team-chat-report-panel-title">📋 前日KPI未入力リマインドを送信</span>
+      {!cfg?.url || !cfg?.threadKey ? (
+        <p className="no-data-message" style={{ margin: 0 }}>
+          このチーム専用のリマインド送信先が未設定です。「チーム管理」の各チームの設定欄（前日KPI未入力リマインド）から設定してください。
+        </p>
+      ) : (
+        <>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <button type="button" onClick={handlePreview} className="chat-report-period-button">前日分の未入力者を確認</button>
+          </div>
+          {preview && (
+            <div className="chat-report-preview">
+              <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{preview.text}</pre>
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
+                  {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
+                </button>
+                <button type="button" onClick={() => { setPreview(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
+              </div>
+            </div>
+          )}
+          {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
+          {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
+        </>
       )}
     </div>
   );
@@ -13514,27 +13707,49 @@ const App: React.FC = () => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
   };
 
-  // このチーム専用のGoogle Chat Webhook URL（任意）。空にすると未設定（undefined）に戻り、
-  // 以後は共通スペース（reportChatWebhookUrl）にフォールバックする。専用スペースをやめる際は
-  // 紐づいていた専用スレッドキー（chatThreadKey）も一緒に破棄する——残したままだと、後で別の
-  // 専用スペースを設定したりcreateOrResetTeamThreadを呼ばずに共通スペースへ戻った場合に、
-  // 別スペースのスレッドID宛に送ってしまい壊れるため。
-  const handleSetTeamChatWebhookUrl = (teamId: string, url: string) => {
-    const trimmed = url.trim();
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, chatWebhookUrl: trimmed || undefined, chatThreadKey: trimmed ? t.chatThreadKey : undefined } : t)));
+  // teams配列内の1チームについて、CHAT_WEBHOOK_FEATURES.idごとのGoogle Chat送信先
+  // （chatWebhooks[featureId]）を更新する共通ヘルパー。config=undefinedでその機能の設定を
+  // 削除する。featureId==='report'のときはレガシーのteam.chatWebhookUrl/chatThreadKeyも
+  // 同時にクリアする——新しい書き込みは常にchatWebhooksへ一本化し、以後
+  // getTeamChatWebhookConfigのレガシーフォールバック経路は二度と使われないようにする
+  // （残したままだと、後で古い値を誤って拾ってしまう。kpi-mgr-team-chat-webhook-history参照）。
+  const updateTeamChatWebhook = (teamId: string, featureId: string, config: TeamChatWebhookConfig | undefined) => {
+    persistTeams(teams.map(t => {
+      if (t.id !== teamId) return t;
+      const chatWebhooks = { ...(t.chatWebhooks || {}) };
+      if (config) chatWebhooks[featureId] = config; else delete chatWebhooks[featureId];
+      const legacyClear = featureId === 'report' ? { chatWebhookUrl: undefined, chatThreadKey: undefined } : {};
+      return { ...t, ...legacyClear, chatWebhooks };
+    }));
   };
 
-  // このチーム専用スペースにスレッドを作成/作り直す（handleCreateOrResetReportThreadの共通
-  // スペース版と同じロジック）。専用のWebhook URLが設定済みであることが前提——実際に送信
-  // できてから初めてthreadKeyを保存する（送信失敗時に「スレッドがあることになっているが
-  // 実在しない」状態になるのを防ぐため）。
-  const handleCreateOrResetTeamThread = async (teamId: string, openingText: string) => {
+  // このチーム専用・機能ごとのGoogle Chat Webhook URL（任意）。空にすると未設定（undefined）に
+  // 戻る。'report'機能のみ、未設定の間は共通スペース（reportChatWebhookUrl）にフォールバック
+  // する（TeamChatReportPanel参照）。専用スペースをやめる際は紐づいていた専用スレッドキーも
+  // 一緒に破棄する——残したままだと、後で別の専用スペースを設定したりcreateOrResetTeamThreadを
+  // 呼ばずに戻した場合に、別スペースのスレッドID宛に送ってしまい壊れるため。
+  const handleSetTeamChatWebhookUrl = (teamId: string, featureId: string, url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      updateTeamChatWebhook(teamId, featureId, undefined);
+      return;
+    }
+    const existing = teams.find(t => t.id === teamId);
+    const existingThreadKey = existing ? getTeamChatWebhookConfig(existing, featureId)?.threadKey : undefined;
+    updateTeamChatWebhook(teamId, featureId, { url: trimmed, threadKey: existingThreadKey });
+  };
+
+  // このチーム専用スペースに、指定した機能（featureId）のスレッドを作成/作り直す
+  // （handleCreateOrResetReportThreadの共通スペース版と同じロジック）。専用のWebhook URLが
+  // 設定済みであることが前提——実際に送信できてから初めてthreadKeyを保存する（送信失敗時に
+  // 「スレッドがあることになっているが実在しない」状態になるのを防ぐため）。
+  const handleCreateOrResetTeamThread = async (teamId: string, featureId: string, openingText: string) => {
     const team = teams.find(t => t.id === teamId);
-    const webhookUrl = team?.chatWebhookUrl;
+    const webhookUrl = team ? getTeamChatWebhookConfig(team, featureId)?.url : undefined;
     if (!webhookUrl) throw new Error('先にこのチーム専用のWebhook URLを設定してください。');
-    const newThreadKey = `team-report-${teamId}-${Date.now()}`;
+    const newThreadKey = `team-${featureId}-${teamId}-${Date.now()}`;
     await sendChatWebhookMessage(webhookUrl, openingText, newThreadKey);
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, chatThreadKey: newThreadKey } : t)));
+    updateTeamChatWebhook(teamId, featureId, { url: webhookUrl, threadKey: newThreadKey });
   };
 
   // Google Chatへの実績通知の送信先Webhook URL（スペース全体で共有・チームごとではない）。
@@ -15856,15 +16071,22 @@ const App: React.FC = () => {
               </button>
             </div>
             {selectedTeamId && (
-              <TeamChatReportPanel
-                team={teams.find(t => t.id === selectedTeamId)}
-                memberEmails={selectedTeamAllMemberEmails}
-                allUsersData={displayedAllUsersData}
-                allMedia={allMedia}
-                weekStartsOn={weekStartsOn}
-                reportChatWebhookUrl={reportChatWebhookUrl}
-                reportChatThreadKey={reportChatThreadKey}
-              />
+              <>
+                <TeamChatReportPanel
+                  team={teams.find(t => t.id === selectedTeamId)}
+                  memberEmails={selectedTeamAllMemberEmails}
+                  allUsersData={displayedAllUsersData}
+                  allMedia={allMedia}
+                  weekStartsOn={weekStartsOn}
+                  reportChatWebhookUrl={reportChatWebhookUrl}
+                  reportChatThreadKey={reportChatThreadKey}
+                />
+                <TeamChatReminderPanel
+                  team={teams.find(t => t.id === selectedTeamId)}
+                  memberEmails={selectedTeamAllMemberEmails}
+                  allUsersData={displayedAllUsersData}
+                />
+              </>
             )}
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
