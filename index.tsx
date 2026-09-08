@@ -75,6 +75,12 @@ interface MediaEntry {
   // salary) when a candidate sourced through it gets placed — subtracted from the client fee
   // to compute expected gross profit.
   feeRate?: number;
+  // 実績レポート（チーム別タブの「Google Chatに送信」＝TeamChatReportPanelの返信数・面談数
+  // 集計）にこの媒体の数値を含めるかどうか。未設定（undefined）は「含める」扱い——既存の
+  // 全媒体を合算する挙動をそのまま維持する後方互換のデフォルト。falseにしても他の集計
+  // （個人実績・チームKPIダッシュボード・実績カレンダー等）には一切影響しない——実績レポートの
+  // 合算からだけ除外される（filterMediaForReport参照）。
+  includeInReport?: boolean;
 }
 
 interface MediaConfig {
@@ -210,11 +216,18 @@ const calculateTotalsForRange = (entries: KpiEntry[], allMedia: MediaEntry[], st
     return totals;
 };
 
+/** 媒体管理で「実績レポートに反映する」をオフにした媒体を除いた一覧を返す——他の集計
+ * （個人実績・チームKPIダッシュボード・実績カレンダー等）はallMediaをそのまま使い続けるので、
+ * この絞り込みが影響するのはcomputeTeamReplyInterviewBreakdown（実績レポート）だけ。
+ */
+const filterMediaForReport = (allMedia: MediaEntry[]): MediaEntry[] => allMedia.filter(m => m.includeInReport !== false);
+
 /** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, broken down per member —
  * used by the チーム別タブの「Google Chatに送信」機能（TeamChatReportPanel）。チーム合計は送信
  * メッセージに含めない（メンバー別の内訳のみで十分という要望のため）ので、ここでも合計は返さ
  * ない。個人ごとの目標値も使わない（送るのは実数のみのため）。メンバーの並び順はmemberEmails
- * の順（team.memberEmailsの登録順）。
+ * の順（team.memberEmailsの登録順）。集計対象の媒体はfilterMediaForReportで絞り込む——媒体
+ * 管理で「実績レポートに反映する」をオフにした媒体はここでだけ除外される。
  */
 const computeTeamReplyInterviewBreakdown = (
   memberEmails: string[],
@@ -223,13 +236,14 @@ const computeTeamReplyInterviewBreakdown = (
   startDate: Date,
   endDate: Date
 ): { email: string; displayName: string; replies: number; interviews: number }[] => {
+  const reportMedia = filterMediaForReport(allMedia);
   return memberEmails.map(email => {
     const userData = allUsersData[email];
     const displayName = userData?.displayName || email;
     if (!userData) return { email, displayName, replies: 0, interviews: 0 };
-    const totals = calculateTotalsForRange(userData.entries || [], allMedia, startDate, endDate);
-    const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
-    const interviews = getTotalFromLump(totals, '_initialInterviews', allMedia);
+    const totals = calculateTotalsForRange(userData.entries || [], reportMedia, startDate, endDate);
+    const replies = getTotalFromLump(totals, '_scoutReplies', reportMedia);
+    const interviews = getTotalFromLump(totals, '_initialInterviews', reportMedia);
     return { email, displayName, replies, interviews };
   });
 };
@@ -5245,8 +5259,9 @@ const MediaModal: React.FC<{
     onArchiveMedia: (id: string) => void;
     onUnarchiveMedia: (id: string) => void;
     onSetFeeRate: (id: string, feeRate: number | undefined) => void;
+    onSetIncludeInReport: (id: string, includeInReport: boolean) => void;
     onRefresh: () => void;
-}> = ({ allMedia, isEditable, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate, onRefresh }) => {
+}> = ({ allMedia, isEditable, onClose, onCreateMedia, onRenameMedia, onArchiveMedia, onUnarchiveMedia, onSetFeeRate, onSetIncludeInReport, onRefresh }) => {
     const [newMediaName, setNewMediaName] = useState('');
     const [editingMediaId, setEditingMediaId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -5370,6 +5385,18 @@ const MediaModal: React.FC<{
                                             onBlur={() => handleFeeRateBlur(media.id)}
                                             disabled={!isEditable}
                                         />
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.4rem' }}>
+                                        <label htmlFor={`media-include-in-report-${media.id}`} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-muted-color)' }}>
+                                            <input
+                                                id={`media-include-in-report-${media.id}`}
+                                                type="checkbox"
+                                                checked={media.includeInReport !== false}
+                                                onChange={(e) => onSetIncludeInReport(media.id, e.target.checked)}
+                                                disabled={!isEditable}
+                                            />
+                                            実績レポート（チーム別タブのGoogle Chat送信）に反映する
+                                        </label>
                                     </div>
                                 </li>
                             ))}
@@ -13300,6 +13327,10 @@ const App: React.FC = () => {
     persistMedia(allMedia.map(m => (m.id === id ? { ...m, feeRate } : m)));
   };
 
+  const handleSetMediaIncludeInReport = (id: string, includeInReport: boolean) => {
+    persistMedia(allMedia.map(m => (m.id === id ? { ...m, includeInReport } : m)));
+  };
+
   const handleArchiveMedia = (id: string) => {
     persistMedia(allMedia.map(m => (m.id === id ? { ...m, isArchived: true } : m)));
   };
@@ -15300,6 +15331,7 @@ const App: React.FC = () => {
           onArchiveMedia={handleArchiveMedia}
           onUnarchiveMedia={handleUnarchiveMedia}
           onSetFeeRate={handleSetMediaFeeRate}
+          onSetIncludeInReport={handleSetMediaIncludeInReport}
           onRefresh={refreshMediaConfig}
         />
       )}
