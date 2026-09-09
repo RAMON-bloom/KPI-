@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, findBackupFile, readBackupFileContent, type DriveFileRef } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, findBackupFile, readBackupFileContent, writeBackupSnapshot, type DriveFileRef } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -338,10 +338,19 @@ async function performSave(
       const newId = await createOwnDataFile(payload, email);
       setCachedDriveFileId(email, newId);
       onFileCreated(newId);
+      driveFileId = newId;
     }
     clearPendingSync(email);
     setLastSyncedAt(email, Date.now());
     notifySyncStatus(email, false);
+    // Opportunistically refresh this member's backup snapshot right after their own save lands,
+    // so it normally lags the live file by at most one save instead of up to a day (the
+    // scheduled daily job still runs as a catch-all — see kpi-mgr-backup). Deliberately
+    // fire-and-forget: a backup refresh failure (e.g. this account somehow lost edit access to
+    // the shared backup folder) must never fail or even slow down the member's actual save.
+    writeBackupSnapshot(email, driveFileId).catch(err => {
+      console.warn('Failed to refresh backup snapshot after save', err);
+    });
   } catch (err) {
     // The data is still safe in this browser's local cache — just flag that Drive hasn't seen
     // it yet (e.g. the Google session expired/was revoked right as this fired) so it can be

@@ -212,6 +212,41 @@ export async function findBackupFile(email: string): Promise<DriveFileRef | null
   return data.files?.[0] ?? null;
 }
 
+/**
+ * Refreshes this member's own snapshot in the backup folder to match `sourceFileId`'s current
+ * content — same "trash the old one, server-side copy in a fresh one" pattern the scheduled
+ * daily backup job uses, but called opportunistically right after this member's own save
+ * succeeds (see performSave in dataSync.ts) so the backup normally lags the live file by at most
+ * one save instead of up to a day. Requires this account to have at least edit access to
+ * BACKUP_FOLDER_ID's Shared Drive — true for every BCA事業部 member as of when this was added,
+ * since the folder grants the consultant-group@bloom-firm.com group fileOrganizer access, but if
+ * that ever changes for someone this will start failing for just that account (caught by the
+ * caller and logged, never surfaced to the member — see the comment at the performSave call site).
+ */
+export async function writeBackupSnapshot(email: string, sourceFileId: string): Promise<void> {
+  const existing = await findBackupFile(email);
+  if (existing) {
+    const trashRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?supportsAllDrives=true`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+    });
+    if (!trashRes.ok) throw new Error(`Failed to trash old backup file: ${trashRes.status}`);
+  }
+  const copyRes = await authorizedFetch(
+    `https://www.googleapis.com/drive/v3/files/${sourceFileId}/copy?supportsAllDrives=true&fields=id`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `${email}.json`, parents: [BACKUP_FOLDER_ID] }),
+    }
+  );
+  if (!copyRes.ok) {
+    const bodyText = await copyRes.text().catch(() => '');
+    throw new Error(`Failed to copy backup snapshot: ${copyRes.status} ${bodyText}`);
+  }
+}
+
 /** Same as readFileContent, but with the Shared Drive support params findBackupFile's result needs. */
 export async function readBackupFileContent<T = any>(fileId: string): Promise<T> {
   const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`);
