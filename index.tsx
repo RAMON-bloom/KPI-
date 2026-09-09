@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
@@ -12612,6 +12612,10 @@ const App: React.FC = () => {
   // ファイルしか見えなくなる — 「他ユーザーの更新が反映されない」不具合の実際の原因）。
   const [isDriveFileIdResolved, setIsDriveFileIdResolved] = useState(false);
   const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
+  // Offered when loadOwnData finds no live Drive file for this account (brand-new sign-in, or
+  // their own kpi-manager-data.json was deleted) but a daily-backup snapshot exists for them —
+  // see the loadOwnData effect below and handleRestoreFromBackup.
+  const [backupRestoreOffer, setBackupRestoreOffer] = useState<{ data: UserData; modifiedTime: string } | null>(null);
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
   // View state
@@ -12946,6 +12950,39 @@ const App: React.FC = () => {
   }, [currentIdentity]);
 
 
+  // Fills in defaults for any field a loaded UserData blob is missing — hoisted out of the
+  // loadOwnData effect below (as `normalizeUserData`) so handleRestoreFromBackup can also apply
+  // it to a backup snapshot the user chooses to restore, not just data freshly read from Drive.
+  const normalizeUserData = useCallback((d: Partial<UserData>): UserData => ({
+    entries: d.entries || [],
+    // ownerEmail/ownerLabel are presentation-only tags applied when flattening candidates for
+    // an aggregate (全ユーザー/チーム/ユーザー別) pipeline view — never meant to be persisted.
+    // Editing one's own candidate while viewing such a scope used to save the tagged copy
+    // straight through, baking a stray "登録者: (自分)" label into that one candidate forever
+    // while untouched candidates stayed clean, which read as "some cards have the label, some
+    // don't". Stripped here (self-heals anything already saved with the leak) and again at
+    // the actual save point below (handleSaveCandidate) to stop it recurring.
+    candidates: (d.candidates || []).map(({ ownerEmail, ownerLabel, ...c }) => c),
+    kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
+    weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
+    dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
+    displayName: d.displayName || currentIdentity?.name || '',
+    feedbackPosts: d.feedbackPosts || [],
+    // 抜けていた不具合修正: このフィールドが無いと「現在の開閉状態をデフォルトとして保存」が
+    // 次回ログイン時に反映されない（保存自体はDriveへ届くが、再読み込み時にnormalize()で
+    // 毎回消えていたため、適用エフェクトが常に「保存済みデフォルトなし」と見えていた）。
+    allUsersSectionDefaults: d.allUsersSectionDefaults,
+    // 同じ理由でここに列挙し忘れていた不具合修正: 「選考フェーズで絞り込み」のスコープ別
+    // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
+    // 消えて見えていた。
+    pipelineStageFilterDefaults: d.pipelineStageFilterDefaults,
+    // 同じ理由: 週の始まり設定も許可リストに無いと保存直後は効いていても再読み込みで消える。
+    weekStartDay: d.weekStartDay,
+    // 同じ理由: 月別パフォーマンストレンドのデフォルトチェック項目も許可リストに無いと保存
+    // 直後は効いていても再読み込みで消える。
+    monthlyTrendMetricDefaults: d.monthlyTrendMetricDefaults,
+  }), [currentIdentity]);
+
   // Load the signed-in user's data. Drive is the source of truth, but if we have a local
   // cache from a previous session we show it immediately (no loading spinner) and quietly
   // upgrade to the fresh Drive copy once it arrives — this removes the "wait for Drive"
@@ -12960,36 +12997,7 @@ const App: React.FC = () => {
     let cancelled = false;
     const email = currentIdentity.email;
     setIsDriveFileIdResolved(false);
-
-    const normalize = (d: Partial<UserData>): UserData => ({
-      entries: d.entries || [],
-      // ownerEmail/ownerLabel are presentation-only tags applied when flattening candidates for
-      // an aggregate (全ユーザー/チーム/ユーザー別) pipeline view — never meant to be persisted.
-      // Editing one's own candidate while viewing such a scope used to save the tagged copy
-      // straight through, baking a stray "登録者: (自分)" label into that one candidate forever
-      // while untouched candidates stayed clean, which read as "some cards have the label, some
-      // don't". Stripped here (self-heals anything already saved with the leak) and again at
-      // the actual save point below (handleSaveCandidate) to stop it recurring.
-      candidates: (d.candidates || []).map(({ ownerEmail, ownerLabel, ...c }) => c),
-      kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
-      weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
-      displayName: d.displayName || currentIdentity.name,
-      feedbackPosts: d.feedbackPosts || [],
-      // 抜けていた不具合修正: このフィールドが無いと「現在の開閉状態をデフォルトとして保存」が
-      // 次回ログイン時に反映されない（保存自体はDriveへ届くが、再読み込み時にnormalize()で
-      // 毎回消えていたため、適用エフェクトが常に「保存済みデフォルトなし」と見えていた）。
-      allUsersSectionDefaults: d.allUsersSectionDefaults,
-      // 同じ理由でここに列挙し忘れていた不具合修正: 「選考フェーズで絞り込み」のスコープ別
-      // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
-      // 消えて見えていた。
-      pipelineStageFilterDefaults: d.pipelineStageFilterDefaults,
-      // 同じ理由: 週の始まり設定も許可リストに無いと保存直後は効いていても再読み込みで消える。
-      weekStartDay: d.weekStartDay,
-      // 同じ理由: 月別パフォーマンストレンドのデフォルトチェック項目も許可リストに無いと保存
-      // 直後は効いていても再読み込みで消える。
-      monthlyTrendMetricDefaults: d.monthlyTrendMetricDefaults,
-    });
+    const normalize = normalizeUserData;
 
     const cached = readLocalCache<UserData>(email);
     if (cached) {
@@ -13025,6 +13033,18 @@ const App: React.FC = () => {
         // reached Drive — now that we have a confirmed-working session, retry it.
         retryPendingSyncIfNeeded(email, result.driveFileId, setDriveFileId);
       } else if (!cached) {
+        // No live Drive file for this account — either a brand-new sign-in, or an existing
+        // member whose own kpi-manager-data.json was deleted. Check the daily-backup folder
+        // before falling back to a blank slate: a hit here almost always means the latter case
+        // (a first-time user has no backup snapshot to find).
+        try {
+          const backup = await restoreFromBackup<UserData>(email);
+          if (backup && !cancelled) {
+            setBackupRestoreOffer(backup);
+          }
+        } catch (err) {
+          console.error('Failed to check for a backup snapshot', err);
+        }
         // Brand-new signed-in user: offer to claim any pre-Google-login local data.
         const legacy = readLegacyAppData();
         const legacyNames = (legacy?.users || []).filter(name => legacy?.userData?.[name]);
@@ -13040,7 +13060,7 @@ const App: React.FC = () => {
       setIsDriveFileIdResolved(true);
     })();
     return () => { cancelled = true; };
-  }, [currentIdentity]);
+  }, [currentIdentity, normalizeUserData]);
 
   const handleClaimLegacyData = (legacyName: string | null) => {
     setLegacyMigrationChoices(null);
@@ -13056,6 +13076,17 @@ const App: React.FC = () => {
       dailyKpiTargets: { ...defaultKpiTargets, ...(legacyUserData.dailyKpiTargets || {}) },
       displayName: legacyName,
     });
+  };
+
+  // accept=true replaces the (so far blank) currentUserData with the offered backup snapshot;
+  // driveFileId is left as-is (null, since this only ever fires when no live file was found),
+  // so the normal debounced save creates the member's own fresh Drive file from this content —
+  // same mechanism as handleClaimLegacyData above.
+  const handleRestoreFromBackup = (accept: boolean) => {
+    if (accept && backupRestoreOffer) {
+      setCurrentUserData(normalizeUserData(backupRestoreOffer.data));
+    }
+    setBackupRestoreOffer(null);
   };
 
   const handleSaveDisplayName = (name: string) => {
@@ -15285,6 +15316,30 @@ const App: React.FC = () => {
               <button type="button" className="cancel-button" onClick={() => handleClaimLegacyData(null)}>
                 引き継がず新規で始める
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {backupRestoreOffer && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="backup-restore-modal-title">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h3 id="backup-restore-modal-title">バックアップからの復元</h3>
+            </div>
+            <div className="modal-body">
+              <p>
+                このアカウントのデータがGoogleドライブ上に見当たりませんでした。
+                {new Date(backupRestoreOffer.modifiedTime).toLocaleString('ja-JP')}時点のバックアップが見つかりましたが、復元しますか？
+              </p>
+              <p className="modal-description">
+                誤って削除してしまった場合などにご利用ください。「復元しない」を選ぶと、空の状態から始めます。
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="cancel-button" onClick={() => handleRestoreFromBackup(false)}>
+                復元せず新規で始める
+              </button>
+              <button className="submit-button" onClick={() => handleRestoreFromBackup(true)}>このバックアップを復元する</button>
             </div>
           </div>
         </div>

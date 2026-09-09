@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, type DriveFileRef } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, findBackupFile, readBackupFileContent, type DriveFileRef } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -191,6 +191,23 @@ export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>
     if (cached) return { data: cached, driveFileId: null, source: 'cache' };
   }
   return { data: null, driveFileId: null, source: 'new' };
+}
+
+export interface BackupSnapshot<T> {
+  data: T;
+  modifiedTime: string;
+}
+
+/**
+ * Looks up this member's latest daily-backup snapshot (see findBackupFile) — used when
+ * loadOwnData finds no live Drive file for them (brand-new sign-in, or their own
+ * kpi-manager-data.json was deleted) to offer restoring it before falling back to a blank slate.
+ */
+export async function restoreFromBackup<T = any>(email: string): Promise<BackupSnapshot<T> | null> {
+  const backup = await findBackupFile(email);
+  if (!backup) return null;
+  const data = await readBackupFileContent<T>(backup.id);
+  return { data, modifiedTime: backup.modifiedTime };
 }
 
 export async function createInitialDriveFile(email: string, data: unknown): Promise<string> {

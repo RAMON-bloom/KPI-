@@ -5,6 +5,11 @@ const TEAMS_FILE_NAME = 'kpi-manager-teams.json';
 const MEDIA_FILE_NAME = 'kpi-manager-media.json';
 const APP_TAG = 'kpi-manager-v1';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
+// Shared Drive folder (G:\共有ドライブ\3_BCA事業部\1_メインフォルダ\KPI管理君BU) that a daily
+// scheduled job keeps refreshed with one flat "<email>.json" snapshot per member — the source
+// for the empty-state「バックアップから復元」flow below. If this folder is ever moved/recreated,
+// update this id (open the folder in Drive, the id is the last path segment of the URL).
+const BACKUP_FOLDER_ID = '1mo5trKCKB_-bJCJWNazTMkUTsb3JBQss';
 
 export interface DriveFileRef {
   id: string;
@@ -189,6 +194,33 @@ export async function listTeammateDataFiles(): Promise<DriveFileRef[]> {
   const files = mapDriveFileRefs([...byId.values()]);
   console.log('[listTeammateDataFiles] found', files.length, 'file(s):', files.map((f: DriveFileRef) => f.ownerEmail || f.id));
   return files;
+}
+
+/**
+ * Finds this member's latest daily-backup snapshot in BACKUP_FOLDER_ID, if one exists. The
+ * folder lives in a Shared Drive, not the caller's My Drive — `supportsAllDrives` and
+ * `includeItemsFromAllDrives` are required or files.list simply never returns anything in it,
+ * even for a member with full read access to the shared drive.
+ */
+export async function findBackupFile(email: string): Promise<DriveFileRef | null> {
+  const q = `'${BACKUP_FOLDER_ID}' in parents and name='${email}.json' and trashed=false`;
+  const res = await authorizedFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime)&spaces=drive&supportsAllDrives=true&includeItemsFromAllDrives=true`
+  );
+  if (!res.ok) throw new Error('バックアップファイルの検索に失敗しました。');
+  const data = await res.json();
+  return data.files?.[0] ?? null;
+}
+
+/** Same as readFileContent, but with the Shared Drive support params findBackupFile's result needs. */
+export async function readBackupFileContent<T = any>(fileId: string): Promise<T> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`);
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    console.error(`Failed to read backup file ${fileId}: ${res.status} ${bodyText}`);
+    throw new Error(`バックアップファイルの読み込みに失敗しました。(${res.status})`);
+  }
+  return res.json();
 }
 
 export async function readFileContent<T = any>(fileId: string): Promise<T> {
