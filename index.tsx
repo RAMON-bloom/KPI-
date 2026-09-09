@@ -12612,10 +12612,11 @@ const App: React.FC = () => {
   // ファイルしか見えなくなる — 「他ユーザーの更新が反映されない」不具合の実際の原因）。
   const [isDriveFileIdResolved, setIsDriveFileIdResolved] = useState(false);
   const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
-  // Offered when loadOwnData finds no live Drive file for this account (brand-new sign-in, or
-  // their own kpi-manager-data.json was deleted) but a daily-backup snapshot exists for them —
-  // see the loadOwnData effect below and handleRestoreFromBackup.
+  // Set once the manually-triggered「データ復旧」check (handleCheckBackupForRestore) finds a
+  // backup snapshot for the signed-in account, to confirm before overwriting currentUserData
+  // with it — see handleRestoreFromBackup.
   const [backupRestoreOffer, setBackupRestoreOffer] = useState<{ data: UserData; modifiedTime: string } | null>(null);
+  const [isCheckingBackup, setIsCheckingBackup] = useState(false);
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
   // View state
@@ -13033,18 +13034,13 @@ const App: React.FC = () => {
         // reached Drive — now that we have a confirmed-working session, retry it.
         retryPendingSyncIfNeeded(email, result.driveFileId, setDriveFileId);
       } else if (!cached) {
-        // No live Drive file for this account — either a brand-new sign-in, or an existing
-        // member whose own kpi-manager-data.json was deleted. Check the daily-backup folder
-        // before falling back to a blank slate: a hit here almost always means the latter case
-        // (a first-time user has no backup snapshot to find).
-        try {
-          const backup = await restoreFromBackup<UserData>(email);
-          if (backup && !cancelled) {
-            setBackupRestoreOffer(backup);
-          }
-        } catch (err) {
-          console.error('Failed to check for a backup snapshot', err);
-        }
+        // No live Drive file for this account (brand-new sign-in, or an existing member's own
+        // kpi-manager-data.json was deleted) — fall back to a blank slate. Restoring from the
+        // daily-backup folder is a deliberate, manually-triggered action (see the "データ復旧"
+        // header button / handleCheckBackupForRestore) rather than something offered
+        // automatically here, so a brand-new user is never prompted about a "restore" they never
+        // asked for.
+        //
         // Brand-new signed-in user: offer to claim any pre-Google-login local data.
         const legacy = readLegacyAppData();
         const legacyNames = (legacy?.users || []).filter(name => legacy?.userData?.[name]);
@@ -13078,10 +13074,32 @@ const App: React.FC = () => {
     });
   };
 
-  // accept=true replaces the (so far blank) currentUserData with the offered backup snapshot;
-  // driveFileId is left as-is (null, since this only ever fires when no live file was found),
-  // so the normal debounced save creates the member's own fresh Drive file from this content —
-  // same mechanism as handleClaimLegacyData above.
+  // Manually-triggered data-recovery action (header「データ復旧」button) — not offered
+  // automatically on sign-in. Looks up the signed-in account's own backup snapshot and, if
+  // found, asks for confirmation before overwriting currentUserData with it.
+  const handleCheckBackupForRestore = async () => {
+    if (!currentIdentity || isCheckingBackup) return;
+    setIsCheckingBackup(true);
+    try {
+      const backup = await restoreFromBackup<UserData>(currentIdentity.email);
+      if (backup) {
+        setBackupRestoreOffer(backup);
+      } else {
+        alert('バックアップが見つかりませんでした。');
+      }
+    } catch (err) {
+      console.error('Failed to check for a backup snapshot', err);
+      alert('バックアップの確認に失敗しました。時間をおいて再度お試しください。');
+    } finally {
+      setIsCheckingBackup(false);
+    }
+  };
+
+  // accept=true overwrites currentUserData with the confirmed backup snapshot — whether or not
+  // a live Drive file currently exists, since this is a deliberate "revert my data" action, not
+  // just first-file creation. The existing debounced save then writes it to driveFileId if one
+  // is already set, or creates a fresh file (same mechanism as handleClaimLegacyData above) if
+  // this account had none.
   const handleRestoreFromBackup = (accept: boolean) => {
     if (accept && backupRestoreOffer) {
       setCurrentUserData(normalizeUserData(backupRestoreOffer.data));
@@ -15328,18 +15346,17 @@ const App: React.FC = () => {
             </div>
             <div className="modal-body">
               <p>
-                このアカウントのデータがGoogleドライブ上に見当たりませんでした。
-                {new Date(backupRestoreOffer.modifiedTime).toLocaleString('ja-JP')}時点のバックアップが見つかりましたが、復元しますか？
+                {new Date(backupRestoreOffer.modifiedTime).toLocaleString('ja-JP')}時点のバックアップが見つかりました。復元しますか？
               </p>
               <p className="modal-description">
-                誤って削除してしまった場合などにご利用ください。「復元しない」を選ぶと、空の状態から始めます。
+                復元すると、現在Googleドライブに保存されている自分のデータはこのバックアップの内容で上書きされます。この操作は元に戻せません。
               </p>
             </div>
             <div className="modal-footer">
               <button type="button" className="cancel-button" onClick={() => handleRestoreFromBackup(false)}>
-                復元せず新規で始める
+                キャンセル
               </button>
-              <button className="submit-button" onClick={() => handleRestoreFromBackup(true)}>このバックアップを復元する</button>
+              <button className="submit-button" onClick={() => handleRestoreFromBackup(true)}>このバックアップで上書き復元する</button>
             </div>
           </div>
         </div>
@@ -15552,6 +15569,14 @@ const App: React.FC = () => {
             <button onClick={() => setIsMediaModalOpen(true)} className="header-utility-button">媒体管理</button>
             <button onClick={() => setIsHelpModalOpen(true)} className="header-utility-button">使い方</button>
             <button onClick={() => setIsChangelogModalOpen(true)} className="header-utility-button">更新履歴</button>
+            <button
+              onClick={handleCheckBackupForRestore}
+              disabled={isCheckingBackup}
+              className="header-utility-button"
+              title="誤ってデータを削除してしまった場合などに、前日までのバックアップから自分のデータを復元します"
+            >
+              {isCheckingBackup ? '確認中...' : 'データ復旧'}
+            </button>
             <button onClick={() => setIsFeedbackModalOpen(true)} className="header-utility-button">お問い合わせ</button>
             <button onClick={handleLogout} className="logout-button header-utility-button">ログアウト</button>
           </div>
