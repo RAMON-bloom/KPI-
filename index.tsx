@@ -11643,6 +11643,10 @@ const TeamChatReportPanel: React.FC<{
  * リマインド機能で使う。値がすべて0のentryでも「保存されていれば入力済み」扱い（todayTotals
  * 算出やGoogle Chatレポートと同じ、entriesの有無だけを見る考え方）。allUsersDataにまだその
  * メンバーのデータ自体が読み込めていない場合も、判定できないので保守的に「未入力」扱いにする。
+ * team.memberEmailsは自由入力のため、実際のサインインメールと大文字・小文字が食い違っている
+ * ケースがある（resolveUserDataEntry参照）——ここで直接`allUsersData[email]`を引くと、入力
+ * 履歴があるメンバーでも一致せず「未入力」と誤判定される上、表示名も引けずメールアドレスの
+ * まま送信されてしまっていたため、大文字・小文字を無視して解決する。
  */
 const computeMembersMissingEntryForDate = (
   memberEmails: string[],
@@ -11651,11 +11655,15 @@ const computeMembersMissingEntryForDate = (
 ): { email: string; displayName: string }[] => {
   return memberEmails
     .filter(email => {
-      const userData = allUsersData[email];
-      if (!userData) return true;
+      const resolved = resolveUserDataEntry(allUsersData, email);
+      if (!resolved) return true;
+      const [, userData] = resolved;
       return !(userData.entries || []).some(e => e.date === dateStr);
     })
-    .map(email => ({ email, displayName: allUsersData[email]?.displayName || email }));
+    .map(email => {
+      const resolved = resolveUserDataEntry(allUsersData, email);
+      return { email, displayName: resolved?.[1].displayName || email };
+    });
 };
 
 const formatReminderDateLabel = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
