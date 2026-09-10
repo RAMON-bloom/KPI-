@@ -4029,6 +4029,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-10',
+    items: [
+      '【不具合修正】候補者パイプラインの選考状況を更新した際、Googleタスク（Googleカレンダーの「保留中のタスク」欄）に同じ選考の重複タスクが増え続けたり、更新した1社分だけでなく選考中の他社分のタスクまで新規に作られてしまう不具合を修正。既存のタスクとの紐付け（idMap）が何らかの理由で古くなっていた場合でも、通常の保存時にGoogle側の実タスクを確認してから作成するようにした（これまでは「今すぐ同期」ボタンでの一括同期時のみ行っていた確認を、通常保存にも適用）',
+    ],
+  },
+  {
     date: '2026-09-04',
     items: [
       '「チーム管理」のチーム一覧を、チームごとに折り畳めるようにした。メンバーが増えて縦に長くなっていた表示が、既定でチーム名・人数だけの1行に畳まれ、必要なチームだけ開いて確認できます',
@@ -14536,19 +14542,44 @@ const App: React.FC = () => {
       // a later item failed.
       let firstError: unknown = null;
       if (!opts?.silent) setTasksSyncStatus('loading');
-      // Reuses an already-existing Google Task recognized by its embedded syncKey marker (see
-      // opts.existingTasksLookup) instead of blindly creating a new one — the safety net for
-      // when idMap itself has gone stale (e.g. a debounced Drive write from another tab/device
-      // hadn't landed when this session loaded its copy). Keying on the stable syncKey (app.id /
-      // revival:${candidateId}) rather than exact title+due-date text means this still recognizes
-      // the task even if the candidate's name, the company name, or the scheduled time changed
-      // since it was first created — previously any of those edits made the old task unrecognizable
-      // and a fresh duplicate got created right alongside it.
+      // A normal single-candidate save (unlike handleSyncAllTasksNow's bulk resync) used to
+      // trust idMap blindly: if it had gone stale for ANY of this candidate's applications —
+      // e.g. a duplicate/older copy of the Drive data file got loaded (see
+      // kpi-mgr-feedback-post-write-race), or a debounced write from another tab/device hadn't
+      // landed before this session's copy was cached — every such application looked exactly
+      // like "never synced," so even an edit to a completely different company in the same
+      // candidate created a fresh duplicate task for it (isUnchanged below requires an
+      // existingTaskId to ever apply). Lazily fetching the same syncKey-keyed lookup
+      // handleSyncAllTasksNow already builds (only when something below would otherwise hit the
+      // create path) closes that gap without paying for a Google Tasks list fetch on every save.
+      let existingTasksLookup = opts?.existingTasksLookup;
+      if (!existingTasksLookup) {
+        const appNeedsLookup = (app: CompanyApplication) => !!app.scheduledDate && !EXIT_PIPELINE_STAGES.includes(app.stage) && !idMap[app.id];
+        const revivalNeedsLookup = !!(revivalTaskKey && nextRevival && !idMap[revivalTaskKey]);
+        if ((effectiveNext && nextApps.some(appNeedsLookup)) || revivalNeedsLookup) {
+          try {
+            existingTasksLookup = new Map<string, string>();
+            for (const t of await listPipelineTasks(accessToken)) {
+              if (t.syncKey && !existingTasksLookup.has(t.syncKey)) existingTasksLookup.set(t.syncKey, t.id);
+            }
+          } catch {
+            // A failed lookup shouldn't block this save's own edits — falls back to the old
+            // create-only behavior (a real duplicate is still recoverable via 今すぐ同期).
+            existingTasksLookup = undefined;
+          }
+        }
+      }
+      // Reuses an already-existing Google Task recognized by its embedded syncKey marker
+      // (existingTasksLookup above) instead of blindly creating a new one. Keying on the stable
+      // syncKey (app.id / revival:${candidateId}) rather than exact title+due-date text means
+      // this still recognizes the task even if the candidate's name, the company name, or the
+      // scheduled time changed since it was first created — previously any of those edits made
+      // the old task unrecognizable and a fresh duplicate got created right alongside it.
       const createOrReuseTask = async (content: ReturnType<typeof buildPipelineTaskContent>): Promise<string> => {
-        const reuseId = opts?.existingTasksLookup?.get(content.syncKey);
+        const reuseId = existingTasksLookup?.get(content.syncKey);
         if (reuseId) {
           // Removed once claimed so it can't also be reused for anything else in this same batch.
-          opts!.existingTasksLookup!.delete(content.syncKey);
+          existingTasksLookup!.delete(content.syncKey);
           return reuseId;
         }
         return createPipelineTask(accessToken, content);
@@ -14583,9 +14614,9 @@ const App: React.FC = () => {
               // （今すぐ同期のexistingTasksLookup、上のcreateOrReuseTaskと同じ理由）。
               // ここで拾っておかないと、そのタスクは再利用も削除もされずGoogleカレンダーに
               // 残り続けてしまう。
-              const orphanedTaskId = opts?.existingTasksLookup?.get(app.id);
+              const orphanedTaskId = existingTasksLookup?.get(app.id);
               if (orphanedTaskId) {
-                opts!.existingTasksLookup!.delete(app.id);
+                existingTasksLookup!.delete(app.id);
                 if (orphanedTaskId !== existingTaskId) {
                   await deletePipelineTask(accessToken, orphanedTaskId);
                 }
