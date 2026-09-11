@@ -2113,7 +2113,10 @@ const MediaKpiCard: React.FC<{
 // 埋め合わせできない。表示する達成率は対象媒体のうち最も低い達成率（ボトルネック）。
 type ScoutAchievementTier = 'achieved' | 'great';
 const SCOUT_ACHIEVEMENT_TIERS: { threshold: number; tier: ScoutAchievementTier; emoji: string; label: string }[] = [
-  { threshold: 120, tier: 'great', emoji: '🏆🎉', label: '120%達成' },
+  // labelには固定の%は入れない——実際の達成率（tier.rate）は120%を大きく超えることも
+  // あり、「120%達成（進行中312%）」のように矛盾して見える表記になってしまうため
+  // （ユーザーからの指摘で修正）。ラベルは階層を表す言葉にとどめ、実数はrateだけで示す。
+  { threshold: 120, tier: 'great', emoji: '🏆🎉', label: '大幅達成' },
   { threshold: 100, tier: 'achieved', emoji: '🎉', label: '目標達成' },
 ];
 
