@@ -2111,12 +2111,20 @@ interface ScoutMediaRate {
   target: number;
 }
 
-const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
-  // targetが未設定（0）の対象媒体は判定から除外する——設定漏れで永久に達成不能になるのを防ぐ。
-  // 除外した結果、判定できる媒体が1つも残らない場合は「対象媒体なし」と同じ扱いで非表示。
-  const eligible = mediaRates.filter(m => m.target > 0);
+// targetが未設定（0）の対象媒体は判定から除外する——設定漏れで永久に達成不能になるのを防ぐ。
+// 除外した結果、判定できる媒体が1つも残らない場合はnull（「対象媒体なし」）。
+const getEligibleScoutMediaRates = (mediaRates: ScoutMediaRate[]) => mediaRates.filter(m => m.target > 0);
+
+const computeGatedScoutRate = (mediaRates: ScoutMediaRate[]): number | null => {
+  const eligible = getEligibleScoutMediaRates(mediaRates);
   if (eligible.length === 0) return null;
-  const rate = Math.min(...eligible.map(m => (m.actual / m.target) * 100));
+  return Math.min(...eligible.map(m => (m.actual / m.target) * 100));
+};
+
+const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
+  const eligible = getEligibleScoutMediaRates(mediaRates);
+  const rate = computeGatedScoutRate(mediaRates);
+  if (rate === null) return null;
   const matched = SCOUT_ACHIEVEMENT_TIERS.find(t => rate >= t.threshold);
   return matched ? { ...matched, rate, mediaNames: eligible.map(m => m.name) } : null;
 };
@@ -2174,7 +2182,7 @@ const computeUserScoutAchievement = (
   allMedia: MediaEntry[],
   awardMediaIds: string[],
   weekStartsOn: 0 | 6
-): { weekly: ScoutAchievementResult; monthly: ScoutAchievementResult } => {
+): { weekly: ScoutAchievementResult; monthly: ScoutAchievementResult; weeklyRate: number | null; monthlyRate: number | null } => {
   const now = new Date();
   const entries = data.entries || [];
   const mediaName = (id: string) => allMedia.find(m => m.id === id)?.name || id;
@@ -2201,7 +2209,12 @@ const computeUserScoutAchievement = (
     target: (data.kpiTargets || {})[`${id}_scoutsSent` as KpiKey] || 0,
   }));
 
-  return { weekly: getGatedScoutAchievementTier(weeklyRates), monthly: getGatedScoutAchievementTier(monthlyRates) };
+  return {
+    weekly: getGatedScoutAchievementTier(weeklyRates),
+    monthly: getGatedScoutAchievementTier(monthlyRates),
+    weeklyRate: computeGatedScoutRate(weeklyRates),
+    monthlyRate: computeGatedScoutRate(monthlyRates),
+  };
 };
 
 // あるメンバー（メール）が実際に表彰判定の対象とする媒体ID一覧を解決する——所属チームの
@@ -2241,6 +2254,66 @@ const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchiev
           </li>
         ))}
       </ul>
+    </div>
+  );
+};
+
+interface ScoutProgressLeaderboardEntry {
+  email: string;
+  displayName: string;
+  teamNames: string[];
+  // どちらの期間についての「もう少し」かを表す——週・月の両方が未達成の場合は、達成率が
+  // 高い（＝達成に近い）方を代表値として1件だけ採用する（達成済みの期間はここに出てこない
+  // ——ScoutAchievementBanner/TeammateScoutAchievementListの側にすでに表示されているため）。
+  period: 'weekly' | 'monthly';
+  rate: number;
+}
+
+// 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、週または月の
+// 達成率（対象媒体のうち最も低い達成率＝ボトルネック、getGatedScoutAchievementTierと同じ
+// 考え方）が高い順に並べ、上位3件を返す。1人につき週・月のどちらか達成率が高い方だけを
+// 代表値として採用する（両方とも表示すると同じ人が2回ランクインしてしまうため）。
+const buildScoutProgressLeaderboard = (
+  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; monthlyRate: number | null }[]
+): ScoutProgressLeaderboardEntry[] => {
+  const isPending = (rate: number | null): rate is number => rate !== null && rate < 100;
+  return candidates
+    .map(c => {
+      const weeklyPending = isPending(c.weeklyRate) ? c.weeklyRate : null;
+      const monthlyPending = isPending(c.monthlyRate) ? c.monthlyRate : null;
+      if (weeklyPending === null && monthlyPending === null) return null;
+      const period: 'weekly' | 'monthly' = (monthlyPending ?? -1) > (weeklyPending ?? -1) ? 'monthly' : 'weekly';
+      const rate = period === 'weekly' ? (weeklyPending as number) : (monthlyPending as number);
+      return { email: c.email, displayName: c.displayName, teamNames: c.teamNames, period, rate };
+    })
+    .filter((e): e is ScoutProgressLeaderboardEntry => e !== null)
+    .sort((a, b) => b.rate - a.rate)
+    .slice(0, 3);
+};
+
+const ScoutProgressLeaderboard: React.FC<{ entries: ScoutProgressLeaderboardEntry[] }> = ({ entries }) => {
+  if (entries.length === 0) return null;
+  return (
+    <div className="scout-progress-leaderboard">
+      <h3 className="scout-progress-leaderboard-title">🔥 達成まであと少しのメンバー TOP3</h3>
+      <ol>
+        {entries.map((e, i) => (
+          <li key={e.email} className="scout-progress-leaderboard-item">
+            <span className="scout-progress-leaderboard-rank">{i + 1}</span>
+            <span className="scout-progress-leaderboard-info">
+              <span className="scout-progress-leaderboard-name">
+                {e.displayName}
+                <span className="scout-progress-leaderboard-team">{e.teamNames.length > 0 ? e.teamNames.join('・') : '未所属'}</span>
+                <span className="scout-progress-leaderboard-period">{e.period === 'weekly' ? '週次' : '月次'}</span>
+              </span>
+              <span className="scout-progress-leaderboard-gauge" role="progressbar" aria-valuenow={Math.round(e.rate)} aria-valuemin={0} aria-valuemax={100}>
+                <span className="scout-progress-leaderboard-gauge-fill" style={{ width: `${Math.min(e.rate, 100)}%` }} />
+              </span>
+            </span>
+            <span className="scout-progress-leaderboard-percent">{e.rate.toFixed(0)}%</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 };
@@ -15520,18 +15593,20 @@ const App: React.FC = () => {
     }));
   }, [entries, allMedia, selfScoutAwardMediaIds, kpiTargets]);
 
+  // comparisonTeamGroups等と同じく、team.memberEmailsは自由入力のため大文字小文字が食い違う
+  // ことがある——normalizeEmailで正規化して比較する。複数チームに所属する場合は全て拾う。
+  // teammateScoutAchievements/scoutProgressLeaderboardの両方から参照する共通ヘルパー。
+  const teamNamesForEmail = (email: string): string[] => {
+    const target = normalizeEmail(email);
+    return teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === target)).map(t => t.name);
+  };
+
   // 個人実績タブ上部のTeammateScoutAchievementList用——自分以外のメンバーで、既に今週/今月の
   // スカウト送信数目標（各メンバーの所属チームで選ばれた対象媒体すべて）を達成している人を
   // 一覧化する（displayedAllUsersDataは自分の分も含むdomain-wide全メンバーのスナップショット
   // なので、正規化したメールで自分自身を除外する）。
   const teammateScoutAchievements = useMemo<TeammateScoutAchievement[]>(() => {
     const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
-    // comparisonTeamGroups等と同じく、team.memberEmailsは自由入力のため大文字小文字が食い違う
-    // ことがある——normalizeEmailで正規化して比較する。複数チームに所属する場合は全て拾う。
-    const teamNamesForEmail = (email: string): string[] => {
-      const target = normalizeEmail(email);
-      return teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === target)).map(t => t.name);
-    };
     return Object.entries(displayedAllUsersData)
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
@@ -15547,6 +15622,28 @@ const App: React.FC = () => {
         return diff !== 0 ? diff : a.displayName.localeCompare(b.displayName, 'ja');
       });
   }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn, teams]);
+
+  // 個人実績タブ上部のScoutProgressLeaderboard用——自分を含む全ユーザーのうち、まだ達成して
+  // いない人を対象に「達成に最も近い」TOP3を出す（達成済みの期間はteammateScoutAchievements/
+  // 自分のScoutAchievementBannerに既に出ているため、ここでの対象は非達成の期間のみ）。
+  const scoutProgressLeaderboard = useMemo<ScoutProgressLeaderboardEntry[]>(() => {
+    const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
+    const teammateCandidates = Object.entries(displayedAllUsersData)
+      .filter(([email]) => normalizeEmail(email) !== selfEmail)
+      .map(([email, data]: [string, UserData]) => {
+        const awardMediaIds = resolveScoutAwardMediaIds(email, teams, activeMedia);
+        const { weeklyRate, monthlyRate } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
+        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyRate, monthlyRate };
+      });
+    const selfCandidate = currentIdentity ? [{
+      email: currentIdentity.email,
+      displayName: currentUserData?.displayName || currentIdentity.email,
+      teamNames: teamNamesForEmail(currentIdentity.email),
+      weeklyRate: computeGatedScoutRate(currentRealWeekScoutRates),
+      monthlyRate: computeGatedScoutRate(currentRealMonthScoutRates),
+    }] : [];
+    return buildScoutProgressLeaderboard([...selfCandidate, ...teammateCandidates]);
+  }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, currentRealWeekScoutRates, currentRealMonthScoutRates]);
 
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
@@ -15912,6 +16009,7 @@ const App: React.FC = () => {
                monthlyMediaRates={currentRealMonthScoutRates}
              />
              <TeammateScoutAchievementList achievements={teammateScoutAchievements} />
+             <ScoutProgressLeaderboard entries={scoutProgressLeaderboard} />
 
              <section aria-labelledby="calendar-title">
               <h2

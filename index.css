@@ -2175,6 +2175,100 @@ button.agent-interview-status-badge:focus-visible {
   background: linear-gradient(135deg, #ffc107, #fd7e14);
 }
 
+.scout-progress-leaderboard {
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.scout-progress-leaderboard-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: var(--text-color);
+}
+
+.scout-progress-leaderboard ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.scout-progress-leaderboard-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.scout-progress-leaderboard-rank {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background-color: var(--primary-color);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.scout-progress-leaderboard-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.scout-progress-leaderboard-name {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.scout-progress-leaderboard-team {
+  font-weight: normal;
+  font-size: 0.8rem;
+  color: var(--text-muted-color);
+}
+
+.scout-progress-leaderboard-period {
+  font-weight: normal;
+  font-size: 0.75rem;
+  color: var(--info-color);
+}
+
+.scout-progress-leaderboard-gauge {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  border-radius: 999px;
+  background-color: var(--border-color);
+  overflow: hidden;
+}
+
+.scout-progress-leaderboard-gauge-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--info-color), var(--primary-color));
+}
+
+.scout-progress-leaderboard-percent {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-size: 0.9rem;
+  min-width: 3rem;
+  text-align: right;
+}
+
 .checkbox-group {
   display: flex;
   flex-wrap: wrap;
