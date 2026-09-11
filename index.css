@@ -2146,6 +2146,11 @@ button.agent-interview-status-badge:focus-visible {
   min-width: 6rem;
 }
 
+.teammate-achievement-team {
+  color: var(--text-muted-color);
+  font-size: 0.85rem;
+}
+
 .teammate-achievement-tags {
   display: flex;
   flex-wrap: wrap;

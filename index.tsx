@@ -2130,6 +2130,9 @@ type ScoutAchievementResult = ReturnType<typeof getScoutAchievementTier>;
 interface TeammateScoutAchievement {
   email: string;
   displayName: string;
+  // 複数チームに所属するメンバーはそのすべてを表示する（comparisonTeamGroupsと同じ考え方）。
+  // どのチームにも属さない場合は空配列——表示側で「未所属」に読み替える。
+  teamNames: string[];
   weekly: ScoutAchievementResult;
   monthly: ScoutAchievementResult;
 }
@@ -2177,6 +2180,7 @@ const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchiev
         {achievements.map(a => (
           <li key={a.email} className="teammate-achievement-item">
             <span className="teammate-achievement-name">{a.displayName}</span>
+            <span className="teammate-achievement-team">{a.teamNames.length > 0 ? a.teamNames.join('・') : '未所属'}</span>
             <span className="teammate-achievement-tags">
               {a.weekly && (
                 <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}`}>
@@ -15424,12 +15428,18 @@ const App: React.FC = () => {
   // domain-wide全メンバーのスナップショットなので、正規化したメールで自分自身を除外する）。
   const teammateScoutAchievements = useMemo<TeammateScoutAchievement[]>(() => {
     const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
+    // comparisonTeamGroups等と同じく、team.memberEmailsは自由入力のため大文字小文字が食い違う
+    // ことがある——normalizeEmailで正規化して比較する。複数チームに所属する場合は全て拾う。
+    const teamNamesForEmail = (email: string): string[] => {
+      const target = normalizeEmail(email);
+      return teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === target)).map(t => t.name);
+    };
     return Object.entries(displayedAllUsersData)
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
         const { weekly, monthly } = computeUserScoutAchievement(data, allMedia, activeMedia, weekStartsOn);
         if (!weekly && !monthly) return null;
-        return { email, displayName: data.displayName || email, weekly, monthly };
+        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weekly, monthly };
       })
       .filter((a): a is TeammateScoutAchievement => a !== null)
       .sort((a, b) => {
@@ -15437,7 +15447,7 @@ const App: React.FC = () => {
         const diff = rank(a) - rank(b);
         return diff !== 0 ? diff : a.displayName.localeCompare(b.displayName, 'ja');
       });
-  }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn]);
+  }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn, teams]);
 
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
