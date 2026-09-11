@@ -2224,7 +2224,7 @@ const ScoutAchievementBadge: React.FC<{ periodLabel: string; mediaRates: ScoutMe
       <span className="scout-achievement-badge-text">
         <strong>{periodLabel}スカウト送信数 {tier.label}！</strong>
         <span className="scout-achievement-badge-detail">
-          対象媒体（{tier.mediaNames.join('、')}）すべてで達成率{tier.rate.toFixed(0)}%以上
+          対象媒体（{tier.mediaNames.join('、')}）すべてで進行中の達成率{tier.rate.toFixed(0)}%以上
         </span>
       </span>
     </div>
@@ -2338,12 +2338,12 @@ const TeammateScoutAchievementList: React.FC<{
               <span className="teammate-achievement-tags">
                 {a.weekly && (
                   <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}${isNewWeekly ? ' teammate-achievement-tag--flash' : ''}`}>
-                    {a.weekly.emoji} 週{a.weekly.label}（{a.weekly.rate.toFixed(0)}%）
+                    {a.weekly.emoji} 週{a.weekly.label}（進行中 {a.weekly.rate.toFixed(0)}%）
                   </span>
                 )}
                 {a.monthly && (
                   <span className={`teammate-achievement-tag teammate-achievement-tag--${a.monthly.tier}`}>
-                    {a.monthly.emoji} 月{a.monthly.label}（{a.monthly.rate.toFixed(0)}%）
+                    {a.monthly.emoji} 月{a.monthly.label}（進行中 {a.monthly.rate.toFixed(0)}%）
                   </span>
                 )}
               </span>
