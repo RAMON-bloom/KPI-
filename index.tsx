@@ -13443,12 +13443,21 @@ const App: React.FC = () => {
     // で表示するため常にallUsersDataを必要とする（以前はミドルのメンバー選択ドロップダウン
     // 用にミドル×所属チームありの場合だけ取得していたが、その条件を無条件のview==='personal_kpi'
     // に広げた——ミドル向けの用途はこの無条件フェッチに包含されるため据え置いてよい）。
-    const needsAggregateData =
+    //
+    // isInitialized/currentIdentityを「必要かどうか」の判定そのものに含めている点が重要——
+    // サインイン完了前はview（既定でpersonal_kpi）だけを見るとtrueになってしまうが、以前の
+    // 条件（ミドル×所属チームあり）は暗黙にcurrentIdentityが必須だったため、サインイン前は
+    // 常にfalseだった。ここを「trueだがisInitialized/currentIdentity待ちだから今回はreturn」
+    // という形にすると、その早期returnでもwasAggregateDataNeededRef.currentがtrueに書き
+    // 換わってしまい、実際にサインインが完了した後の本当のfalse→true遷移を「既に処理済み」と
+    // 誤認してfetchAllUsersDataが一生呼ばれなくなる（実際に発生した不具合）。
+    const needsAggregateData = isInitialized && !!currentIdentity && (
       view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen ||
       isFeedbackModalOpen ||
-      view === 'personal_kpi';
-    if (!needsAggregateData || !isInitialized || !currentIdentity) {
-      wasAggregateDataNeededRef.current = needsAggregateData;
+      view === 'personal_kpi'
+    );
+    if (!needsAggregateData) {
+      wasAggregateDataNeededRef.current = false;
       return;
     }
     if (!wasAggregateDataNeededRef.current) {
