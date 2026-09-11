@@ -2081,12 +2081,11 @@ const MediaKpiCard: React.FC<{
 };
 
 // 週次/月次のスカウト送信数目標を達成したことを本人に称賛するためのバッジ。金銭的な報酬には
-// 一切連動しない（アプリ内表示のみ、Google Chat通知は見送り）——達成率に応じて3段階
-// （100%/120%/150%）で見た目とメッセージがより目立つようになる。目標未達成の間・目標が
+// 一切連動しない（アプリ内表示のみ、Google Chat通知は見送り）——達成率に応じて2段階
+// （100%/120%）で見た目とメッセージがより目立つようになる。目標未達成の間・目標が
 // 未設定（0）の間は何も表示しない（未達成を責める演出は今回のスコープ外）。
-type ScoutAchievementTier = 'achieved' | 'great' | 'legendary';
+type ScoutAchievementTier = 'achieved' | 'great';
 const SCOUT_ACHIEVEMENT_TIERS: { threshold: number; tier: ScoutAchievementTier; emoji: string; label: string }[] = [
-  { threshold: 150, tier: 'legendary', emoji: '🏆✨🎉', label: '150%達成' },
   { threshold: 120, tier: 'great', emoji: '🔥🎉', label: '120%達成' },
   { threshold: 100, tier: 'achieved', emoji: '🎉', label: '目標達成' },
 ];

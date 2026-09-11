@@ -2100,23 +2100,15 @@ button.agent-interview-status-badge:focus-visible {
 
 .scout-achievement-badge--great {
   background: linear-gradient(135deg, #fd7e14, var(--danger-color));
-}
-
-.scout-achievement-badge--great .scout-achievement-badge-emoji {
-  font-size: 1.75rem;
-}
-
-.scout-achievement-badge--legendary {
-  background: linear-gradient(135deg, #ffc107, #fd7e14, #dc3545);
   animation: scout-achievement-pop 0.3s ease-out, scout-achievement-glow 1.8s ease-in-out infinite;
 }
 
-.scout-achievement-badge--legendary .scout-achievement-badge-emoji {
-  font-size: 2.1rem;
+.scout-achievement-badge--great .scout-achievement-badge-emoji {
+  font-size: 1.9rem;
 }
 
-.scout-achievement-badge--legendary .scout-achievement-badge-text strong {
-  font-size: 1.15rem;
+.scout-achievement-badge--great .scout-achievement-badge-text strong {
+  font-size: 1.1rem;
 }
 
 .checkbox-group {
