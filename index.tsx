@@ -13239,12 +13239,6 @@ const App: React.FC = () => {
   const [backupRestoreOffer, setBackupRestoreOffer] = useState<{ data: UserData; modifiedTime: string } | null>(null);
   const [isCheckingBackup, setIsCheckingBackup] = useState(false);
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
-  // fetchAllUsersDataの結果を画面上で確認できるようにするための診断用state——「更新ボタンを
-  // 押したのに反映されない」という報告があった際に、実際に取得自体が成功しているか
-  // （成功時刻が更新されるか）、それとも取得そのものが失敗しているか（エラー文言が出るか）を
-  // 切り分けるために追加した。
-  const [allUsersDataFetchedAt, setAllUsersDataFetchedAt] = useState<Date | null>(null);
-  const [allUsersDataFetchError, setAllUsersDataFetchError] = useState<string | null>(null);
 
   // View state
   const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline'>('personal_kpi');
@@ -13754,7 +13748,6 @@ const App: React.FC = () => {
   // 時、または画面に入り直した時にのみ取得する）。
   const fetchAllUsersData = useCallback(async () => {
     setIsLoadingAllUsers(true);
-    setAllUsersDataFetchError(null);
     try {
       const teammates = await loadAllTeammatesData<UserData>();
       const merged: Record<string, UserData> = {};
@@ -13775,10 +13768,8 @@ const App: React.FC = () => {
       setAllUsersData(merged);
       setDriveFileIdByEmail(fileIds);
       setUsers(Object.keys(merged));
-      setAllUsersDataFetchedAt(new Date());
     } catch (error) {
       console.error("Failed to load teammates' data from Drive", error);
-      setAllUsersDataFetchError(error instanceof Error ? error.message : '取得に失敗しました。');
     } finally {
       setIsLoadingAllUsers(false);
     }
@@ -16497,19 +16488,6 @@ const App: React.FC = () => {
                    スプレッドシートからKPI実績を取り込む
                  </button>
                </span>
-             </div>
-
-             <div className="sync-status-bar">
-               <span className="form-helper-text" style={{ margin: 0 }}>
-                 他メンバーの達成状況・目標値は、このタブを開いたまま放置していると更新されません。
-                 {allUsersDataFetchedAt && `（最終取得: ${allUsersDataFetchedAt.toLocaleTimeString('ja-JP')}）`}
-                 {allUsersDataFetchError && (
-                   <span style={{ color: 'var(--danger-color)' }}>　取得に失敗しました: {allUsersDataFetchError}</span>
-                 )}
-               </span>
-               <button type="button" onClick={() => fetchAllUsersData()} disabled={isLoadingAllUsers} className="secondary-action-button">
-                 {isLoadingAllUsers ? '更新中...' : 'メンバーの達成状況を更新'}
-               </button>
              </div>
 
              <ScoutAchievementBanner
