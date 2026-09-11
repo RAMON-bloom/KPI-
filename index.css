@@ -2111,6 +2111,65 @@ button.agent-interview-status-badge:focus-visible {
   font-size: 1.1rem;
 }
 
+.teammate-achievement-list {
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.teammate-achievement-list-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: var(--text-color);
+}
+
+.teammate-achievement-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.teammate-achievement-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.teammate-achievement-name {
+  font-weight: 600;
+  min-width: 6rem;
+}
+
+.teammate-achievement-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.teammate-achievement-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: #fff;
+}
+
+.teammate-achievement-tag--achieved {
+  background-color: var(--success-color);
+}
+
+.teammate-achievement-tag--great {
+  background: linear-gradient(135deg, #ffc107, #fd7e14);
+}
+
 .checkbox-group {
   display: flex;
   flex-wrap: wrap;

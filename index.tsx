@@ -2126,6 +2126,76 @@ const ScoutAchievementBanner: React.FC<{
   );
 };
 
+type ScoutAchievementResult = ReturnType<typeof getScoutAchievementTier>;
+interface TeammateScoutAchievement {
+  email: string;
+  displayName: string;
+  weekly: ScoutAchievementResult;
+  monthly: ScoutAchievementResult;
+}
+
+// 他メンバーのUserData1人分について、実際の今週・今月のスカウト送信数が目標を達成しているか
+// を判定する。ScoutAchievementBanner用に自分の分だけAppコンポーネント内で個別計算している
+// currentRealWeekScoutTotals/currentRealMonthScoutTotalsと同じ考え方（週/月とも「表示中の
+// 期間」ではなく「実際の今」基準）を、他メンバー全員分にまとめて適用するための純関数。
+const computeUserScoutAchievement = (
+  data: UserData,
+  allMedia: MediaEntry[],
+  activeMedia: MediaEntry[],
+  weekStartsOn: 0 | 6
+): { weekly: ScoutAchievementResult; monthly: ScoutAchievementResult } => {
+  const now = new Date();
+  const entries = data.entries || [];
+
+  const weekStart = getStartOfWeek(now, weekStartsOn);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  const weeklyTotals = calculateTotalsForRange(entries, allMedia, weekStart, weekEnd);
+  const weekly = getScoutAchievementTier(
+    getTotalFromLump(weeklyTotals, '_scoutsSent', activeMedia),
+    getTotalFromLump(data.weeklyKpiTargets || {}, '_scoutsSent', activeMedia),
+  );
+
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const monthlyTotals = calculateTotalsForRange(entries, allMedia, monthStart, monthEnd);
+  const monthly = getScoutAchievementTier(
+    getTotalFromLump(monthlyTotals, '_scoutsSent', activeMedia),
+    getTotalFromLump(data.kpiTargets || {}, '_scoutsSent', activeMedia),
+  );
+
+  return { weekly, monthly };
+};
+
+const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchievement[] }> = ({ achievements }) => {
+  if (achievements.length === 0) return null;
+  return (
+    <div className="teammate-achievement-list">
+      <h3 className="teammate-achievement-list-title">🎉 すでにスカウト目標を達成しているメンバー</h3>
+      <ul>
+        {achievements.map(a => (
+          <li key={a.email} className="teammate-achievement-item">
+            <span className="teammate-achievement-name">{a.displayName}</span>
+            <span className="teammate-achievement-tags">
+              {a.weekly && (
+                <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}`}>
+                  {a.weekly.emoji} 週{a.weekly.label}
+                </span>
+              )}
+              {a.monthly && (
+                <span className={`teammate-achievement-tag teammate-achievement-tag--${a.monthly.tier}`}>
+                  {a.monthly.emoji} 月{a.monthly.label}
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
 // Extracted so DateEntryModal renders the same fields whether it's the signed-in user editing
 // their own day or a ミドル proxy-editing a teammate's (see middleEntryTargetEmail in App).
 const GeneralKpiFieldsFieldset: React.FC<{
@@ -13209,16 +13279,14 @@ const App: React.FC = () => {
   const wasAggregateDataNeededRef = useRef(false);
 
   useEffect(() => {
-    // The 個人実績 tab also needs this when the signed-in account holds the ミドル role and
-    // belongs to at least one Team — that's what feeds the member-selector dropdown above the
-    // 実績カレンダー (computed inline here, not via the memoized isCurrentUserMiddle/
-    // middleManagedMemberEmails below, since those are declared later in this component and
-    // aren't in scope yet at this point in the function body).
-    const currentUserIsMiddleWithTeam = !!currentIdentity && middleEmails.includes(currentIdentity.email) && teams.some(t => t.memberEmails.includes(currentIdentity.email));
+    // 個人実績タブは、既にスカウト目標を達成している他メンバーをTeammateScoutAchievementList
+    // で表示するため常にallUsersDataを必要とする（以前はミドルのメンバー選択ドロップダウン
+    // 用にミドル×所属チームありの場合だけ取得していたが、その条件を無条件のview==='personal_kpi'
+    // に広げた——ミドル向けの用途はこの無条件フェッチに包含されるため据え置いてよい）。
     const needsAggregateData =
       view === 'all_users_kpi' || view === 'team_kpi' || (view === 'pipeline' && pipelineScope !== 'personal') || isTeamsModalOpen ||
       isFeedbackModalOpen ||
-      (view === 'personal_kpi' && currentUserIsMiddleWithTeam);
+      view === 'personal_kpi';
     if (!needsAggregateData || !isInitialized || !currentIdentity) {
       wasAggregateDataNeededRef.current = needsAggregateData;
       return;
@@ -13227,7 +13295,7 @@ const App: React.FC = () => {
       fetchAllUsersData();
     }
     wasAggregateDataNeededRef.current = true;
-  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isFeedbackModalOpen, middleEmails, teams]);
+  }, [view, isInitialized, currentIdentity, fetchAllUsersData, pipelineScope, isTeamsModalOpen, isFeedbackModalOpen]);
 
   // Loads unconditionally after sign-in (like the media config below), not gated by
   // view/modal — memberDepartments now feeds the header's BCA/F+/AC division switcher, which
@@ -15351,6 +15419,26 @@ const App: React.FC = () => {
     };
   }, [entries, allMedia, activeMedia, kpiTargets]);
 
+  // 個人実績タブ上部のTeammateScoutAchievementList用——自分以外のメンバーで、既に今週/今月の
+  // スカウト送信数目標を達成している人を一覧化する（displayedAllUsersDataは自分の分も含む
+  // domain-wide全メンバーのスナップショットなので、正規化したメールで自分自身を除外する）。
+  const teammateScoutAchievements = useMemo<TeammateScoutAchievement[]>(() => {
+    const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
+    return Object.entries(displayedAllUsersData)
+      .filter(([email]) => normalizeEmail(email) !== selfEmail)
+      .map(([email, data]: [string, UserData]) => {
+        const { weekly, monthly } = computeUserScoutAchievement(data, allMedia, activeMedia, weekStartsOn);
+        if (!weekly && !monthly) return null;
+        return { email, displayName: data.displayName || email, weekly, monthly };
+      })
+      .filter((a): a is TeammateScoutAchievement => a !== null)
+      .sort((a, b) => {
+        const rank = (a: TeammateScoutAchievement) => (a.weekly?.tier === 'great' || a.monthly?.tier === 'great') ? 0 : 1;
+        const diff = rank(a) - rank(b);
+        return diff !== 0 ? diff : a.displayName.localeCompare(b.displayName, 'ja');
+      });
+  }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn]);
+
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
   }, [entries]);
@@ -15715,6 +15803,7 @@ const App: React.FC = () => {
                monthlyActual={currentRealMonthScoutTotals.actual}
                monthlyTarget={currentRealMonthScoutTotals.target}
              />
+             <TeammateScoutAchievementList achievements={teammateScoutAchievements} />
 
              <section aria-labelledby="calendar-title">
               <h2
