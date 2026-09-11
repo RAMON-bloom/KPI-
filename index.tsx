@@ -2256,11 +2256,18 @@ const ScoutAchievementBanner: React.FC<{
 // 自動で消える——showは達成中ずっとtrueのままでも、このコンポーネントは初回のuseEffect
 // 発火時にしか表示を開始しないため、セッション中に何度も出てくることはない
 // （getNewScoutAchieverEmailsの既読管理により、次に同じ状態でリロードしても再表示されない）。
-const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL = '/weekly-achievement-celebration.jpg';
+// 複数用意しておくと、達成するたびに違う写真が出て新鮮さが出る——表示のたびにこの中から
+// ランダムに1枚選ぶ（WeeklyAchievementCelebrationPopup参照）。
+const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS = [
+  '/weekly-achievement-celebration-1.jpg',
+  '/weekly-achievement-celebration-2.jpg',
+];
 const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }) => {
   const [visible, setVisible] = useState(false);
+  const [imageUrl, setImageUrl] = useState(WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS[0]);
   useEffect(() => {
     if (!show) return;
+    setImageUrl(WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS[Math.floor(Math.random() * WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS.length)]);
     setVisible(true);
     const timer = setTimeout(() => setVisible(false), 3000);
     return () => clearTimeout(timer);
@@ -2269,7 +2276,7 @@ const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }
   return (
     <div className="weekly-celebration-overlay" role="status" aria-live="polite" onClick={() => setVisible(false)}>
       <div className="weekly-celebration-card">
-        <img src={WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL} alt="" className="weekly-celebration-photo" />
+        <img src={imageUrl} alt="" className="weekly-celebration-photo" />
         <p className="weekly-celebration-message">🎉 週目標達成、おめでとうございます！ 🎉</p>
       </div>
     </div>
