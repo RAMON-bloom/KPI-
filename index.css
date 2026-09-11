@@ -2192,7 +2192,7 @@ button.agent-interview-status-badge:focus-visible {
 
 .scout-achievement-badge--flash,
 .teammate-achievement-tag--flash {
-  animation: scout-new-flash 0.5s ease-in-out 4;
+  animation: scout-new-flash 0.5s ease-in-out 5; /* 0.5s x 5 = 2.5s */
 }
 
 .scout-achievement-badge--firework {
@@ -2230,7 +2230,7 @@ button.agent-interview-status-badge:focus-visible {
   border-radius: 50%;
   background: currentColor;
   transform: rotate(var(--angle)) translateX(0);
-  animation: scout-firework-spark 0.9s ease-out 1 both;
+  animation: scout-firework-spark 0.85s ease-out 3 both; /* 0.85s x 3 ≈ 2.5s */
 }
 
 .scout-achievers-row {
