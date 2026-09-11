@@ -2178,17 +2178,19 @@ button.agent-interview-status-badge:focus-visible {
 
 .monthly-jackpot-title {
   margin: 0;
-  font-size: clamp(2.75rem, 13vw, 5.5rem);
+  /* 「おめでとうございます！」は「大当たり!!」より文字数が多いため、はみ出さないよう
+     一回り小さいサイズにしている（文字数が変わったら合わせて調整すること）。 */
+  font-size: clamp(1.75rem, 7vw, 3.25rem);
   font-weight: 900;
   text-align: center;
-  line-height: 1.1;
+  line-height: 1.3;
   background: linear-gradient(90deg, #ff3b3b, #ffd700, #39ff88, #3bb6ff, #ff3bd4, #ff3b3b);
   background-size: 300% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.55);
-  filter: drop-shadow(0 0 24px rgba(255, 215, 0, 0.65));
+  -webkit-text-stroke: 1.5px rgba(0, 0, 0, 0.55);
+  filter: drop-shadow(0 0 20px rgba(255, 215, 0, 0.65));
   animation: jackpot-content-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1), jackpot-gradient-shift 1.4s linear infinite, jackpot-title-pulse 0.6s ease-in-out infinite 0.5s;
 }
 
