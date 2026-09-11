@@ -2256,9 +2256,7 @@ const ScoutAchievementBanner: React.FC<{
 // 自動で消える——showは達成中ずっとtrueのままでも、このコンポーネントは初回のuseEffect
 // 発火時にしか表示を開始しないため、セッション中に何度も出てくることはない
 // （getNewScoutAchieverEmailsの既読管理により、次に同じ状態でリロードしても再表示されない）。
-// 複数用意しておくと、達成するたびに違う写真が出て新鮮さが出る——表示のたびにこの中から
-// ランダムに1枚選ぶ（WeeklyAchievementCelebrationPopup参照）。
-// 2枚とも毎回並べて表示する（ランダムに1枚選ぶ方式ではない——ユーザーの明示的な要望）。
+// 2枚とも毎回並べて表示する（ランダムに1枚だけ選ぶ方式は不採用——ユーザーの明示的な要望）。
 const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS = [
   '/weekly-achievement-celebration-1.jpg',
   '/weekly-achievement-celebration-2.jpg',
@@ -2281,6 +2279,31 @@ const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }
           ))}
         </div>
         <p className="weekly-celebration-message">🎉 週目標達成、おめでとうございます！ 🎉</p>
+      </div>
+    </div>
+  );
+};
+
+// 月目標を新規に達成した瞬間、本人にだけ表示するパチンコの大当たり演出風ポップアップ。
+// 週次（写真+3秒）より大きな節目として、回転する光の筋・虹色にうねる特大文字・7秒間という
+// 長めの表示時間で目立たせる。トリガーの仕組みはWeeklyAchievementCelebrationPopupと同じ
+// （showが新規達成を検知した瞬間だけ表示を開始し、既読管理で月替わりごとにリセットされる）。
+const MonthlyAchievementJackpotPopup: React.FC<{ show: boolean }> = ({ show }) => {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!show) return;
+    setVisible(true);
+    const timer = setTimeout(() => setVisible(false), 7000);
+    return () => clearTimeout(timer);
+  }, [show]);
+  if (!visible) return null;
+  return (
+    <div className="monthly-jackpot-overlay" role="status" aria-live="polite" onClick={() => setVisible(false)}>
+      <div className="monthly-jackpot-rays" aria-hidden="true" />
+      <div className="monthly-jackpot-rays monthly-jackpot-rays--reverse" aria-hidden="true" />
+      <div className="monthly-jackpot-content">
+        <p className="monthly-jackpot-title">大当たり!!</p>
+        <p className="monthly-jackpot-subtitle">🎉 月間目標達成、おめでとうございます！ 🎉</p>
       </div>
     </div>
   );
@@ -16062,6 +16085,8 @@ const App: React.FC = () => {
   // WeeklyAchievementCelebrationPopup用——自分が今週の目標を新規に達成したかどうか。
   // newWeeklyAchieverEmailsと同じ判定（週が変われば自然にリセットされる）を使い回す。
   const selfWeeklyIsNew = !!currentIdentity && newWeeklyAchieverEmails.has(normalizeEmail(currentIdentity.email));
+  // MonthlyAchievementJackpotPopup用——自分が今月の目標を新規に達成したかどうか。
+  const selfMonthlyIsNew = !!currentIdentity && newMonthlyAchieverEmails.has(normalizeEmail(currentIdentity.email));
 
   useEffect(() => {
     markScoutAchievementsSeen(scoutWeeklyPeriodKey, achievedWeeklyEmails);
@@ -16394,6 +16419,7 @@ const App: React.FC = () => {
       )}
 
       <WeeklyAchievementCelebrationPopup show={selfWeeklyIsNew} />
+      <MonthlyAchievementJackpotPopup show={selfMonthlyIsNew} />
       {hasSyncError && (
         <div className="sync-error-banner">
           <strong>⚠️ 一部の変更がまだGoogleドライブに保存されていません。</strong>
@@ -16534,7 +16560,7 @@ const App: React.FC = () => {
                weeklyMediaRates={currentRealWeekScoutRates}
                monthlyMediaRates={currentRealMonthScoutRates}
                weeklyIsNew={selfWeeklyIsNew}
-               monthlyIsNew={!!currentIdentity && newMonthlyAchieverEmails.has(normalizeEmail(currentIdentity.email))}
+               monthlyIsNew={selfMonthlyIsNew}
              />
              <div className="scout-achievers-row">
                <TeammateScoutAchievementList

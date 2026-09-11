@@ -2108,6 +2108,101 @@ button.agent-interview-status-badge:focus-visible {
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
+/* --- 月目標を新規達成した瞬間の「大当たり」風ポップアップ --- */
+@keyframes jackpot-ray-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes jackpot-ray-spin-reverse {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(-360deg); }
+}
+
+@keyframes jackpot-flash {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes jackpot-content-pop {
+  0% { transform: scale(0.5) rotate(-4deg); opacity: 0; }
+  60% { transform: scale(1.15) rotate(2deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+@keyframes jackpot-title-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes jackpot-gradient-shift {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}
+
+.monthly-jackpot-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle, #3a0000, #0a0000 70%);
+  cursor: pointer;
+  overflow: hidden;
+  animation: weekly-celebration-fade-in 0.2s ease-out;
+}
+
+.monthly-jackpot-rays {
+  position: absolute;
+  inset: -60%;
+  background: repeating-conic-gradient(from 0deg, #ffd700 0deg 6deg, transparent 6deg 18deg);
+  animation: jackpot-ray-spin 7s linear infinite, jackpot-flash 1s ease-in-out infinite;
+}
+
+.monthly-jackpot-rays--reverse {
+  background: repeating-conic-gradient(from 15deg, #ff3b3b 0deg 4deg, transparent 4deg 22deg);
+  animation: jackpot-ray-spin-reverse 9s linear infinite, jackpot-flash 1.3s ease-in-out infinite;
+  opacity: 0.7;
+}
+
+.monthly-jackpot-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 2rem;
+  max-width: min(90vw, 480px);
+}
+
+.monthly-jackpot-title {
+  margin: 0;
+  font-size: clamp(2.75rem, 13vw, 5.5rem);
+  font-weight: 900;
+  text-align: center;
+  line-height: 1.1;
+  background: linear-gradient(90deg, #ff3b3b, #ffd700, #39ff88, #3bb6ff, #ff3bd4, #ff3b3b);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.55);
+  filter: drop-shadow(0 0 24px rgba(255, 215, 0, 0.65));
+  animation: jackpot-content-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1), jackpot-gradient-shift 1.4s linear infinite, jackpot-title-pulse 0.6s ease-in-out infinite 0.5s;
+}
+
+.monthly-jackpot-subtitle {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #fff;
+  text-align: center;
+  letter-spacing: 0.05em;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
+  animation: jackpot-content-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) 0.15s both;
+}
+
 /* --- スカウト送信数の週次/月次目標達成バッジ --- */
 @keyframes scout-achievement-pop {
   0% { transform: scale(0.9); opacity: 0; }
