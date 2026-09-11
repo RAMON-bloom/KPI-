@@ -2086,7 +2086,7 @@ const MediaKpiCard: React.FC<{
 // 未設定（0）の間は何も表示しない（未達成を責める演出は今回のスコープ外）。
 type ScoutAchievementTier = 'achieved' | 'great';
 const SCOUT_ACHIEVEMENT_TIERS: { threshold: number; tier: ScoutAchievementTier; emoji: string; label: string }[] = [
-  { threshold: 120, tier: 'great', emoji: '🔥🎉', label: '120%達成' },
+  { threshold: 120, tier: 'great', emoji: '🏆🎉', label: '120%達成' },
   { threshold: 100, tier: 'achieved', emoji: '🎉', label: '目標達成' },
 ];
 

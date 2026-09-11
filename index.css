@@ -2099,7 +2099,7 @@ button.agent-interview-status-badge:focus-visible {
 }
 
 .scout-achievement-badge--great {
-  background: linear-gradient(135deg, #fd7e14, var(--danger-color));
+  background: linear-gradient(135deg, #ffc107, #fd7e14);
   animation: scout-achievement-pop 0.3s ease-out, scout-achievement-glow 1.8s ease-in-out infinite;
 }
 
