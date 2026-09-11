@@ -2184,6 +2184,92 @@ button.agent-interview-status-badge:focus-visible {
   animation: scout-achievement-glow 1.8s ease-in-out infinite;
 }
 
+.scout-achievers-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.scout-achievers-row > .teammate-achievement-list {
+  flex: 2 1 360px;
+  margin-bottom: 0;
+}
+
+.scout-achievers-row > .scout-cumulative-leaderboard-group {
+  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.scout-cumulative-leaderboard {
+  background-color: var(--card-bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+}
+
+.scout-cumulative-leaderboard-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-color);
+}
+
+.scout-cumulative-leaderboard ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.scout-cumulative-leaderboard-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.scout-cumulative-leaderboard-rank {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background-color: var(--info-color);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.scout-cumulative-leaderboard-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.scout-cumulative-leaderboard-team {
+  font-weight: normal;
+  font-size: 0.75rem;
+  color: var(--text-muted-color);
+}
+
+.scout-cumulative-leaderboard-count {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--info-color);
+}
+
 .scout-progress-leaderboard {
   background-color: var(--card-bg-color);
   border: 1px solid var(--border-color);
