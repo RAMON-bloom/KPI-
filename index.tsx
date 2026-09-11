@@ -2242,12 +2242,12 @@ const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchiev
             <span className="teammate-achievement-tags">
               {a.weekly && (
                 <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}`}>
-                  {a.weekly.emoji} 週{a.weekly.label}
+                  {a.weekly.emoji} 週{a.weekly.label}（{a.weekly.rate.toFixed(0)}%）
                 </span>
               )}
               {a.monthly && (
                 <span className={`teammate-achievement-tag teammate-achievement-tag--${a.monthly.tier}`}>
-                  {a.monthly.emoji} 月{a.monthly.label}
+                  {a.monthly.emoji} 月{a.monthly.label}（{a.monthly.rate.toFixed(0)}%）
                 </span>
               )}
             </span>
