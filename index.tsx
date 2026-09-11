@@ -2294,6 +2294,7 @@ const MonthlyAchievementJackpotPopup: React.FC<{ show: boolean }> = ({ show }) =
       <div className="monthly-jackpot-rays" aria-hidden="true" />
       <div className="monthly-jackpot-rays monthly-jackpot-rays--reverse" aria-hidden="true" />
       <div className="monthly-jackpot-content">
+        <img src={WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL} alt="" className="monthly-jackpot-photo" />
         <p className="monthly-jackpot-title">おめでとうございます！</p>
         <p className="monthly-jackpot-subtitle">🎉 月間目標達成 🎉</p>
       </div>
