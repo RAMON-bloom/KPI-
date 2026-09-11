@@ -2256,11 +2256,7 @@ const ScoutAchievementBanner: React.FC<{
 // 自動で消える——showは達成中ずっとtrueのままでも、このコンポーネントは初回のuseEffect
 // 発火時にしか表示を開始しないため、セッション中に何度も出てくることはない
 // （getNewScoutAchieverEmailsの既読管理により、次に同じ状態でリロードしても再表示されない）。
-// 2枚とも毎回並べて表示する（ランダムに1枚だけ選ぶ方式は不採用——ユーザーの明示的な要望）。
-const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS = [
-  '/weekly-achievement-celebration-1.jpg',
-  '/weekly-achievement-celebration-2.jpg',
-];
+const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL = '/weekly-achievement-celebration-1.jpg';
 const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }) => {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -2273,11 +2269,7 @@ const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }
   return (
     <div className="weekly-celebration-overlay" role="status" aria-live="polite" onClick={() => setVisible(false)}>
       <div className="weekly-celebration-card">
-        <div className="weekly-celebration-photos">
-          {WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URLS.map(url => (
-            <img key={url} src={url} alt="" className="weekly-celebration-photo" />
-          ))}
-        </div>
+        <img src={WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL} alt="" className="weekly-celebration-photo" />
         <p className="weekly-celebration-message">🎉 週目標達成、おめでとうございます！ 🎉</p>
       </div>
     </div>
