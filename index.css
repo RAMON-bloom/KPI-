@@ -2240,12 +2240,6 @@ button.agent-interview-status-badge:focus-visible {
   color: var(--text-muted-color);
 }
 
-.scout-progress-leaderboard-period {
-  font-weight: normal;
-  font-size: 0.75rem;
-  color: var(--info-color);
-}
-
 .scout-progress-leaderboard-gauge {
   display: block;
   width: 100%;

@@ -2262,40 +2262,35 @@ interface ScoutProgressLeaderboardEntry {
   email: string;
   displayName: string;
   teamNames: string[];
-  // どちらの期間についての「もう少し」かを表す——週・月の両方が未達成の場合は、達成率が
-  // 高い（＝達成に近い）方を代表値として1件だけ採用する（達成済みの期間はここに出てこない
-  // ——ScoutAchievementBanner/TeammateScoutAchievementListの側にすでに表示されているため）。
-  period: 'weekly' | 'monthly';
   rate: number;
 }
 
-// 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、週または月の
-// 達成率（対象媒体のうち最も低い達成率＝ボトルネック、getGatedScoutAchievementTierと同じ
-// 考え方）が高い順に並べ、上位3件を返す。1人につき週・月のどちらか達成率が高い方だけを
-// 代表値として採用する（両方とも表示すると同じ人が2回ランクインしてしまうため）。
-const buildScoutProgressLeaderboard = (
-  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; monthlyRate: number | null }[]
+// 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、達成率（対象媒体の
+// うち最も低い達成率＝ボトルネック、getGatedScoutAchievementTierと同じ考え方）が高い順に
+// 並べ、上位3件を返す。週次・月次は独立に集計する——同じ人が週次では未達成・月次では
+// 達成済み（あるいはその逆）ということがあり得るため、それぞれの期間だけで「まだ達成して
+// いないか」を判定する（両者を1つのランキングに混ぜない）。
+const rankScoutProgress = (
+  candidates: { email: string; displayName: string; teamNames: string[]; rate: number | null }[]
 ): ScoutProgressLeaderboardEntry[] => {
-  const isPending = (rate: number | null): rate is number => rate !== null && rate < 100;
   return candidates
-    .map(c => {
-      const weeklyPending = isPending(c.weeklyRate) ? c.weeklyRate : null;
-      const monthlyPending = isPending(c.monthlyRate) ? c.monthlyRate : null;
-      if (weeklyPending === null && monthlyPending === null) return null;
-      const period: 'weekly' | 'monthly' = (monthlyPending ?? -1) > (weeklyPending ?? -1) ? 'monthly' : 'weekly';
-      const rate = period === 'weekly' ? (weeklyPending as number) : (monthlyPending as number);
-      return { email: c.email, displayName: c.displayName, teamNames: c.teamNames, period, rate };
-    })
-    .filter((e): e is ScoutProgressLeaderboardEntry => e !== null)
+    .filter((c): c is { email: string; displayName: string; teamNames: string[]; rate: number } => c.rate !== null && c.rate < 100)
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 3);
 };
 
-const ScoutProgressLeaderboard: React.FC<{ entries: ScoutProgressLeaderboardEntry[] }> = ({ entries }) => {
+const buildScoutProgressLeaderboards = (
+  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; monthlyRate: number | null }[]
+): { weekly: ScoutProgressLeaderboardEntry[]; monthly: ScoutProgressLeaderboardEntry[] } => ({
+  weekly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.weeklyRate }))),
+  monthly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.monthlyRate }))),
+});
+
+const ScoutProgressLeaderboardPanel: React.FC<{ title: string; entries: ScoutProgressLeaderboardEntry[] }> = ({ title, entries }) => {
   if (entries.length === 0) return null;
   return (
     <div className="scout-progress-leaderboard">
-      <h3 className="scout-progress-leaderboard-title">🔥 達成まであと少しのメンバー TOP3</h3>
+      <h3 className="scout-progress-leaderboard-title">{title}</h3>
       <ol>
         {entries.map((e, i) => (
           <li key={e.email} className="scout-progress-leaderboard-item">
@@ -2304,7 +2299,6 @@ const ScoutProgressLeaderboard: React.FC<{ entries: ScoutProgressLeaderboardEntr
               <span className="scout-progress-leaderboard-name">
                 {e.displayName}
                 <span className="scout-progress-leaderboard-team">{e.teamNames.length > 0 ? e.teamNames.join('・') : '未所属'}</span>
-                <span className="scout-progress-leaderboard-period">{e.period === 'weekly' ? '週次' : '月次'}</span>
               </span>
               <span className="scout-progress-leaderboard-gauge" role="progressbar" aria-valuenow={Math.round(e.rate)} aria-valuemin={0} aria-valuemax={100}>
                 <span className="scout-progress-leaderboard-gauge-fill" style={{ width: `${Math.min(e.rate, 100)}%` }} />
@@ -2315,6 +2309,16 @@ const ScoutProgressLeaderboard: React.FC<{ entries: ScoutProgressLeaderboardEntr
         ))}
       </ol>
     </div>
+  );
+};
+
+const ScoutProgressLeaderboard: React.FC<{ weekly: ScoutProgressLeaderboardEntry[]; monthly: ScoutProgressLeaderboardEntry[] }> = ({ weekly, monthly }) => {
+  if (weekly.length === 0 && monthly.length === 0) return null;
+  return (
+    <>
+      <ScoutProgressLeaderboardPanel title="🔥 今週の達成まであと少しのメンバー TOP3" entries={weekly} />
+      <ScoutProgressLeaderboardPanel title="🔥 今月の達成まであと少しのメンバー TOP3" entries={monthly} />
+    </>
   );
 };
 
@@ -15633,9 +15637,10 @@ const App: React.FC = () => {
   }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn, teams]);
 
   // 個人実績タブ上部のScoutProgressLeaderboard用——自分を含む全ユーザーのうち、まだ達成して
-  // いない人を対象に「達成に最も近い」TOP3を出す（達成済みの期間はteammateScoutAchievements/
-  // 自分のScoutAchievementBannerに既に出ているため、ここでの対象は非達成の期間のみ）。
-  const scoutProgressLeaderboard = useMemo<ScoutProgressLeaderboardEntry[]>(() => {
+  // いない人を対象に「達成に最も近い」TOP3を週次・月次それぞれ独立に出す（達成済みの期間は
+  // teammateScoutAchievements/自分のScoutAchievementBannerに既に出ているため、ここでの対象は
+  // 各期間ごとの非達成分のみ）。
+  const scoutProgressLeaderboards = useMemo(() => {
     const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
     const teammateCandidates = Object.entries(displayedAllUsersData)
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
@@ -15651,7 +15656,7 @@ const App: React.FC = () => {
       weeklyRate: computeGatedScoutRate(currentRealWeekScoutRates),
       monthlyRate: computeGatedScoutRate(currentRealMonthScoutRates),
     }] : [];
-    return buildScoutProgressLeaderboard([...selfCandidate, ...teammateCandidates]);
+    return buildScoutProgressLeaderboards([...selfCandidate, ...teammateCandidates]);
   }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, currentRealWeekScoutRates, currentRealMonthScoutRates]);
 
   const entriesByDate = useMemo(() => {
@@ -16018,7 +16023,7 @@ const App: React.FC = () => {
                monthlyMediaRates={currentRealMonthScoutRates}
              />
              <TeammateScoutAchievementList achievements={teammateScoutAchievements} />
-             <ScoutProgressLeaderboard entries={scoutProgressLeaderboard} />
+             <ScoutProgressLeaderboard weekly={scoutProgressLeaderboards.weekly} monthly={scoutProgressLeaderboards.monthly} />
 
              <section aria-labelledby="calendar-title">
               <h2
