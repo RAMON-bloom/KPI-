@@ -2080,6 +2080,53 @@ const MediaKpiCard: React.FC<{
     );
 };
 
+// 週次/月次のスカウト送信数目標を達成したことを本人に称賛するためのバッジ。金銭的な報酬には
+// 一切連動しない（アプリ内表示のみ、Google Chat通知は見送り）——達成率に応じて3段階
+// （100%/120%/150%）で見た目とメッセージがより目立つようになる。目標未達成の間・目標が
+// 未設定（0）の間は何も表示しない（未達成を責める演出は今回のスコープ外）。
+type ScoutAchievementTier = 'achieved' | 'great' | 'legendary';
+const SCOUT_ACHIEVEMENT_TIERS: { threshold: number; tier: ScoutAchievementTier; emoji: string; label: string }[] = [
+  { threshold: 150, tier: 'legendary', emoji: '🏆✨🎉', label: '150%達成' },
+  { threshold: 120, tier: 'great', emoji: '🔥🎉', label: '120%達成' },
+  { threshold: 100, tier: 'achieved', emoji: '🎉', label: '目標達成' },
+];
+
+const getScoutAchievementTier = (actual: number, target: number) => {
+  if (target <= 0) return null;
+  const rate = (actual / target) * 100;
+  const matched = SCOUT_ACHIEVEMENT_TIERS.find(t => rate >= t.threshold);
+  return matched ? { ...matched, rate } : null;
+};
+
+const ScoutAchievementBadge: React.FC<{ periodLabel: string; actual: number; target: number }> = ({ periodLabel, actual, target }) => {
+  const tier = getScoutAchievementTier(actual, target);
+  if (!tier) return null;
+  return (
+    <div className={`scout-achievement-badge scout-achievement-badge--${tier.tier}`} role="status">
+      <span className="scout-achievement-badge-emoji" aria-hidden="true">{tier.emoji}</span>
+      <span className="scout-achievement-badge-text">
+        <strong>{periodLabel}スカウト送信数 {tier.label}！</strong>
+        <span className="scout-achievement-badge-detail">{actual} / {target}件（達成率{tier.rate.toFixed(0)}%）</span>
+      </span>
+    </div>
+  );
+};
+
+const ScoutAchievementBanner: React.FC<{
+  weeklyActual: number; weeklyTarget: number;
+  monthlyActual: number; monthlyTarget: number;
+}> = ({ weeklyActual, weeklyTarget, monthlyActual, monthlyTarget }) => {
+  const weeklyTier = getScoutAchievementTier(weeklyActual, weeklyTarget);
+  const monthlyTier = getScoutAchievementTier(monthlyActual, monthlyTarget);
+  if (!weeklyTier && !monthlyTier) return null;
+  return (
+    <div className="scout-achievement-banner">
+      <ScoutAchievementBadge periodLabel="今週の" actual={weeklyActual} target={weeklyTarget} />
+      <ScoutAchievementBadge periodLabel="今月の" actual={monthlyActual} target={monthlyTarget} />
+    </div>
+  );
+};
+
 // Extracted so DateEntryModal renders the same fields whether it's the signed-in user editing
 // their own day or a ミドル proxy-editing a teammate's (see middleEntryTargetEmail in App).
 const GeneralKpiFieldsFieldset: React.FC<{
@@ -15278,7 +15325,33 @@ const App: React.FC = () => {
 
       return { mediaStats, totalCandidatesSubmitted, totalInitialInterviews };
   }, [entries, viewWeekStartDate, activeMedia]);
-  
+
+  // 週次/月次のスカウト目標達成バナー（ScoutAchievementBanner）専用の集計。weeklySummaryData/
+  // monthlyTotalsは前週・前月ボタンで過去に移動できてしまう（履歴閲覧用）ため使い回せず、常に
+  // 「実際の今週・今月」を指すよう独立してnew Date()基準で計算する。
+  const currentRealWeekScoutTotals = useMemo(() => {
+    const weekStart = getStartOfWeek(new Date(), weekStartsOn);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+    const totals = calculateTotalsForRange(entries, allMedia, weekStart, weekEnd);
+    return {
+      actual: getTotalFromLump(totals, '_scoutsSent', activeMedia),
+      target: getTotalFromLump(weeklyKpiTargets, '_scoutsSent', activeMedia),
+    };
+  }, [entries, allMedia, activeMedia, weeklyKpiTargets, weekStartsOn]);
+
+  const currentRealMonthScoutTotals = useMemo(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const totals = calculateTotalsForRange(entries, allMedia, start, end);
+    return {
+      actual: getTotalFromLump(totals, '_scoutsSent', activeMedia),
+      target: getTotalFromLump(kpiTargets, '_scoutsSent', activeMedia),
+    };
+  }, [entries, allMedia, activeMedia, kpiTargets]);
+
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
   }, [entries]);
@@ -15636,6 +15709,13 @@ const App: React.FC = () => {
                  </button>
                </span>
              </div>
+
+             <ScoutAchievementBanner
+               weeklyActual={currentRealWeekScoutTotals.actual}
+               weeklyTarget={currentRealWeekScoutTotals.target}
+               monthlyActual={currentRealMonthScoutTotals.actual}
+               monthlyTarget={currentRealMonthScoutTotals.target}
+             />
 
              <section aria-labelledby="calendar-title">
               <h2
