@@ -886,14 +886,19 @@ interface UserData {
   // overwriteTeammateFeedbackPost（persistTeammateCandidateVisibilityと同じ代理書き込み
   // パターン）で行う。
   feedbackPosts?: FeedbackPost[];
-  // スカウト送信数の週次/月次目標を実際に達成した期間の記録（達成した週の開始日 or
-  // 年月の文字列の配列）。「累計達成回数TOP3」（ScoutCumulativeLeaderboard）はこのログの
-  // 件数をそのまま使う——目標値を後から変更しても、一度記録された達成は取り消したり
-  // 増えたりしない（ユーザーからの明示的な要望）。undefinedは「まだこの機能の初回集計を
-  // 行っていない」を意味し、初回のみ現在の目標で過去にさかのぼって種をまく
-  // （computeScoutAchievementPeriods）。以後は現在進行中の週・月だけを見て、まだ記録に
-  // 無ければ追記する一方通行の運用にする（App内のuseEffect参照）。
-  scoutAchievementLog?: { weekly: string[]; monthly: string[] };
+  // スカウト送信数の週次/月次目標を実際に達成した期間の記録。「累計達成回数TOP3」
+  // （ScoutCumulativeLeaderboard）はこのログの件数をそのまま使う——目標値を後から変更
+  // しても、一度確定した判定は変わらない（ユーザーからの明示的な要望）。
+  // 判定は「週・月をまたいだ時点」で確定する——まだ進行中の週・月は評価しない（advance
+  // ScoutWeeklyLog/advanceScoutMonthlyLog参照）。週・月の途中で目標値が何度変わっても、
+  // 実際に確定判定に使われるのは、その週・月が終わった後の時点で設定されている最新の
+  // 目標値だけになる。
+  // - weekly/monthly: 達成が確定した期間のキー（週は開始日 "YYYY-MM-DD"、月は "YYYY-MM"）。
+  // - lastEvaluatedWeekKey/lastEvaluatedMonthKey: 直前に判定を確定させた週・月のキー
+  //   （達成できなかった週・月も含む「もう二度と判定し直さない」境界線）。undefinedは
+  //   「まだこの機能で一度も確定判定を行っていない」——初回のみ過去全期間をさかのぼって
+  //   種をまく。
+  scoutAchievementLog?: { weekly: string[]; monthly: string[]; lastEvaluatedWeekKey?: string; lastEvaluatedMonthKey?: string };
 }
 
 // バグ報告・改善要望の種別とステータス。STAGE_COLOR_MAPと同じ考え方で、白文字と組み合わせて
@@ -2406,10 +2411,95 @@ const computeScoutAchievementPeriods = (
   return { weekly, monthly };
 };
 
-const getScoutWeekKey = (weekStartsOn: 0 | 6): string => getStartOfWeek(new Date(), weekStartsOn).toLocaleDateString('sv-SE');
-const getScoutMonthKey = (): string => {
+// scoutAchievementLogの週次側を1歩進める——「週をまたいだ場合にレコードする」ための本体。
+// 現在進行中の週は評価しない（まだ終わっていないため）。前回評価済みの次の週から、直前の
+// （既に終わっている）週までを1つずつ判定し、達成していれば追加、未達成でも「評価済み」
+// として扱う（lastEvaluatedKeyを進める）——どちらの場合も、その週の判定はこれで確定し、
+// 以後は目標値を変更しても二度と評価し直さない。週の途中で目標が何度変わっても、実際に
+// 評価するのはその週が終わった後の「最新の目標」1回だけになる（＝ユーザー要望の「最新の
+// 目標を適用」）。評価すべき既に終わった週が無ければnullを返す（呼び出し側は何もしない）。
+const advanceScoutWeeklyLog = (
+  log: { achieved: string[]; lastEvaluatedKey?: string },
+  entries: KpiEntry[],
+  allMedia: MediaEntry[],
+  awardMediaIds: string[],
+  weeklyTargets: Record<KpiKey, number>,
+  weekStartsOn: 0 | 6
+): { achieved: string[]; lastEvaluatedKey: string } | null => {
+  const lastCompletedWeekStart = getStartOfWeek(new Date(), weekStartsOn);
+  lastCompletedWeekStart.setDate(lastCompletedWeekStart.getDate() - 7);
+
+  let cursor: Date;
+  if (log.lastEvaluatedKey) {
+    cursor = new Date(log.lastEvaluatedKey + 'T00:00:00');
+    cursor.setDate(cursor.getDate() + 7);
+  } else {
+    if (entries.length === 0 || awardMediaIds.length === 0) return null;
+    cursor = getStartOfWeek(new Date(Math.min(...entries.map(e => new Date(e.date).getTime()))), weekStartsOn);
+  }
+  if (cursor.getTime() > lastCompletedWeekStart.getTime()) return null;
+
+  const achievedSet = new Set(log.achieved);
+  let lastKey = log.lastEvaluatedKey || '';
+  while (cursor.getTime() <= lastCompletedWeekStart.getTime()) {
+    const weekEnd = new Date(cursor);
+    weekEnd.setDate(cursor.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+    const rate = computeGatedScoutRate(awardMediaIds.map(id => ({
+      id,
+      name: id,
+      actual: calculateTotalsForRange(entries, allMedia, cursor, weekEnd)[`${id}_scoutsSent` as KpiKey] || 0,
+      target: weeklyTargets[`${id}_scoutsSent` as KpiKey] || 0,
+    })));
+    const key = cursor.toLocaleDateString('sv-SE');
+    if (rate !== null && rate >= 100) achievedSet.add(key);
+    lastKey = key;
+    cursor = new Date(cursor);
+    cursor.setDate(cursor.getDate() + 7);
+  }
+  return { achieved: Array.from(achievedSet), lastEvaluatedKey: lastKey };
+};
+
+// advanceScoutWeeklyLogの月次版。lastEvaluatedKeyは"YYYY-MM"形式——月の値は1始まりの表記
+// だが、そのままDateコンストラクタの月引数（0始まり）に渡すと自動的に「次の月」になるため
+// 都合が良い（例:"2026-09"→9→new Date(y,9,1)は10月＝9月の次月）。
+const advanceScoutMonthlyLog = (
+  log: { achieved: string[]; lastEvaluatedKey?: string },
+  entries: KpiEntry[],
+  allMedia: MediaEntry[],
+  awardMediaIds: string[],
+  monthlyTargets: Record<KpiKey, number>
+): { achieved: string[]; lastEvaluatedKey: string } | null => {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const lastCompletedMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
+  let cursor: Date;
+  if (log.lastEvaluatedKey) {
+    const [y, m] = log.lastEvaluatedKey.split('-').map(Number);
+    cursor = new Date(y, m, 1);
+  } else {
+    if (entries.length === 0 || awardMediaIds.length === 0) return null;
+    const earliest = new Date(Math.min(...entries.map(e => new Date(e.date).getTime())));
+    cursor = new Date(earliest.getFullYear(), earliest.getMonth(), 1);
+  }
+  if (cursor.getTime() > lastCompletedMonthStart.getTime()) return null;
+
+  const achievedSet = new Set(log.achieved);
+  let lastKey = log.lastEvaluatedKey || '';
+  while (cursor.getTime() <= lastCompletedMonthStart.getTime()) {
+    const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0, 23, 59, 59);
+    const rate = computeGatedScoutRate(awardMediaIds.map(id => ({
+      id,
+      name: id,
+      actual: calculateTotalsForRange(entries, allMedia, cursor, monthEnd)[`${id}_scoutsSent` as KpiKey] || 0,
+      target: monthlyTargets[`${id}_scoutsSent` as KpiKey] || 0,
+    })));
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
+    if (rate !== null && rate >= 100) achievedSet.add(key);
+    lastKey = key;
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+  return { achieved: Array.from(achievedSet), lastEvaluatedKey: lastKey };
 };
 
 // scoutAchievementLogがあればその件数をそのまま信頼し（目標変更の影響を受けない固定記録）、
@@ -15914,37 +16004,38 @@ const App: React.FC = () => {
     markScoutAchievementsSeen(scoutMonthlyPeriodKey, achievedMonthlyEmails);
   }, [scoutMonthlyPeriodKey, achievedMonthlyEmails]);
 
-  // 自分のscoutAchievementLog（累計達成回数の固定記録）を維持する。初回（ログ未保存）だけ
-  // 現在の目標で過去全期間にさかのぼって種をまき、以後は現在進行中の週・月だけを見て、まだ
-  // 記録に無ければ追記する——既に記録済みの過去の週・月は、後から目標値を変えても一切
-  // 書き換えない（ユーザーからの明示的な要望「一度達成としてカウントされたら、後から目標を
-  // 変えても変わらない」）。setCurrentUserDataへの書き込みは既存の自動保存（debounced Drive
-  // 同期）にそのまま乗る。
+  // 自分のscoutAchievementLog（累計達成回数の固定記録）を、週・月をまたぐたびに1歩ずつ
+  // 進める。現在進行中の週・月は評価しない——その週・月が終わって次に進んだ時点で初めて
+  // （その時点の最新の目標値で）判定が確定する。既に確定した週・月は、後から目標値を
+  // 変更しても二度と書き換わらない（ユーザーからの明示的な要望）。setCurrentUserDataへの
+  // 書き込みは既存の自動保存（debounced Drive同期）にそのまま乗る。
   useEffect(() => {
     if (!currentUserData || !currentIdentity) return;
     const existingLog = currentUserData.scoutAchievementLog;
-    let nextWeekly = existingLog?.weekly;
-    let nextMonthly = existingLog?.monthly;
-    if (!existingLog) {
-      const backfill = computeScoutAchievementPeriods(entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn);
-      nextWeekly = backfill.weekly;
-      nextMonthly = backfill.monthly;
-    } else {
-      const weekKey = getScoutWeekKey(weekStartsOn);
-      const monthKey = getScoutMonthKey();
-      if (getGatedScoutAchievementTier(currentRealWeekScoutRates) && !existingLog.weekly.includes(weekKey)) {
-        nextWeekly = [...existingLog.weekly, weekKey];
-      }
-      if (getGatedScoutAchievementTier(currentRealMonthScoutRates) && !existingLog.monthly.includes(monthKey)) {
-        nextMonthly = [...existingLog.monthly, monthKey];
-      }
+    const weeklyAdvance = advanceScoutWeeklyLog(
+      { achieved: existingLog?.weekly || [], lastEvaluatedKey: existingLog?.lastEvaluatedWeekKey },
+      entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, weekStartsOn
+    );
+    const monthlyAdvance = advanceScoutMonthlyLog(
+      { achieved: existingLog?.monthly || [], lastEvaluatedKey: existingLog?.lastEvaluatedMonthKey },
+      entries, allMedia, selfScoutAwardMediaIds, kpiTargets
+    );
+    if (weeklyAdvance || monthlyAdvance) {
+      setCurrentUserData(prev => {
+        if (!prev) return null;
+        const prevLog = prev.scoutAchievementLog;
+        return {
+          ...prev,
+          scoutAchievementLog: {
+            weekly: weeklyAdvance ? weeklyAdvance.achieved : (prevLog?.weekly || []),
+            monthly: monthlyAdvance ? monthlyAdvance.achieved : (prevLog?.monthly || []),
+            lastEvaluatedWeekKey: weeklyAdvance ? weeklyAdvance.lastEvaluatedKey : prevLog?.lastEvaluatedWeekKey,
+            lastEvaluatedMonthKey: monthlyAdvance ? monthlyAdvance.lastEvaluatedKey : prevLog?.lastEvaluatedMonthKey,
+          },
+        };
+      });
     }
-    if (!existingLog || nextWeekly !== existingLog.weekly || nextMonthly !== existingLog.monthly) {
-      const weekly = nextWeekly || [];
-      const monthly = nextMonthly || [];
-      setCurrentUserData(prev => prev ? { ...prev, scoutAchievementLog: { weekly, monthly } } : null);
-    }
-  }, [currentUserData, currentIdentity, entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn, currentRealWeekScoutRates, currentRealMonthScoutRates]);
+  }, [currentUserData, currentIdentity, entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn]);
 
   // 個人実績タブ上部のScoutProgressLeaderboard用——自分を含む全ユーザーのうち、まだ達成して
   // いない人を対象に「達成に最も近い」TOP3を週次・月次それぞれ独立に出す（達成済みの期間は
