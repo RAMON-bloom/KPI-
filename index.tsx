@@ -16490,6 +16490,15 @@ const App: React.FC = () => {
                </span>
              </div>
 
+             <div className="sync-status-bar">
+               <span className="form-helper-text" style={{ margin: 0 }}>
+                 他メンバーの達成状況・目標値は、このタブを開いたまま放置していると更新されません。
+               </span>
+               <button type="button" onClick={() => fetchAllUsersData()} disabled={isLoadingAllUsers} className="secondary-action-button">
+                 {isLoadingAllUsers ? '更新中...' : 'メンバーの達成状況を更新'}
+               </button>
+             </div>
+
              <ScoutAchievementBanner
                weeklyMediaRates={currentRealWeekScoutRates}
                monthlyMediaRates={currentRealMonthScoutRates}
