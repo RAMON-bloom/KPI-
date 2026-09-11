@@ -2251,6 +2251,31 @@ const ScoutAchievementBanner: React.FC<{
   );
 };
 
+// 週目標を新規に達成した瞬間、本人にだけアプリ画面前面に3秒間ポップアップする祝福演出。
+// showがtrueに変わった時（＝selfWeeklyIsNewが新規達成を検知した瞬間）だけ表示し、3秒後に
+// 自動で消える——showは達成中ずっとtrueのままでも、このコンポーネントは初回のuseEffect
+// 発火時にしか表示を開始しないため、セッション中に何度も出てくることはない
+// （getNewScoutAchieverEmailsの既読管理により、次に同じ状態でリロードしても再表示されない）。
+const WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL = '/weekly-achievement-celebration.jpg';
+const WeeklyAchievementCelebrationPopup: React.FC<{ show: boolean }> = ({ show }) => {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!show) return;
+    setVisible(true);
+    const timer = setTimeout(() => setVisible(false), 3000);
+    return () => clearTimeout(timer);
+  }, [show]);
+  if (!visible) return null;
+  return (
+    <div className="weekly-celebration-overlay" role="status" aria-live="polite" onClick={() => setVisible(false)}>
+      <div className="weekly-celebration-card">
+        <img src={WEEKLY_ACHIEVEMENT_CELEBRATION_IMAGE_URL} alt="" className="weekly-celebration-photo" />
+        <p className="weekly-celebration-message">🎉 週目標達成、おめでとうございます！ 🎉</p>
+      </div>
+    </div>
+  );
+};
+
 interface TeammateScoutAchievement {
   email: string;
   displayName: string;
@@ -16024,6 +16049,10 @@ const App: React.FC = () => {
     [scoutMonthlyPeriodKey, achievedMonthlyEmails]
   );
 
+  // WeeklyAchievementCelebrationPopup用——自分が今週の目標を新規に達成したかどうか。
+  // newWeeklyAchieverEmailsと同じ判定（週が変われば自然にリセットされる）を使い回す。
+  const selfWeeklyIsNew = !!currentIdentity && newWeeklyAchieverEmails.has(normalizeEmail(currentIdentity.email));
+
   useEffect(() => {
     markScoutAchievementsSeen(scoutWeeklyPeriodKey, achievedWeeklyEmails);
   }, [scoutWeeklyPeriodKey, achievedWeeklyEmails]);
@@ -16354,6 +16383,7 @@ const App: React.FC = () => {
         />
       )}
 
+      <WeeklyAchievementCelebrationPopup show={selfWeeklyIsNew} />
       {hasSyncError && (
         <div className="sync-error-banner">
           <strong>⚠️ 一部の変更がまだGoogleドライブに保存されていません。</strong>
@@ -16493,7 +16523,7 @@ const App: React.FC = () => {
              <ScoutAchievementBanner
                weeklyMediaRates={currentRealWeekScoutRates}
                monthlyMediaRates={currentRealMonthScoutRates}
-               weeklyIsNew={!!currentIdentity && newWeeklyAchieverEmails.has(normalizeEmail(currentIdentity.email))}
+               weeklyIsNew={selfWeeklyIsNew}
                monthlyIsNew={!!currentIdentity && newMonthlyAchieverEmails.has(normalizeEmail(currentIdentity.email))}
              />
              <div className="scout-achievers-row">
