@@ -2184,6 +2184,55 @@ button.agent-interview-status-badge:focus-visible {
   animation: scout-achievement-glow 1.8s ease-in-out infinite;
 }
 
+/* --- 新規達成の演出（週次＝フラッシュ、月次＝花火）--- */
+@keyframes scout-new-flash {
+  0%, 100% { filter: brightness(1); transform: scale(1); }
+  50% { filter: brightness(1.7); transform: scale(1.06); }
+}
+
+.scout-achievement-badge--flash,
+.teammate-achievement-tag--flash {
+  animation: scout-new-flash 0.5s ease-in-out 4;
+}
+
+.scout-achievement-badge--firework {
+  position: relative;
+  overflow: visible;
+}
+
+.teammate-achievement-item--firework {
+  position: relative;
+  overflow: visible;
+  box-shadow: 0 0 0 2px var(--success-color), 0 0 18px rgba(255, 193, 7, 0.55);
+}
+
+@keyframes scout-firework-spark {
+  0% { transform: rotate(var(--angle)) translateX(0) scale(1); opacity: 1; }
+  100% { transform: rotate(var(--angle)) translateX(2.6rem) scale(0); opacity: 0; }
+}
+
+.scout-firework {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.scout-firework-spark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  transform: rotate(var(--angle)) translateX(0);
+  animation: scout-firework-spark 0.9s ease-out 1 both;
+}
+
 .scout-achievers-row {
   display: flex;
   flex-wrap: wrap;

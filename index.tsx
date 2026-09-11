@@ -2131,11 +2131,82 @@ const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
 
 type ScoutAchievementResult = ReturnType<typeof getGatedScoutAchievementTier>;
 
-const ScoutAchievementBadge: React.FC<{ periodLabel: string; mediaRates: ScoutMediaRate[] }> = ({ periodLabel, mediaRates }) => {
+// 「新規で達成した」を検出するための既読管理。ローカルストレージのみに保存する
+// （閲覧者本人のブラウザだけで完結する演出用の状態であり、Driveの共有データには一切
+// 書き込まない）。キーは期間（週の開始日 or 年月）ごとに分かれるので、次の週・月に
+// なれば自然に「まだ見ていない」に戻る——過去分の掃除は行わないが、内容は
+// メールアドレスの配列だけなので肥大化しても実害はない。
+const SEEN_SCOUT_ACHIEVEMENTS_STORAGE_KEY = 'kpiMgrSeenScoutAchievements_v1';
+
+const loadSeenScoutAchievements = (): Record<string, string[]> => {
+  try {
+    const raw = localStorage.getItem(SEEN_SCOUT_ACHIEVEMENTS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+// 既に達成演出（フラッシュ・花火）を見せたメンバーをその期間について記録する。呼ぶたびに
+// localStorageへ書き込むが、内容は「現在の達成者集合」なので冪等——何度呼んでも安全。
+const markScoutAchievementsSeen = (periodKey: string, emails: string[]) => {
+  if (emails.length === 0) return;
+  try {
+    const seen = loadSeenScoutAchievements();
+    const merged = new Set((seen[periodKey] || []).map(normalizeEmail));
+    emails.forEach(email => merged.add(normalizeEmail(email)));
+    seen[periodKey] = Array.from(merged);
+    localStorage.setItem(SEEN_SCOUT_ACHIEVEMENTS_STORAGE_KEY, JSON.stringify(seen));
+  } catch {
+    // localStorageが使えない環境（プライベートモード等）——毎回「新規」扱いになるだけで、
+    // 演出が出すぎる程度の実害しかないため無視してよい。
+  }
+};
+
+// 現在の達成者のうち、この期間でまだ見せていない（＝新規に達成した）メールの集合を返す。
+const getNewScoutAchieverEmails = (periodKey: string, achievedEmails: string[]): Set<string> => {
+  const seen = loadSeenScoutAchievements();
+  const seenSet = new Set((seen[periodKey] || []).map(normalizeEmail));
+  return new Set(achievedEmails.filter(email => !seenSet.has(normalizeEmail(email))));
+};
+
+const getScoutWeeklyPeriodKey = (weekStartsOn: 0 | 6): string => `weekly:${getStartOfWeek(new Date(), weekStartsOn).toLocaleDateString('sv-SE')}`;
+const getScoutMonthlyPeriodKey = (): string => {
+  const now = new Date();
+  return `monthly:${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const FIREWORK_SPARK_COLORS = ['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb', '#ff6e40', '#ff5252', '#69f0ae'];
+
+// 月目標を新規に達成したことを一際目立たせるための花火風の演出。8方向に散る小さな
+// スパークを1回だけ再生する（CSSアニメーションのanimation-iteration-count:1で自然に止まる
+// ため、JS側で後片付けする必要はない）。
+const ScoutFireworkBurst: React.FC = () => (
+  <span className="scout-firework" aria-hidden="true">
+    {FIREWORK_SPARK_COLORS.map((color, i) => (
+      <span
+        key={i}
+        className="scout-firework-spark"
+        style={{ '--angle': `${i * 45}deg`, color, animationDelay: `${i * 0.03}s` } as React.CSSProperties}
+      />
+    ))}
+  </span>
+);
+
+const ScoutAchievementBadge: React.FC<{ periodLabel: string; mediaRates: ScoutMediaRate[]; celebration?: 'flash' | 'firework' }> = ({ periodLabel, mediaRates, celebration }) => {
   const tier = getGatedScoutAchievementTier(mediaRates);
   if (!tier) return null;
   return (
-    <div className={`scout-achievement-badge scout-achievement-badge--${tier.tier}`} role="status">
+    <div
+      className={[
+        'scout-achievement-badge',
+        `scout-achievement-badge--${tier.tier}`,
+        celebration === 'flash' ? 'scout-achievement-badge--flash' : '',
+        celebration === 'firework' ? 'scout-achievement-badge--firework' : '',
+      ].filter(Boolean).join(' ')}
+      role="status"
+    >
+      {celebration === 'firework' && <ScoutFireworkBurst />}
       <span className="scout-achievement-badge-emoji" aria-hidden="true">{tier.emoji}</span>
       <span className="scout-achievement-badge-text">
         <strong>{periodLabel}スカウト送信数 {tier.label}！</strong>
@@ -2150,14 +2221,16 @@ const ScoutAchievementBadge: React.FC<{ periodLabel: string; mediaRates: ScoutMe
 const ScoutAchievementBanner: React.FC<{
   weeklyMediaRates: ScoutMediaRate[];
   monthlyMediaRates: ScoutMediaRate[];
-}> = ({ weeklyMediaRates, monthlyMediaRates }) => {
+  weeklyIsNew: boolean;
+  monthlyIsNew: boolean;
+}> = ({ weeklyMediaRates, monthlyMediaRates, weeklyIsNew, monthlyIsNew }) => {
   const weeklyTier = getGatedScoutAchievementTier(weeklyMediaRates);
   const monthlyTier = getGatedScoutAchievementTier(monthlyMediaRates);
   if (!weeklyTier && !monthlyTier) return null;
   return (
     <div className="scout-achievement-banner">
-      <ScoutAchievementBadge periodLabel="今週の" mediaRates={weeklyMediaRates} />
-      <ScoutAchievementBadge periodLabel="今月の" mediaRates={monthlyMediaRates} />
+      <ScoutAchievementBadge periodLabel="今週の" mediaRates={weeklyMediaRates} celebration={weeklyIsNew ? 'flash' : undefined} />
+      <ScoutAchievementBadge periodLabel="今月の" mediaRates={monthlyMediaRates} celebration={monthlyIsNew ? 'firework' : undefined} />
     </div>
   );
 };
@@ -2229,30 +2302,41 @@ const resolveScoutAwardMediaIds = (email: string | undefined, teams: Team[], act
   return team?.scoutAwardMediaIds ?? allActiveIds;
 };
 
-const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchievement[] }> = ({ achievements }) => {
+const TeammateScoutAchievementList: React.FC<{
+  achievements: TeammateScoutAchievement[];
+  // まだ演出（フラッシュ・花火）を見せていないメンバーのメール集合（normalizeEmail済み）。
+  // 週次はフラッシュ、月次は花火——ScoutAchievementBannerの自分の分と同じ区別。
+  newWeeklyEmails: Set<string>;
+  newMonthlyEmails: Set<string>;
+}> = ({ achievements, newWeeklyEmails, newMonthlyEmails }) => {
   if (achievements.length === 0) return null;
   return (
     <div className="teammate-achievement-list">
       <h3 className="teammate-achievement-list-title">🎉 すでにスカウト目標を達成しているメンバー</h3>
       <ul>
-        {achievements.map(a => (
-          <li key={a.email} className="teammate-achievement-item">
-            <span className="teammate-achievement-name">{a.displayName}</span>
-            <span className="teammate-achievement-team">{a.teamNames.length > 0 ? a.teamNames.join('・') : '未所属'}</span>
-            <span className="teammate-achievement-tags">
-              {a.weekly && (
-                <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}`}>
-                  {a.weekly.emoji} 週{a.weekly.label}（{a.weekly.rate.toFixed(0)}%）
-                </span>
-              )}
-              {a.monthly && (
-                <span className={`teammate-achievement-tag teammate-achievement-tag--${a.monthly.tier}`}>
-                  {a.monthly.emoji} 月{a.monthly.label}（{a.monthly.rate.toFixed(0)}%）
-                </span>
-              )}
-            </span>
-          </li>
-        ))}
+        {achievements.map(a => {
+          const isNewWeekly = newWeeklyEmails.has(normalizeEmail(a.email));
+          const isNewMonthly = newMonthlyEmails.has(normalizeEmail(a.email));
+          return (
+            <li key={a.email} className={`teammate-achievement-item${isNewMonthly ? ' teammate-achievement-item--firework' : ''}`}>
+              {isNewMonthly && <ScoutFireworkBurst />}
+              <span className="teammate-achievement-name">{a.displayName}</span>
+              <span className="teammate-achievement-team">{a.teamNames.length > 0 ? a.teamNames.join('・') : '未所属'}</span>
+              <span className="teammate-achievement-tags">
+                {a.weekly && (
+                  <span className={`teammate-achievement-tag teammate-achievement-tag--${a.weekly.tier}${isNewWeekly ? ' teammate-achievement-tag--flash' : ''}`}>
+                    {a.weekly.emoji} 週{a.weekly.label}（{a.weekly.rate.toFixed(0)}%）
+                  </span>
+                )}
+                {a.monthly && (
+                  <span className={`teammate-achievement-tag teammate-achievement-tag--${a.monthly.tier}`}>
+                    {a.monthly.emoji} 月{a.monthly.label}（{a.monthly.rate.toFixed(0)}%）
+                  </span>
+                )}
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -15749,6 +15833,47 @@ const App: React.FC = () => {
       });
   }, [displayedAllUsersData, currentIdentity, allMedia, activeMedia, weekStartsOn, teams]);
 
+  // 「新規に達成した」演出（週次＝フラッシュ、月次＝花火）用。自分＋teammateScoutAchievements
+  // に載っている全達成者のメールを週次/月次それぞれ集め、ローカルストレージの既読記録
+  // （getNewScoutAchieverEmails）と突き合わせて「まだ見せていない＝新規」を判定する。
+  const scoutWeeklyPeriodKey = getScoutWeeklyPeriodKey(weekStartsOn);
+  const scoutMonthlyPeriodKey = getScoutMonthlyPeriodKey();
+
+  const achievedWeeklyEmails = useMemo(() => {
+    const emails: string[] = [];
+    if (currentIdentity && getGatedScoutAchievementTier(currentRealWeekScoutRates)) emails.push(currentIdentity.email);
+    teammateScoutAchievements.forEach(a => { if (a.weekly) emails.push(a.email); });
+    return emails;
+  }, [currentIdentity, currentRealWeekScoutRates, teammateScoutAchievements]);
+
+  const achievedMonthlyEmails = useMemo(() => {
+    const emails: string[] = [];
+    if (currentIdentity && getGatedScoutAchievementTier(currentRealMonthScoutRates)) emails.push(currentIdentity.email);
+    teammateScoutAchievements.forEach(a => { if (a.monthly) emails.push(a.email); });
+    return emails;
+  }, [currentIdentity, currentRealMonthScoutRates, teammateScoutAchievements]);
+
+  // 依存配列がachievedWeeklyEmails/periodKeyのみ——localStorageへの既読記録（下のuseEffect）は
+  // これらに含まれないので、既読を書き込んでもこの結果（今回のレンダーで誰を新規扱いする
+  // か）は変わらない。これにより「表示した瞬間に別の再レンダリングでフラッシュ/花火が
+  // 途中で消える」ことを防いでいる（アニメーションはCSS側のiteration-countで自然に終わる）。
+  const newWeeklyAchieverEmails = useMemo(
+    () => getNewScoutAchieverEmails(scoutWeeklyPeriodKey, achievedWeeklyEmails),
+    [scoutWeeklyPeriodKey, achievedWeeklyEmails]
+  );
+  const newMonthlyAchieverEmails = useMemo(
+    () => getNewScoutAchieverEmails(scoutMonthlyPeriodKey, achievedMonthlyEmails),
+    [scoutMonthlyPeriodKey, achievedMonthlyEmails]
+  );
+
+  useEffect(() => {
+    markScoutAchievementsSeen(scoutWeeklyPeriodKey, achievedWeeklyEmails);
+  }, [scoutWeeklyPeriodKey, achievedWeeklyEmails]);
+
+  useEffect(() => {
+    markScoutAchievementsSeen(scoutMonthlyPeriodKey, achievedMonthlyEmails);
+  }, [scoutMonthlyPeriodKey, achievedMonthlyEmails]);
+
   // 個人実績タブ上部のScoutProgressLeaderboard用——自分を含む全ユーザーのうち、まだ達成して
   // いない人を対象に「達成に最も近い」TOP3を週次・月次それぞれ独立に出す（達成済みの期間は
   // teammateScoutAchievements/自分のScoutAchievementBannerに既に出ているため、ここでの対象は
@@ -16166,9 +16291,15 @@ const App: React.FC = () => {
              <ScoutAchievementBanner
                weeklyMediaRates={currentRealWeekScoutRates}
                monthlyMediaRates={currentRealMonthScoutRates}
+               weeklyIsNew={!!currentIdentity && newWeeklyAchieverEmails.has(normalizeEmail(currentIdentity.email))}
+               monthlyIsNew={!!currentIdentity && newMonthlyAchieverEmails.has(normalizeEmail(currentIdentity.email))}
              />
              <div className="scout-achievers-row">
-               <TeammateScoutAchievementList achievements={teammateScoutAchievements} />
+               <TeammateScoutAchievementList
+                 achievements={teammateScoutAchievements}
+                 newWeeklyEmails={newWeeklyAchieverEmails}
+                 newMonthlyEmails={newMonthlyAchieverEmails}
+               />
                <ScoutCumulativeLeaderboard weekly={scoutCumulativeLeaderboards.weekly} monthly={scoutCumulativeLeaderboards.monthly} />
              </div>
              <ScoutProgressLeaderboard weekly={scoutProgressLeaderboards.weekly} monthly={scoutProgressLeaderboards.monthly} />
