@@ -15546,6 +15546,19 @@ const App: React.FC = () => {
     return Array.from(new Set(resolved));
   }, [teams, selectedTeamId, displayedAllUsersData]);
 
+  // チーム別タブのAllUsersDashboardに渡す媒体一覧——選択中のチームで「使用する媒体」
+  // （Team.mediaIds、entryActiveMediaが実績入力画面の絞り込みに使っているのと同じ設定）が
+  // 絞り込まれていれば、その媒体だけに限定する（媒体別の内訳・合計とも）。未設定のチーム、
+  // またはチーム未選択の場合は従来通りallMediaすべてを対象にする。全ユーザータブ
+  // （view==='all_users_kpi'）は特定のチームに紐付かないため、こことは別にallMediaをそのまま
+  // 使い続ける。
+  const teamScopedMedia = useMemo(() => {
+    if (!selectedTeamId) return allMedia;
+    const team = teams.find(t => t.id === selectedTeamId);
+    if (!team?.mediaIds) return allMedia;
+    return allMedia.filter(m => team.mediaIds!.includes(m.id));
+  }, [allMedia, teams, selectedTeamId]);
+
   // A stale per-member selection from a previously-viewed team would otherwise silently narrow
   // (or entirely empty out, if none of its emails overlap) the newly-selected team's dashboard.
   useEffect(() => { setTeamComparisonUserEmails([]); }, [selectedTeamId]);
@@ -15604,10 +15617,13 @@ const App: React.FC = () => {
       : allEntries;
     if (periodFilteredEntries.length === 0) return null;
 
+    // チーム別タブは選択中チームの「使用する媒体」（teamScopedMedia）に絞る。全ユーザー/
+    // 個人実績タブは特定のチームに紐付かないため従来通りallMediaすべてを対象にする。
+    const mediaForDowChart = view === 'team_kpi' ? teamScopedMedia : allMedia;
     periodFilteredEntries.forEach(entry => {
         const dayOfWeek = new Date(entry.date).getDay();
-        const scouts = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutsSent` as KpiKey] || 0), 0);
-        const replies = allMedia.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutReplies` as KpiKey] || 0), 0);
+        const scouts = mediaForDowChart.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutsSent` as KpiKey] || 0), 0);
+        const replies = mediaForDowChart.reduce((sum, source) => sum + (entry.values[`${source.id}_scoutReplies` as KpiKey] || 0), 0);
         scoutsByDay[dayOfWeek] += scouts;
         repliesByDay[dayOfWeek] += replies;
     });
@@ -15626,7 +15642,7 @@ const App: React.FC = () => {
             }
         ]
     };
-  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, comparisonUsers, dowPeriodOverride, personalDowPeriodOverride]);
+  }, [entries, view, displayedAllUsersData, selectedTeamMemberEmails, allMedia, teamScopedMedia, comparisonUsers, dowPeriodOverride, personalDowPeriodOverride]);
 
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
@@ -16828,7 +16844,7 @@ const App: React.FC = () => {
               <AllUsersDashboard
                   users={teamComparisonUsers}
                   allUsersData={displayedAllUsersData}
-                  allMedia={allMedia}
+                  allMedia={teamScopedMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
                   weekStartDate={viewWeekStartDate}
                   onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
