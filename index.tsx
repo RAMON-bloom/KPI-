@@ -1021,6 +1021,15 @@ interface Team {
   // （2026-09-08、チームごとの専用スペースをやめて共通スペースに一本化する方針に変更。
   // kpi-mgr-team-chat-webhook-history参照）。
   chatWebhooks?: Partial<Record<string, TeamChatWebhookConfig>>;
+  // スカウト送信数の週次/月次目標達成バッジ（ScoutAchievementBanner/TeamsAchievementList）の
+  // 表彰対象媒体、MediaEntry.id単位。mediaIds（実績入力画面に出す媒体の絞り込み）とは別の設定
+  // ——実績入力の対象範囲と表彰の対象範囲は必ずしも一致しないため独立させている。undefined =
+  // 絞り込みなし（現在有効な媒体すべてが対象、この機能導入前と同じ挙動）。表彰は「対象とした
+  // 媒体すべてが個別に達成率（100%/120%）を満たす」ANDゲート——1つでも対象媒体の達成率が
+  // 基準未満なら表彰されない（合計値の帳尻合わせでは達成にならない）。空配列を明示的に設定
+  // すると対象媒体ゼロ＝そのチームでは表彰そのものが成立しなくなる。複数チームに所属する
+  // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
+  scoutAwardMediaIds?: string[];
 }
 
 interface TeamChatWebhookConfig {
@@ -2082,51 +2091,69 @@ const MediaKpiCard: React.FC<{
 
 // 週次/月次のスカウト送信数目標を達成したことを本人に称賛するためのバッジ。金銭的な報酬には
 // 一切連動しない（アプリ内表示のみ、Google Chat通知は見送り）——達成率に応じて2段階
-// （100%/120%）で見た目とメッセージがより目立つようになる。目標未達成の間・目標が
-// 未設定（0）の間は何も表示しない（未達成を責める演出は今回のスコープ外）。
+// （100%/120%）で見た目とメッセージがより目立つようになる。目標未達成の間・対象媒体が
+// 1つも無い間は何も表示しない（未達成を責める演出は今回のスコープ外）。
+//
+// チームごとに「表彰の対象媒体」（Team.scoutAwardMediaIds）を選べるようにしたのに伴い、判定は
+// 「対象媒体を合計してから達成率を見る」のではなく「対象とした媒体すべてが個別に達成率を
+// 満たして初めて表彰される」ANDゲート方式にしている——1媒体でも基準未満なら他媒体の超過分では
+// 埋め合わせできない。表示する達成率は対象媒体のうち最も低い達成率（ボトルネック）。
 type ScoutAchievementTier = 'achieved' | 'great';
 const SCOUT_ACHIEVEMENT_TIERS: { threshold: number; tier: ScoutAchievementTier; emoji: string; label: string }[] = [
   { threshold: 120, tier: 'great', emoji: '🏆🎉', label: '120%達成' },
   { threshold: 100, tier: 'achieved', emoji: '🎉', label: '目標達成' },
 ];
 
-const getScoutAchievementTier = (actual: number, target: number) => {
-  if (target <= 0) return null;
-  const rate = (actual / target) * 100;
+interface ScoutMediaRate {
+  id: string;
+  name: string;
+  actual: number;
+  target: number;
+}
+
+const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
+  // targetが未設定（0）の対象媒体は判定から除外する——設定漏れで永久に達成不能になるのを防ぐ。
+  // 除外した結果、判定できる媒体が1つも残らない場合は「対象媒体なし」と同じ扱いで非表示。
+  const eligible = mediaRates.filter(m => m.target > 0);
+  if (eligible.length === 0) return null;
+  const rate = Math.min(...eligible.map(m => (m.actual / m.target) * 100));
   const matched = SCOUT_ACHIEVEMENT_TIERS.find(t => rate >= t.threshold);
-  return matched ? { ...matched, rate } : null;
+  return matched ? { ...matched, rate, mediaNames: eligible.map(m => m.name) } : null;
 };
 
-const ScoutAchievementBadge: React.FC<{ periodLabel: string; actual: number; target: number }> = ({ periodLabel, actual, target }) => {
-  const tier = getScoutAchievementTier(actual, target);
+type ScoutAchievementResult = ReturnType<typeof getGatedScoutAchievementTier>;
+
+const ScoutAchievementBadge: React.FC<{ periodLabel: string; mediaRates: ScoutMediaRate[] }> = ({ periodLabel, mediaRates }) => {
+  const tier = getGatedScoutAchievementTier(mediaRates);
   if (!tier) return null;
   return (
     <div className={`scout-achievement-badge scout-achievement-badge--${tier.tier}`} role="status">
       <span className="scout-achievement-badge-emoji" aria-hidden="true">{tier.emoji}</span>
       <span className="scout-achievement-badge-text">
         <strong>{periodLabel}スカウト送信数 {tier.label}！</strong>
-        <span className="scout-achievement-badge-detail">{actual} / {target}件（達成率{tier.rate.toFixed(0)}%）</span>
+        <span className="scout-achievement-badge-detail">
+          対象媒体（{tier.mediaNames.join('、')}）すべてで達成率{tier.rate.toFixed(0)}%以上
+        </span>
       </span>
     </div>
   );
 };
 
 const ScoutAchievementBanner: React.FC<{
-  weeklyActual: number; weeklyTarget: number;
-  monthlyActual: number; monthlyTarget: number;
-}> = ({ weeklyActual, weeklyTarget, monthlyActual, monthlyTarget }) => {
-  const weeklyTier = getScoutAchievementTier(weeklyActual, weeklyTarget);
-  const monthlyTier = getScoutAchievementTier(monthlyActual, monthlyTarget);
+  weeklyMediaRates: ScoutMediaRate[];
+  monthlyMediaRates: ScoutMediaRate[];
+}> = ({ weeklyMediaRates, monthlyMediaRates }) => {
+  const weeklyTier = getGatedScoutAchievementTier(weeklyMediaRates);
+  const monthlyTier = getGatedScoutAchievementTier(monthlyMediaRates);
   if (!weeklyTier && !monthlyTier) return null;
   return (
     <div className="scout-achievement-banner">
-      <ScoutAchievementBadge periodLabel="今週の" actual={weeklyActual} target={weeklyTarget} />
-      <ScoutAchievementBadge periodLabel="今月の" actual={monthlyActual} target={monthlyTarget} />
+      <ScoutAchievementBadge periodLabel="今週の" mediaRates={weeklyMediaRates} />
+      <ScoutAchievementBadge periodLabel="今月の" mediaRates={monthlyMediaRates} />
     </div>
   );
 };
 
-type ScoutAchievementResult = ReturnType<typeof getScoutAchievementTier>;
 interface TeammateScoutAchievement {
   email: string;
   displayName: string;
@@ -2137,38 +2164,56 @@ interface TeammateScoutAchievement {
   monthly: ScoutAchievementResult;
 }
 
-// 他メンバーのUserData1人分について、実際の今週・今月のスカウト送信数が目標を達成しているか
-// を判定する。ScoutAchievementBanner用に自分の分だけAppコンポーネント内で個別計算している
-// currentRealWeekScoutTotals/currentRealMonthScoutTotalsと同じ考え方（週/月とも「表示中の
+// 他メンバーのUserData1人分について、実際の今週・今月のスカウト送信数が「そのメンバーの
+// （先頭の）所属チームで表彰対象に選ばれている媒体すべて」で達成率を満たしているかを判定する。
+// ScoutAchievementBanner用に自分の分だけAppコンポーネント内で個別計算している
+// currentRealWeekScoutRates/currentRealMonthScoutRatesと同じ考え方（週/月とも「表示中の
 // 期間」ではなく「実際の今」基準）を、他メンバー全員分にまとめて適用するための純関数。
 const computeUserScoutAchievement = (
   data: UserData,
   allMedia: MediaEntry[],
-  activeMedia: MediaEntry[],
+  awardMediaIds: string[],
   weekStartsOn: 0 | 6
 ): { weekly: ScoutAchievementResult; monthly: ScoutAchievementResult } => {
   const now = new Date();
   const entries = data.entries || [];
+  const mediaName = (id: string) => allMedia.find(m => m.id === id)?.name || id;
 
   const weekStart = getStartOfWeek(now, weekStartsOn);
   const weekEnd = new Date(weekStart);
   weekEnd.setDate(weekStart.getDate() + 6);
   weekEnd.setHours(23, 59, 59, 999);
   const weeklyTotals = calculateTotalsForRange(entries, allMedia, weekStart, weekEnd);
-  const weekly = getScoutAchievementTier(
-    getTotalFromLump(weeklyTotals, '_scoutsSent', activeMedia),
-    getTotalFromLump(data.weeklyKpiTargets || {}, '_scoutsSent', activeMedia),
-  );
+  const weeklyRates: ScoutMediaRate[] = awardMediaIds.map(id => ({
+    id,
+    name: mediaName(id),
+    actual: weeklyTotals[`${id}_scoutsSent` as KpiKey] || 0,
+    target: (data.weeklyKpiTargets || {})[`${id}_scoutsSent` as KpiKey] || 0,
+  }));
 
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
   const monthlyTotals = calculateTotalsForRange(entries, allMedia, monthStart, monthEnd);
-  const monthly = getScoutAchievementTier(
-    getTotalFromLump(monthlyTotals, '_scoutsSent', activeMedia),
-    getTotalFromLump(data.kpiTargets || {}, '_scoutsSent', activeMedia),
-  );
+  const monthlyRates: ScoutMediaRate[] = awardMediaIds.map(id => ({
+    id,
+    name: mediaName(id),
+    actual: monthlyTotals[`${id}_scoutsSent` as KpiKey] || 0,
+    target: (data.kpiTargets || {})[`${id}_scoutsSent` as KpiKey] || 0,
+  }));
 
-  return { weekly, monthly };
+  return { weekly: getGatedScoutAchievementTier(weeklyRates), monthly: getGatedScoutAchievementTier(monthlyRates) };
+};
+
+// あるメンバー（メール）が実際に表彰判定の対象とする媒体ID一覧を解決する——所属チームの
+// scoutAwardMediaIdsが設定されていればそれ、未設定またはどのチームにも属さない場合は現在
+// 有効な媒体すべて（この機能導入前と同じ挙動）。複数チームに所属する場合は、他の所属判定
+// （myTeamId・entryActiveMedia等）と同じく先頭のチームの設定を採用する。
+const resolveScoutAwardMediaIds = (email: string | undefined, teams: Team[], activeMedia: MediaEntry[]): string[] => {
+  const allActiveIds = activeMedia.map(m => m.id);
+  if (!email) return allActiveIds;
+  const normalized = normalizeEmail(email);
+  const team = teams.find(t => t.memberEmails.some(e => normalizeEmail(e) === normalized));
+  return team?.scoutAwardMediaIds ?? allActiveIds;
 };
 
 const TeammateScoutAchievementList: React.FC<{ achievements: TeammateScoutAchievement[] }> = ({ achievements }) => {
@@ -4829,6 +4874,7 @@ const TeamsModal: React.FC<{
     onSetMemberDepartment: (email: string, department: Department | null) => void;
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
+    onSetTeamScoutAwardMedia: (teamId: string, mediaIds: string[]) => void;
     onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
     onSetTeamChatWebhookUrl: (teamId: string, featureId: string, url: string) => void;
     onCreateOrResetTeamThread: (teamId: string, featureId: string, openingText: string) => Promise<void>;
@@ -4836,7 +4882,7 @@ const TeamsModal: React.FC<{
     reportChatThreadKey: string | undefined;
     onSetReportChatWebhookUrl: (url: string) => void;
     onCreateOrResetReportThread: (openingText: string) => Promise<void>;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamScoutAwardMedia, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -4929,6 +4975,14 @@ const TeamsModal: React.FC<{
         const current = team.mediaIds ?? activeMedia.map(m => m.id);
         const next = checked ? [...current, mediaId] : current.filter(id => id !== mediaId);
         onSetTeamMedia(team.id, next);
+    };
+
+    // handleToggleTeamMediaと同じ考え方（未設定＝全媒体からの絞り込み）だが、対象は
+    // 「実績入力に出す媒体」ではなく「スカウト目標達成表彰の対象媒体」（scoutAwardMediaIds）。
+    const handleToggleTeamScoutAwardMedia = (team: Team, mediaId: string, checked: boolean) => {
+        const current = team.scoutAwardMediaIds ?? activeMedia.map(m => m.id);
+        const next = checked ? [...current, mediaId] : current.filter(id => id !== mediaId);
+        onSetTeamScoutAwardMedia(team.id, next);
     };
 
     const handleAddMember = (teamId: string, emailOverride?: string) => {
@@ -5227,6 +5281,35 @@ const TeamsModal: React.FC<{
                                         ) : (
                                             <span style={{ fontSize: '0.9rem' }}>
                                                 {team.mediaIds ? (team.mediaIds.length > 0 ? activeMedia.filter(m => team.mediaIds!.includes(m.id)).map(m => m.name).join('、') : '（なし）') : 'すべての媒体'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>スカウト目標達成の表彰対象媒体</span>
+                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                            個人実績タブの達成バッジ・達成メンバー一覧は、ここでチェックした媒体すべてが個別に達成率（100%/120%）を満たした場合にのみ表彰されます（1つでも基準未満の媒体があると、他の媒体の超過分では埋め合わせできません）。未設定（すべてチェック）の場合は、登録されている媒体すべてが対象になります。
+                                        </p>
+                                        {activeMedia.length === 0 ? (
+                                            <p className="no-data-message">利用中の媒体がまだ登録されていません。</p>
+                                        ) : isEditable ? (
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                                                {activeMedia.map(m => {
+                                                    const isChecked = team.scoutAwardMediaIds ? team.scoutAwardMediaIds.includes(m.id) : true;
+                                                    return (
+                                                        <label key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.9rem' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={isChecked}
+                                                                onChange={(e) => handleToggleTeamScoutAwardMedia(team, m.id, e.target.checked)}
+                                                            />
+                                                            {m.name}
+                                                        </label>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <span style={{ fontSize: '0.9rem' }}>
+                                                {team.scoutAwardMediaIds ? (team.scoutAwardMediaIds.length > 0 ? activeMedia.filter(m => team.scoutAwardMediaIds!.includes(m.id)).map(m => m.name).join('、') : '（なし＝表彰なし）') : 'すべての媒体'}
                                             </span>
                                         )}
                                     </div>
@@ -13903,6 +13986,10 @@ const App: React.FC = () => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, mediaIds } : t)));
   };
 
+  const handleSetTeamScoutAwardMedia = (teamId: string, mediaIds: string[]) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, scoutAwardMediaIds: mediaIds } : t)));
+  };
+
   // 週間サマリー・カレンダーの週の始まりのチーム既定値。value=undefinedで日曜（既定）に戻す。
   const handleSetTeamWeekStartDay = (teamId: string, value: 'saturday' | undefined) => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
@@ -15399,33 +15486,44 @@ const App: React.FC = () => {
 
   // 週次/月次のスカウト目標達成バナー（ScoutAchievementBanner）専用の集計。weeklySummaryData/
   // monthlyTotalsは前週・前月ボタンで過去に移動できてしまう（履歴閲覧用）ため使い回せず、常に
-  // 「実際の今週・今月」を指すよう独立してnew Date()基準で計算する。
-  const currentRealWeekScoutTotals = useMemo(() => {
+  // 「実際の今週・今月」を指すよう独立してnew Date()基準で計算する。対象媒体は自分の（先頭の）
+  // 所属チームのscoutAwardMediaIds（未設定ならすべての有効媒体）。
+  const selfScoutAwardMediaIds = useMemo(
+    () => resolveScoutAwardMediaIds(currentIdentity?.email, teams, activeMedia),
+    [currentIdentity, teams, activeMedia]
+  );
+
+  const currentRealWeekScoutRates = useMemo<ScoutMediaRate[]>(() => {
     const weekStart = getStartOfWeek(new Date(), weekStartsOn);
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekStart.getDate() + 6);
     weekEnd.setHours(23, 59, 59, 999);
     const totals = calculateTotalsForRange(entries, allMedia, weekStart, weekEnd);
-    return {
-      actual: getTotalFromLump(totals, '_scoutsSent', activeMedia),
-      target: getTotalFromLump(weeklyKpiTargets, '_scoutsSent', activeMedia),
-    };
-  }, [entries, allMedia, activeMedia, weeklyKpiTargets, weekStartsOn]);
+    return selfScoutAwardMediaIds.map(id => ({
+      id,
+      name: allMedia.find(m => m.id === id)?.name || id,
+      actual: totals[`${id}_scoutsSent` as KpiKey] || 0,
+      target: weeklyKpiTargets[`${id}_scoutsSent` as KpiKey] || 0,
+    }));
+  }, [entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, weekStartsOn]);
 
-  const currentRealMonthScoutTotals = useMemo(() => {
+  const currentRealMonthScoutRates = useMemo<ScoutMediaRate[]>(() => {
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth(), 1);
     const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const totals = calculateTotalsForRange(entries, allMedia, start, end);
-    return {
-      actual: getTotalFromLump(totals, '_scoutsSent', activeMedia),
-      target: getTotalFromLump(kpiTargets, '_scoutsSent', activeMedia),
-    };
-  }, [entries, allMedia, activeMedia, kpiTargets]);
+    return selfScoutAwardMediaIds.map(id => ({
+      id,
+      name: allMedia.find(m => m.id === id)?.name || id,
+      actual: totals[`${id}_scoutsSent` as KpiKey] || 0,
+      target: kpiTargets[`${id}_scoutsSent` as KpiKey] || 0,
+    }));
+  }, [entries, allMedia, selfScoutAwardMediaIds, kpiTargets]);
 
   // 個人実績タブ上部のTeammateScoutAchievementList用——自分以外のメンバーで、既に今週/今月の
-  // スカウト送信数目標を達成している人を一覧化する（displayedAllUsersDataは自分の分も含む
-  // domain-wide全メンバーのスナップショットなので、正規化したメールで自分自身を除外する）。
+  // スカウト送信数目標（各メンバーの所属チームで選ばれた対象媒体すべて）を達成している人を
+  // 一覧化する（displayedAllUsersDataは自分の分も含むdomain-wide全メンバーのスナップショット
+  // なので、正規化したメールで自分自身を除外する）。
   const teammateScoutAchievements = useMemo<TeammateScoutAchievement[]>(() => {
     const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
     // comparisonTeamGroups等と同じく、team.memberEmailsは自由入力のため大文字小文字が食い違う
@@ -15437,7 +15535,8 @@ const App: React.FC = () => {
     return Object.entries(displayedAllUsersData)
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
-        const { weekly, monthly } = computeUserScoutAchievement(data, allMedia, activeMedia, weekStartsOn);
+        const awardMediaIds = resolveScoutAwardMediaIds(email, teams, activeMedia);
+        const { weekly, monthly } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
         if (!weekly && !monthly) return null;
         return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weekly, monthly };
       })
@@ -15583,6 +15682,7 @@ const App: React.FC = () => {
           onSetMemberDepartment={handleSetMemberDepartment}
           onToggleMiddle={handleToggleMiddle}
           onSetTeamMedia={handleSetTeamMedia}
+          onSetTeamScoutAwardMedia={handleSetTeamScoutAwardMedia}
           onSetTeamWeekStartDay={handleSetTeamWeekStartDay}
           onSetTeamChatWebhookUrl={handleSetTeamChatWebhookUrl}
           onCreateOrResetTeamThread={handleCreateOrResetTeamThread}
@@ -15808,10 +15908,8 @@ const App: React.FC = () => {
              </div>
 
              <ScoutAchievementBanner
-               weeklyActual={currentRealWeekScoutTotals.actual}
-               weeklyTarget={currentRealWeekScoutTotals.target}
-               monthlyActual={currentRealMonthScoutTotals.actual}
-               monthlyTarget={currentRealMonthScoutTotals.target}
+               weeklyMediaRates={currentRealWeekScoutRates}
+               monthlyMediaRates={currentRealMonthScoutRates}
              />
              <TeammateScoutAchievementList achievements={teammateScoutAchievements} />
 
