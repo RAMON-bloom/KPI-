@@ -2317,6 +2317,14 @@ button.agent-interview-status-badge:focus-visible {
   font-weight: 700;
   font-size: 0.9rem;
   color: var(--info-color);
+  text-align: right;
+}
+
+.scout-cumulative-leaderboard-current-rate {
+  display: block;
+  font-weight: normal;
+  font-size: 0.75rem;
+  color: var(--text-muted-color);
 }
 
 .scout-progress-leaderboard {

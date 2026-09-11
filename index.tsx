@@ -2355,8 +2355,10 @@ const TeammateScoutAchievementList: React.FC<{
   );
 };
 
-// あるメンバーの全期間の実績（entries）を対象に、実際に週次/月次それぞれスカウト目標を
+// あるメンバーの全期間の実績（entries）を対象に、既に終わった週次/月次のうちスカウト目標を
 // 達成した（対象媒体すべてが達成率100%以上）期間のキー（週は開始日、月は年月）を洗い出す。
+// 進行中の週・月は含めない（そちらはScoutMediaRate/getGatedScoutAchievementTierでライブに
+// 判定し、確定した過去分の件数に+1する形で別途扱う——resolveScoutCumulativeStatus参照）。
 // UserData.scoutAchievementLogが未保存のメンバー（この機能をまだ一度も経験していない
 // ——自分ならまだ1回もログインしていない、他メンバーならまだ達成ログを保存するセッションを
 // 開いていない）向けの、その場限りの概算にのみ使う。判定に使う対象媒体・目標値は「現在
@@ -2364,7 +2366,7 @@ const TeammateScoutAchievementList: React.FC<{
 // 現在設定されている月次目標です（表示中の月の当時の目標とは異なる場合があります）」と同じ
 // 割り切り。scoutAchievementLogがあるメンバーについては、目標を後から変えても記録済みの
 // 達成が変わらないよう、この関数を毎回呼び直すのではなくログをそのまま信頼する
-// （resolveScoutCumulativeCounts参照）。
+// （resolveScoutCumulativeStatus参照）。
 const computeScoutAchievementPeriods = (
   entries: KpiEntry[],
   allMedia: MediaEntry[],
@@ -2387,8 +2389,8 @@ const computeScoutAchievementPeriods = (
 
   const weekly: string[] = [];
   let weekCursor = getStartOfWeek(earliest, weekStartsOn);
-  const lastWeekStart = getStartOfWeek(now, weekStartsOn);
-  while (weekCursor.getTime() <= lastWeekStart.getTime()) {
+  const currentWeekStart = getStartOfWeek(now, weekStartsOn);
+  while (weekCursor.getTime() < currentWeekStart.getTime()) {
     const weekEnd = new Date(weekCursor);
     weekEnd.setDate(weekCursor.getDate() + 6);
     weekEnd.setHours(23, 59, 59, 999);
@@ -2400,8 +2402,8 @@ const computeScoutAchievementPeriods = (
 
   const monthly: string[] = [];
   let monthCursor = new Date(earliest.getFullYear(), earliest.getMonth(), 1);
-  const lastMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  while (monthCursor.getTime() <= lastMonthStart.getTime()) {
+  const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  while (monthCursor.getTime() < currentMonthStart.getTime()) {
     const monthEnd = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0, 23, 59, 59);
     const rate = gatedRateFor(calculateTotalsForRange(entries, allMedia, monthCursor, monthEnd), monthlyTargets);
     if (rate !== null && rate >= 100) monthly.push(`${monthCursor.getFullYear()}-${String(monthCursor.getMonth() + 1).padStart(2, '0')}`);
@@ -2502,22 +2504,37 @@ const advanceScoutMonthlyLog = (
   return { achieved: Array.from(achievedSet), lastEvaluatedKey: lastKey };
 };
 
+// 確定済み（過去、境界をまたいで固定された）件数に、進行中の週・月の分を加味する。
 // scoutAchievementLogがあればその件数をそのまま信頼し（目標変更の影響を受けない固定記録）、
 // 無ければその場でcomputeScoutAchievementPeriodsを使って概算する（表示専用のフォールバック
 // ——このフォールバック結果はどこにも保存しない。保存できるのは本人のセッションだけのため、
 // 他メンバーの分をここで勝手に確定させるわけにはいかない）。
-const resolveScoutCumulativeCounts = (
+// 進行中の週・月は、currentWeeklyTier/currentMonthlyTier（getGatedScoutAchievementTierの
+// 結果、呼び出し側がライブに計算したもの）が達成していれば+1する——確定分とは別枠で、目標が
+// 変わればこの回だけその場で増減する（未確定のままレコードには一切書き込まれない）。
+const resolveScoutCumulativeStatus = (
   log: { weekly: string[]; monthly: string[] } | undefined,
   entries: KpiEntry[],
   allMedia: MediaEntry[],
   awardMediaIds: string[],
   weeklyTargets: Record<KpiKey, number>,
   monthlyTargets: Record<KpiKey, number>,
-  weekStartsOn: 0 | 6
-): { weeklyCount: number; monthlyCount: number } => {
-  if (log) return { weeklyCount: log.weekly.length, monthlyCount: log.monthly.length };
-  const periods = computeScoutAchievementPeriods(entries, allMedia, awardMediaIds, weeklyTargets, monthlyTargets, weekStartsOn);
-  return { weeklyCount: periods.weekly.length, monthlyCount: periods.monthly.length };
+  weekStartsOn: 0 | 6,
+  currentWeeklyTier: ScoutAchievementResult,
+  currentMonthlyTier: ScoutAchievementResult
+): { weeklyCount: number; monthlyCount: number; weeklyCurrentRate?: number; monthlyCurrentRate?: number } => {
+  const confirmed = log
+    ? { weekly: log.weekly.length, monthly: log.monthly.length }
+    : (() => {
+        const periods = computeScoutAchievementPeriods(entries, allMedia, awardMediaIds, weeklyTargets, monthlyTargets, weekStartsOn);
+        return { weekly: periods.weekly.length, monthly: periods.monthly.length };
+      })();
+  return {
+    weeklyCount: confirmed.weekly + (currentWeeklyTier ? 1 : 0),
+    monthlyCount: confirmed.monthly + (currentMonthlyTier ? 1 : 0),
+    weeklyCurrentRate: currentWeeklyTier?.rate,
+    monthlyCurrentRate: currentMonthlyTier?.rate,
+  };
 };
 
 interface ScoutCumulativeLeaderboardEntry {
@@ -2525,10 +2542,13 @@ interface ScoutCumulativeLeaderboardEntry {
   displayName: string;
   teamNames: string[];
   count: number;
+  // 進行中の週/月の達成が件数に含まれている場合、その達成率（未確定——目標が変われば
+  // 増減する）。含まれていない（進行中の期間はまだ未達成）場合はundefined。
+  currentRate?: number;
 }
 
 const rankScoutCumulative = (
-  candidates: { email: string; displayName: string; teamNames: string[]; count: number }[]
+  candidates: { email: string; displayName: string; teamNames: string[]; count: number; currentRate?: number }[]
 ): ScoutCumulativeLeaderboardEntry[] => candidates
   .filter(c => c.count > 0)
   .sort((a, b) => b.count - a.count || a.displayName.localeCompare(b.displayName, 'ja'))
@@ -2547,7 +2567,12 @@ const ScoutCumulativeLeaderboardPanel: React.FC<{ title: string; entries: ScoutC
               {e.displayName}
               <span className="scout-cumulative-leaderboard-team">{e.teamNames.length > 0 ? e.teamNames.join('・') : '未所属'}</span>
             </span>
-            <span className="scout-cumulative-leaderboard-count">{e.count}回</span>
+            <span className="scout-cumulative-leaderboard-count">
+              {e.count}回
+              {e.currentRate !== undefined && (
+                <span className="scout-cumulative-leaderboard-current-rate">（進行中 {e.currentRate.toFixed(0)}%）</span>
+              )}
+            </span>
           </li>
         ))}
       </ol>
@@ -16061,23 +16086,30 @@ const App: React.FC = () => {
   }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, currentRealWeekScoutRates, currentRealMonthScoutRates]);
 
   // すでにスカウト目標を達成しているメンバー一覧の右側に出す「累計達成回数TOP3」用。
-  // scoutAchievementLog（固定記録）があればその件数をそのまま使い、目標を後から変更しても
-  // 累計が変わらないようにする——無いメンバー（この機能をまだ経験していない）だけその場で
-  // 概算する（resolveScoutCumulativeCounts参照）。
+  // 確定分（過去、境界をまたいで固定された週・月）はscoutAchievementLogがあればその件数を
+  // そのまま使い、目標を後から変更しても変わらないようにする——無いメンバー（この機能を
+  // まだ経験していない）だけその場で概算する。進行中の週・月はライブに判定して+1し、達成率も
+  // 添えて表示する（目標が変われば増減する、確定するまでレコードには書き込まれない）
+  // （resolveScoutCumulativeStatus参照）。
   const scoutCumulativeLeaderboards = useMemo(() => {
     const selfEmail = currentIdentity ? normalizeEmail(currentIdentity.email) : null;
     const teammateCandidates = Object.entries(displayedAllUsersData)
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
         const awardMediaIds = resolveScoutAwardMediaIds(email, teams, activeMedia);
-        const { weeklyCount, monthlyCount } = resolveScoutCumulativeCounts(
-          data.scoutAchievementLog, data.entries || [], allMedia, awardMediaIds, data.weeklyKpiTargets || {}, data.kpiTargets || {}, weekStartsOn
+        const { weekly: currentWeeklyTier, monthly: currentMonthlyTier } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
+        const { weeklyCount, monthlyCount, weeklyCurrentRate, monthlyCurrentRate } = resolveScoutCumulativeStatus(
+          data.scoutAchievementLog, data.entries || [], allMedia, awardMediaIds, data.weeklyKpiTargets || {}, data.kpiTargets || {}, weekStartsOn,
+          currentWeeklyTier, currentMonthlyTier
         );
-        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyCount, monthlyCount };
+        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyCount, monthlyCount, weeklyCurrentRate, monthlyCurrentRate };
       });
     const selfCandidate = currentIdentity ? [(() => {
-      const { weeklyCount, monthlyCount } = resolveScoutCumulativeCounts(
-        currentUserData?.scoutAchievementLog, entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn
+      const currentWeeklyTier = getGatedScoutAchievementTier(currentRealWeekScoutRates);
+      const currentMonthlyTier = getGatedScoutAchievementTier(currentRealMonthScoutRates);
+      const { weeklyCount, monthlyCount, weeklyCurrentRate, monthlyCurrentRate } = resolveScoutCumulativeStatus(
+        currentUserData?.scoutAchievementLog, entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn,
+        currentWeeklyTier, currentMonthlyTier
       );
       return {
         email: currentIdentity.email,
@@ -16085,14 +16117,16 @@ const App: React.FC = () => {
         teamNames: teamNamesForEmail(currentIdentity.email),
         weeklyCount,
         monthlyCount,
+        weeklyCurrentRate,
+        monthlyCurrentRate,
       };
     })()] : [];
     const all = [...selfCandidate, ...teammateCandidates];
     return {
-      weekly: rankScoutCumulative(all.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, count: c.weeklyCount }))),
-      monthly: rankScoutCumulative(all.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, count: c.monthlyCount }))),
+      weekly: rankScoutCumulative(all.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, count: c.weeklyCount, currentRate: c.weeklyCurrentRate }))),
+      monthly: rankScoutCumulative(all.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, count: c.monthlyCount, currentRate: c.monthlyCurrentRate }))),
     };
-  }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, entries, weeklyKpiTargets, kpiTargets, selfScoutAwardMediaIds]);
+  }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, entries, weeklyKpiTargets, kpiTargets, selfScoutAwardMediaIds, currentRealWeekScoutRates, currentRealMonthScoutRates]);
 
   const entriesByDate = useMemo(() => {
     return new Map(entries.map(entry => [entry.date, entry.values]));
