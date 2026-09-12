@@ -2186,6 +2186,18 @@ const computeAverageScoutRate = (mediaRates: ScoutMediaRate[]): number | null =>
   return total / eligible.length;
 };
 
+// TOP3表示（平均値）が100%以上なのに実際はまだ未達成（ボトルネックとなる媒体が残っている）
+// ときに、「どの媒体があと少しなのか」を添えるための、対象媒体のうち最も達成率が低い1件。
+// 判定対象外（target未設定）の媒体は除く——computeGatedScoutRate/getGatedScoutAchievementTier
+// と同じ「対象媒体」の定義に揃える。
+const findLowestScoutMediaRate = (mediaRates: ScoutMediaRate[]): { name: string; rate: number } | null => {
+  const eligible = getEligibleScoutMediaRates(mediaRates);
+  if (eligible.length === 0) return null;
+  return eligible
+    .map(m => ({ name: m.name, rate: (m.actual / m.target) * 100 }))
+    .reduce((lowest, current) => (current.rate < lowest.rate ? current : lowest));
+};
+
 const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
   const eligible = getEligibleScoutMediaRates(mediaRates);
   const rate = computeGatedScoutRate(mediaRates);
@@ -2371,7 +2383,11 @@ const computeUserScoutAchievement = (
   allMedia: MediaEntry[],
   awardMediaIds: string[],
   weekStartsOn: 0 | 6
-): { weekly: ScoutAchievementResult; monthly: ScoutAchievementResult; weeklyRate: number | null; monthlyRate: number | null } => {
+): {
+  weekly: ScoutAchievementResult; monthly: ScoutAchievementResult;
+  weeklyRate: number | null; monthlyRate: number | null;
+  weeklyLowestMedia: { name: string; rate: number } | null; monthlyLowestMedia: { name: string; rate: number } | null;
+} => {
   const now = new Date();
   const entries = data.entries || [];
   const mediaName = (id: string) => allMedia.find(m => m.id === id)?.name || id;
@@ -2405,6 +2421,8 @@ const computeUserScoutAchievement = (
     // monthly（達成判定そのもの）とは別物で、対象媒体の進捗の単純平均。
     weeklyRate: computeAverageScoutRate(weeklyRates),
     monthlyRate: computeAverageScoutRate(monthlyRates),
+    weeklyLowestMedia: findLowestScoutMediaRate(weeklyRates),
+    monthlyLowestMedia: findLowestScoutMediaRate(monthlyRates),
   };
 };
 
@@ -2700,6 +2718,11 @@ interface ScoutProgressLeaderboardEntry {
   displayName: string;
   teamNames: string[];
   rate: number;
+  // 表示用の平均達成率(rate)が100%以上なのに実際はまだ未達成（対象媒体のうちどれか1つが
+  // 基準未満）のとき、「あと足りていないのはどの媒体か」を示すための、最も達成率が低い
+  // 対象媒体。rate<100の間は使わない（平均も100%未満なのでどのみち足りていないのが伝わる
+  // ため、わざわざ1媒体だけ名指しする必要がない）。
+  lowestMedia: { name: string; rate: number } | null;
 }
 
 // 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、表示用の達成率
@@ -2711,19 +2734,23 @@ interface ScoutProgressLeaderboardEntry {
 // 月次では達成済み（あるいはその逆）ということがあり得るため、それぞれの期間だけで判定する
 // （両者を1つのランキングに混ぜない）。
 const rankScoutProgress = (
-  candidates: { email: string; displayName: string; teamNames: string[]; rate: number | null; achieved: boolean }[]
+  candidates: { email: string; displayName: string; teamNames: string[]; rate: number | null; achieved: boolean; lowestMedia: { name: string; rate: number } | null }[]
 ): ScoutProgressLeaderboardEntry[] => {
   return candidates
-    .filter((c): c is { email: string; displayName: string; teamNames: string[]; rate: number; achieved: boolean } => c.rate !== null && !c.achieved)
+    .filter((c): c is { email: string; displayName: string; teamNames: string[]; rate: number; achieved: boolean; lowestMedia: { name: string; rate: number } | null } => c.rate !== null && !c.achieved)
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 3);
 };
 
 const buildScoutProgressLeaderboards = (
-  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; weeklyAchieved: boolean; monthlyRate: number | null; monthlyAchieved: boolean }[]
+  candidates: {
+    email: string; displayName: string; teamNames: string[];
+    weeklyRate: number | null; weeklyAchieved: boolean; weeklyLowestMedia: { name: string; rate: number } | null;
+    monthlyRate: number | null; monthlyAchieved: boolean; monthlyLowestMedia: { name: string; rate: number } | null;
+  }[]
 ): { weekly: ScoutProgressLeaderboardEntry[]; monthly: ScoutProgressLeaderboardEntry[] } => ({
-  weekly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.weeklyRate, achieved: c.weeklyAchieved }))),
-  monthly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.monthlyRate, achieved: c.monthlyAchieved }))),
+  weekly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.weeklyRate, achieved: c.weeklyAchieved, lowestMedia: c.weeklyLowestMedia }))),
+  monthly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.monthlyRate, achieved: c.monthlyAchieved, lowestMedia: c.monthlyLowestMedia }))),
 });
 
 const ScoutProgressLeaderboardPanel: React.FC<{ title: string; entries: ScoutProgressLeaderboardEntry[] }> = ({ title, entries }) => {
@@ -2743,6 +2770,14 @@ const ScoutProgressLeaderboardPanel: React.FC<{ title: string; entries: ScoutPro
               <span className="scout-progress-leaderboard-gauge" role="progressbar" aria-valuenow={Math.round(e.rate)} aria-valuemin={0} aria-valuemax={100}>
                 <span className="scout-progress-leaderboard-gauge-fill" style={{ width: `${Math.min(e.rate, 100)}%` }} />
               </span>
+              {/* 平均は100%以上でも対象媒体のどれかが基準未満で実際にはまだ未達成、という
+                  ケース（このリスト自体が「まだ未達成」限定なので起こり得る）だけ、足りて
+                  いない媒体名とその達成率を添える。 */}
+              {e.rate >= 100 && e.lowestMedia && (
+                <span className="scout-progress-leaderboard-lowest-media">
+                  あと一歩: {e.lowestMedia.name} {e.lowestMedia.rate.toFixed(0)}%
+                </span>
+              )}
             </span>
             <span className="scout-progress-leaderboard-percent">{e.rate.toFixed(0)}%</span>
           </li>
@@ -16366,8 +16401,8 @@ const App: React.FC = () => {
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
         const awardMediaIds = resolveScoutAwardMediaIds(email, teams, activeMedia);
-        const { weekly, monthly, weeklyRate, monthlyRate } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
-        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyRate, weeklyAchieved: weekly !== null, monthlyRate, monthlyAchieved: monthly !== null };
+        const { weekly, monthly, weeklyRate, monthlyRate, weeklyLowestMedia, monthlyLowestMedia } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
+        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyRate, weeklyAchieved: weekly !== null, weeklyLowestMedia, monthlyRate, monthlyAchieved: monthly !== null, monthlyLowestMedia };
       });
     const selfCandidate = currentIdentity ? [{
       email: currentIdentity.email,
@@ -16375,8 +16410,10 @@ const App: React.FC = () => {
       teamNames: teamNamesForEmail(currentIdentity.email),
       weeklyRate: computeAverageScoutRate(currentRealWeekScoutRates),
       weeklyAchieved: getGatedScoutAchievementTier(currentRealWeekScoutRates) !== null,
+      weeklyLowestMedia: findLowestScoutMediaRate(currentRealWeekScoutRates),
       monthlyRate: computeAverageScoutRate(currentRealMonthScoutRates),
       monthlyAchieved: getGatedScoutAchievementTier(currentRealMonthScoutRates) !== null,
+      monthlyLowestMedia: findLowestScoutMediaRate(currentRealMonthScoutRates),
     }] : [];
     return buildScoutProgressLeaderboards([...selfCandidate, ...teammateCandidates]);
   }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, currentRealWeekScoutRates, currentRealMonthScoutRates]);
