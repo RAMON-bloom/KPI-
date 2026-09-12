@@ -857,6 +857,11 @@ interface UserData {
   entries: KpiEntry[];
   kpiTargets: Record<KpiKey, number>;
   weeklyKpiTargets: Record<KpiKey, number>;
+  // weeklyKpiTargetsを最後に編集したタイムスタンプ（ISO文字列）。週の途中で目標を変更すると
+  // 進行中の週の進捗・達成判定にも即座に反映される仕様（advanceScoutWeeklyLog参照）のため、
+  // 「今週まだ目標を変更した」ことを画面上で分かりやすく示す目的だけに使う。判定ロジック自体
+  // には使わない。
+  weeklyKpiTargetsUpdatedAt?: string;
   dailyKpiTargets: Record<KpiKey, number>;
   candidates: Candidate[];
   displayName?: string;
@@ -873,6 +878,14 @@ interface UserData {
   // sign-in (see the seeding effect near sectionVisibility) so later in-session toggles aren't
   // clobbered by re-applying this same saved value on every unrelated data change.
   allUsersSectionDefaults?: Partial<Record<Extract<SectionVisibilityKeys, `allUsers${string}`>, boolean>>;
+  // 同じ全ユーザー/チーム別ダッシュボードの、カード（全ユーザーの進捗・想定粗利・週間サマリー
+  // 等）の表示順。上のallUsersSectionDefaultsが開閉状態だけを保存するのに対し、こちらは並び順
+  // 専用——ヘッダーの▲▼ボタン（AllUsersDashboardのrenderSectionMoveControls）で動かすたびに
+  // その場でここへ書き込まれ、開閉状態のような「保存ボタンを押すまで反映されない」仕組みでは
+  // なく他の実績データと同じくすぐに保存される。並びの正規化はresolveAllUsersSectionOrder
+  // （読み込み側で欠けたキーの補完・不正なキーの除去まで行う）に一本化しているため、ここでは
+  // 生の配列をそのまま保持するだけでよい。
+  allUsersSectionOrder?: AllUsersSectionKey[];
   // 候補者パイプライン一覧の「選考フェーズで絞り込み」— 現在チェックしているフェーズを
   // "現在の選択をデフォルトとして保存" で保存しておくと、次回このタブ（またはスコープ）を
   // 開いた時に選択済みの状態から始められる。スコープ（自分/全ユーザー/チーム/ユーザー別）ごとに
@@ -1963,10 +1976,14 @@ const WeeklySummary: React.FC<{
   weekStartDate: Date;
   data: WeeklyData;
   weeklyKpiTargets: Record<KpiKey, number>;
+  // 今週まだ目標を変更したか（表示専用）を判定するための最終変更日時。advanceScoutWeeklyLog
+  // が「週が終わった時点の最新の目標」で確定判定する仕様（前述コメント参照）自体は変えず、
+  // 進行中の週の進捗が今どの目標を基準に表示されているのかを分かりやすくするためだけに使う。
+  weeklyKpiTargetsUpdatedAt?: string;
   onPrevWeek: () => void;
   onNextWeek: () => void;
   weekStartsOn: 0 | 6;
-}> = ({ weekStartDate, data, weeklyKpiTargets, onPrevWeek, onNextWeek, weekStartsOn }) => {
+}> = ({ weekStartDate, data, weeklyKpiTargets, weeklyKpiTargetsUpdatedAt, onPrevWeek, onNextWeek, weekStartsOn }) => {
   const endDate = new Date(weekStartDate);
   endDate.setDate(weekStartDate.getDate() + 6);
 
@@ -1974,6 +1991,9 @@ const WeeklySummary: React.FC<{
   const weekRange = `${formatDate(weekStartDate)} - ${formatDate(endDate)}`;
 
   const isThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === weekStartDate.getTime();
+  const targetChangedThisWeek = isThisWeek
+    && !!weeklyKpiTargetsUpdatedAt
+    && new Date(weeklyKpiTargetsUpdatedAt).getTime() >= weekStartDate.getTime();
 
   return (
     <div className="weekly-summary-container">
@@ -1984,6 +2004,11 @@ const WeeklySummary: React.FC<{
           <button onClick={onNextWeek} disabled={isThisWeek} aria-label="次の週へ">次の週 &gt;</button>
         </div>
       </div>
+      {targetChangedThisWeek && (
+        <p className="weekly-target-change-notice">
+          今週の目標は{formatDate(new Date(weeklyKpiTargetsUpdatedAt as string))}に変更されています。以下は現在設定されている目標に対する進捗です。今週の最終的な達成判定も、週が終わった時点で設定されている最新の目標で行われます。
+        </p>
+      )}
       <WeeklySummaryTable data={data} weeklyKpiTargets={weeklyKpiTargets} />
     </div>
   );
@@ -11705,7 +11730,11 @@ const FunnelAnalysisSection: React.FC<{
   periodLabel?: string;
   perUserProgressStats?: any[];
   grossProfitStageTotals?: StageGrossProfit[];
-}> = ({ users, allUsersData, allMedia, periodOverride = null, periodLabel = '今月', perUserProgressStats, grossProfitStageTotals }) => {
+  // AllUsersDashboard側のカード並び替え（▲▼ボタン）をこのセクションの見出しにも差し込むための
+  // 差し込み口。このセクションは他のカードと違い自前でisVisibleを持つ独立コンポーネントなので、
+  // 並び替えボタン自体はAllUsersDashboard側で組み立てたものをそのまま受け取って表示するだけ。
+  headerControls?: React.ReactNode;
+}> = ({ users, allUsersData, allMedia, periodOverride = null, periodLabel = '今月', perUserProgressStats, grossProfitStageTotals, headerControls }) => {
   const [isVisible, setIsVisible] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState('');
   const [isGeneratingSuggestion, setIsGeneratingSuggestion] = useState(false);
@@ -11950,7 +11979,10 @@ const FunnelAnalysisSection: React.FC<{
         aria-expanded={isVisible}
         aria-controls="funnel-analysis-content"
       >
-        <span>歩留まり分析（ファネル）</span>
+        <span className="section-title-label">
+          <span>歩留まり分析（ファネル）</span>
+          {headerControls}
+        </span>
         <span className={`toggle-icon ${isVisible ? 'open' : ''}`}>▼</span>
       </h2>
       <div id="funnel-analysis-content" className={`collapsible-content ${isVisible ? 'open' : ''}`}>
@@ -12493,6 +12525,23 @@ const TeamChatReminderPanel: React.FC<{
   );
 };
 
+// 全ユーザー/チーム別タブ（AllUsersDashboard）の各カードをユーザーごとに好きな順番へ並び替え、
+// 保存できるようにするためのキー一覧。'grossProfit'（showGrossProfit=falseの文脈）や'dowRate'
+// （dayOfWeekReplyRateDataが無い場合）は実際には表示されないことがあるが、並び順自体は他の
+// カードとの相対位置を保つためキーとしては常に保持しておく。
+type AllUsersSectionKey = 'progress' | 'grossProfit' | 'weeklySummary' | 'memberWeeklySummary' | 'monthlyTrend' | 'funnelAnalysis' | 'dowRate';
+const DEFAULT_ALL_USERS_SECTION_ORDER: AllUsersSectionKey[] = ['progress', 'grossProfit', 'weeklySummary', 'memberWeeklySummary', 'monthlyTrend', 'funnelAnalysis', 'dowRate'];
+// 保存されたallUsersSectionOrderは、古いバージョンで保存されたもの（キーの追加/削除前）や
+// 破損データの可能性があるため、そのまま信頼せずここで必ず正規化する——既定の並びに含まれる
+// キーのうち、保存済みの並びに現れる順を優先しつつ、保存後に追加された新しいキー（例:
+// 将来カードが増えた場合）は既定の並びの位置にそのまま補って末尾に落ちないようにする。
+const resolveAllUsersSectionOrder = (saved: AllUsersSectionKey[] | undefined): AllUsersSectionKey[] => {
+  if (!saved || saved.length === 0) return DEFAULT_ALL_USERS_SECTION_ORDER;
+  const validSaved = saved.filter((key): key is AllUsersSectionKey => DEFAULT_ALL_USERS_SECTION_ORDER.includes(key));
+  const missing = DEFAULT_ALL_USERS_SECTION_ORDER.filter(key => !validSaved.includes(key));
+  return [...validSaved, ...missing];
+};
+
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -12510,6 +12559,13 @@ const AllUsersDashboard: React.FC<{
   visibility: { progress: boolean; dowRate: boolean; weeklySummary: boolean; memberWeeklySummary: boolean; grossProfit: boolean; monthlyTrend: boolean };
   toggleSection: (key: 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit' | 'allUsersMonthlyTrend') => void;
   onSaveSectionDefaults: () => void;
+  // カードの表示順（resolveAllUsersSectionOrder適用済みのもの）と、隣接する表示中カードと
+  // 入れ替えるための移動ハンドラ。指定が無ければ既定順のまま・移動ボタンなしで表示する
+  // （呼び出し側を増やさずに済ませるための後方互換）。
+  sectionOrder?: AllUsersSectionKey[];
+  // keyAとkeyBの並び順をそのまま入れ替える汎用ハンドラ。どのキー同士を入れ替えるか
+  // （隣接する“表示中の”カードはどれか）はAllUsersDashboard側で判断して渡す。
+  onMoveSection?: (keyA: AllUsersSectionKey, keyB: AllUsersSectionKey) => void;
   showGrossProfit?: boolean;
   // 歩留まり分析（FunnelAnalysisSection）・CSV出力と連動する、ページ上部の共有「表示・出力期間」
   // バー由来の期間。以下3つの独立ナビゲーションとは別物。
@@ -12526,7 +12582,9 @@ const AllUsersDashboard: React.FC<{
   onPrevDowMonth: () => void;
   onNextDowMonth: () => void;
 }> = ({
-  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults, showGrossProfit = true,
+  users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults,
+  sectionOrder = DEFAULT_ALL_USERS_SECTION_ORDER, onMoveSection,
+  showGrossProfit = true,
   funnelPeriodOverride = null,
   progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
@@ -12676,6 +12734,55 @@ const AllUsersDashboard: React.FC<{
     };
   }), [users, allUsersData, allMedia, activeMedia, progressPeriodOverride]);
 
+  // このカードが実際に表示されるか（showGrossProfit=falseの文脈のgrossProfit、集計対象データが
+  // 無いときのdowRateは非表示）。並び替えボタンは「今実際に表示されているカード同士」の間だけで
+  // 前後に動かせればよいため、移動先の判定にはこの表示中一覧だけを使う。
+  const isAllUsersSectionRendered = (key: AllUsersSectionKey): boolean => {
+    if (key === 'grossProfit') return showGrossProfit;
+    if (key === 'dowRate') return !!dayOfWeekReplyRateData;
+    return true;
+  };
+  const visibleAllUsersSectionKeys = sectionOrder.filter(isAllUsersSectionRendered);
+  const getAdjacentVisibleSectionKey = (key: AllUsersSectionKey, direction: 'up' | 'down'): AllUsersSectionKey | null => {
+    const idx = visibleAllUsersSectionKeys.indexOf(key);
+    if (idx === -1) return null;
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    return targetIdx >= 0 && targetIdx < visibleAllUsersSectionKeys.length ? visibleAllUsersSectionKeys[targetIdx] : null;
+  };
+  // 各カードの見出しに差し込む▲▼ボタン。クリックがそのままヘッダーの開閉トグルに伝わらない
+  // よう、ここでstopPropagationしている。onMoveSection未指定（呼び出し側が並び替え非対応）の
+  // 場合は何も描画しない。
+  const renderSectionMoveControls = (key: AllUsersSectionKey, label: string) => {
+    if (!onMoveSection) return null;
+    const upTarget = getAdjacentVisibleSectionKey(key, 'up');
+    const downTarget = getAdjacentVisibleSectionKey(key, 'down');
+    return (
+      <span className="section-move-controls" role="group" aria-label={`${label}の表示順を変更`}>
+        <button
+          type="button"
+          className="section-move-button"
+          onClick={(e) => { e.stopPropagation(); if (upTarget) onMoveSection(key, upTarget); }}
+          disabled={!upTarget}
+          aria-label={`${label}を上へ移動`}
+          title="上へ移動"
+        >▲</button>
+        <button
+          type="button"
+          className="section-move-button"
+          onClick={(e) => { e.stopPropagation(); if (downTarget) onMoveSection(key, downTarget); }}
+          disabled={!downTarget}
+          aria-label={`${label}を下へ移動`}
+          title="下へ移動"
+        >▼</button>
+      </span>
+    );
+  };
+  // カードの並び順自体は、各<section>にCSSのflex orderを振ることで実現する（sectionOrder
+  // 配列の並びをそのままJSXの記述順として書き直すと差分が大きくなり事故りやすいため）。
+  // 親を display:flex; flex-direction:column にし、子要素それぞれにorderを指定するだけで
+  // 見た目上の表示順を入れ替えられる。
+  const sectionOrderStyle = (key: AllUsersSectionKey): React.CSSProperties => ({ order: sectionOrder.indexOf(key) });
+
   return (
     <>
       <div className="section-defaults-bar">
@@ -12684,7 +12791,8 @@ const AllUsersDashboard: React.FC<{
         </button>
         {justSavedSectionDefaults && <span className="section-defaults-saved-message">保存しました。次回以降この状態で表示されます。</span>}
       </div>
-      <section aria-labelledby="all-users-dashboard-title">
+      <div className="all-users-dashboard-sections">
+      <section aria-labelledby="all-users-dashboard-title" style={sectionOrderStyle('progress')}>
         <h2
             id="all-users-dashboard-title"
             className="section-title collapsible-header"
@@ -12695,7 +12803,10 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.progress}
             aria-controls="all-users-progress-content"
         >
-          <span>全ユーザーの進捗（{progressPeriodLabel}）</span>
+          <span className="section-title-label">
+            <span>全ユーザーの進捗（{progressPeriodLabel}）</span>
+            {renderSectionMoveControls('progress', '全ユーザーの進捗')}
+          </span>
           <span className={`toggle-icon ${visibility.progress ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
@@ -12831,7 +12942,7 @@ const AllUsersDashboard: React.FC<{
       </section>
 
       {showGrossProfit && (
-      <section aria-labelledby="all-users-gross-profit-title">
+      <section aria-labelledby="all-users-gross-profit-title" style={sectionOrderStyle('grossProfit')}>
         <h2
           id="all-users-gross-profit-title"
           className="section-title collapsible-header"
@@ -12842,7 +12953,10 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.grossProfit}
           aria-controls="all-users-gross-profit-content"
         >
-          <span>想定粗利（パイプライン合計・{grossProfitPeriodLabel}）</span>
+          <span className="section-title-label">
+            <span>想定粗利（パイプライン合計・{grossProfitPeriodLabel}）</span>
+            {renderSectionMoveControls('grossProfit', '想定粗利')}
+          </span>
           <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
@@ -12884,7 +12998,7 @@ const AllUsersDashboard: React.FC<{
       </section>
       )}
 
-      <section aria-labelledby="all-users-weekly-summary-title">
+      <section aria-labelledby="all-users-weekly-summary-title" style={sectionOrderStyle('weeklySummary')}>
         <h2
           id="all-users-weekly-summary-title"
           className="section-title collapsible-header"
@@ -12895,7 +13009,10 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.weeklySummary}
           aria-controls="all-users-weekly-summary-content"
         >
-          <span>週間サマリー（合計）</span>
+          <span className="section-title-label">
+            <span>週間サマリー（合計）</span>
+            {renderSectionMoveControls('weeklySummary', '週間サマリー（合計）')}
+          </span>
           <span className={`toggle-icon ${visibility.weeklySummary ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-weekly-summary-content" className={`collapsible-content ${visibility.weeklySummary ? 'open' : ''}`}>
@@ -12910,7 +13027,7 @@ const AllUsersDashboard: React.FC<{
         </div>
       </section>
 
-      <section aria-labelledby="all-users-member-weekly-summary-title">
+      <section aria-labelledby="all-users-member-weekly-summary-title" style={sectionOrderStyle('memberWeeklySummary')}>
         <h2
           id="all-users-member-weekly-summary-title"
           className="section-title collapsible-header"
@@ -12921,7 +13038,10 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.memberWeeklySummary}
           aria-controls="all-users-member-weekly-summary-content"
         >
-          <span>メンバー別 週間サマリー（{memberWeekRange}）</span>
+          <span className="section-title-label">
+            <span>メンバー別 週間サマリー（{memberWeekRange}）</span>
+            {renderSectionMoveControls('memberWeeklySummary', 'メンバー別週間サマリー')}
+          </span>
           <span className={`toggle-icon ${visibility.memberWeeklySummary ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-member-weekly-summary-content" className={`collapsible-content ${visibility.memberWeeklySummary ? 'open' : ''}`}>
@@ -12942,7 +13062,7 @@ const AllUsersDashboard: React.FC<{
         </div>
       </section>
 
-      <section aria-labelledby="all-users-monthly-trend-title">
+      <section aria-labelledby="all-users-monthly-trend-title" style={sectionOrderStyle('monthlyTrend')}>
         <h2
           id="all-users-monthly-trend-title"
           className="section-title collapsible-header"
@@ -12953,7 +13073,10 @@ const AllUsersDashboard: React.FC<{
           aria-expanded={visibility.monthlyTrend}
           aria-controls="all-users-monthly-trend-content"
         >
-          <span>月別パフォーマンストレンド</span>
+          <span className="section-title-label">
+            <span>月別パフォーマンストレンド</span>
+            {renderSectionMoveControls('monthlyTrend', '月別パフォーマンストレンド')}
+          </span>
           <span className={`toggle-icon ${visibility.monthlyTrend ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-monthly-trend-content" className={`collapsible-content ${visibility.monthlyTrend ? 'open' : ''}`}>
@@ -12961,18 +13084,21 @@ const AllUsersDashboard: React.FC<{
         </div>
       </section>
 
-      <FunnelAnalysisSection
-        users={users}
-        allUsersData={allUsersData}
-        allMedia={allMedia}
-        periodOverride={funnelPeriodOverride}
-        periodLabel={periodLabel}
-        perUserProgressStats={perUserProgressStats}
-        grossProfitStageTotals={grossProfitStageTotals}
-      />
+      <div style={sectionOrderStyle('funnelAnalysis')}>
+        <FunnelAnalysisSection
+          users={users}
+          allUsersData={allUsersData}
+          allMedia={allMedia}
+          periodOverride={funnelPeriodOverride}
+          periodLabel={periodLabel}
+          perUserProgressStats={perUserProgressStats}
+          grossProfitStageTotals={grossProfitStageTotals}
+          headerControls={renderSectionMoveControls('funnelAnalysis', '歩留まり分析（ファネル）')}
+        />
+      </div>
 
       {dayOfWeekReplyRateData && (
-        <section aria-labelledby="all-users-dow-title">
+        <section aria-labelledby="all-users-dow-title" style={sectionOrderStyle('dowRate')}>
           <h2
             id="all-users-dow-title"
             className="section-title collapsible-header"
@@ -12983,7 +13109,10 @@ const AllUsersDashboard: React.FC<{
             aria-expanded={visibility.dowRate}
             aria-controls="all-users-dow-content"
           >
-            <span>全ユーザー 曜日別返信率（{dowPeriodLabel}）</span>
+            <span className="section-title-label">
+              <span>全ユーザー 曜日別返信率（{dowPeriodLabel}）</span>
+              {renderSectionMoveControls('dowRate', '全ユーザー曜日別返信率')}
+            </span>
             <span className={`toggle-icon ${visibility.dowRate ? 'open' : ''}`}>▼</span>
           </h2>
           <div id="all-users-dow-content" className={`collapsible-content ${visibility.dowRate ? 'open' : ''}`}>
@@ -12996,6 +13125,7 @@ const AllUsersDashboard: React.FC<{
           </div>
         </section>
       )}
+      </div>
     </>
   );
 };
@@ -13568,6 +13698,24 @@ const App: React.FC = () => {
     setCurrentUserData(prev => (prev ? { ...prev, allUsersSectionDefaults } : prev));
   };
 
+  // 全ユーザー/チーム別ダッシュボードのカードの並び替え（AllUsersDashboardのヘッダー▲▼
+  // ボタン）。開閉状態と違い明示的な保存ボタンを介さず、動かした瞬間にcurrentUserDataへ
+  // 書き込んで（他の実績データと同じ通常の自動保存に乗せて）そのまま固定する。keyAとkeyBの
+  // 位置をそのまま入れ替えるだけの汎用実装で、どの2枚を入れ替えるかの判断（隣は表示中のカード
+  // かどうか等）はAllUsersDashboard側のgetAdjacentVisibleSectionKeyが担う。
+  const handleMoveAllUsersSection = (keyA: AllUsersSectionKey, keyB: AllUsersSectionKey) => {
+    setCurrentUserData(prev => {
+      if (!prev) return prev;
+      const order = resolveAllUsersSectionOrder(prev.allUsersSectionOrder);
+      const idxA = order.indexOf(keyA);
+      const idxB = order.indexOf(keyB);
+      if (idxA === -1 || idxB === -1) return prev;
+      const nextOrder = [...order];
+      [nextOrder[idxA], nextOrder[idxB]] = [nextOrder[idxB], nextOrder[idxA]];
+      return { ...prev, allUsersSectionOrder: nextOrder };
+    });
+  };
+
   // 週間サマリー・各カレンダーの週の始まり。個人で明示的に上書き（currentUserData.weekStartDay
   // ='sunday'|'saturday'）していればそれを最優先、していなければ所属チーム
   // （Team.weekStartDay）の既定値を継承し、どちらも無ければ日曜始まり。複数チームに所属する
@@ -13694,6 +13842,10 @@ const App: React.FC = () => {
     candidates: (d.candidates || []).map(({ ownerEmail, ownerLabel, ...c }) => c),
     kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
     weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
+    // 同じ理由: 週次目標の最終変更日時も許可リストに無いと保存直後は効いていても再読み込みで
+    // 消え、「今週すでに目標を変更済み」の表示（WeeklyTargetChangeNotice）が再読み込みのたびに
+    // リセットされてしまう。
+    weeklyKpiTargetsUpdatedAt: d.weeklyKpiTargetsUpdatedAt,
     dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
     displayName: d.displayName || currentIdentity?.name || '',
     feedbackPosts: d.feedbackPosts || [],
@@ -13701,6 +13853,9 @@ const App: React.FC = () => {
     // 次回ログイン時に反映されない（保存自体はDriveへ届くが、再読み込み時にnormalize()で
     // 毎回消えていたため、適用エフェクトが常に「保存済みデフォルトなし」と見えていた）。
     allUsersSectionDefaults: d.allUsersSectionDefaults,
+    // 同じ理由: カードの並び順（allUsersSectionOrder）も許可リストに無いと、並び替えた直後は
+    // 効いていても再読み込みのたびに既定順へ戻ってしまう。
+    allUsersSectionOrder: d.allUsersSectionOrder,
     // 同じ理由でここに列挙し忘れていた不具合修正: 「選考フェーズで絞り込み」のスコープ別
     // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
     // 消えて見えていた。
@@ -14820,7 +14975,11 @@ const App: React.FC = () => {
 
   const handleWeeklyTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target as { name: KpiKey; value: string };
-    setCurrentUserData(prev => prev ? ({ ...prev, weeklyKpiTargets: { ...prev.weeklyKpiTargets, [name]: value === '' ? 0 : Number(value) }}) : null);
+    setCurrentUserData(prev => prev ? ({
+      ...prev,
+      weeklyKpiTargets: { ...prev.weeklyKpiTargets, [name]: value === '' ? 0 : Number(value) },
+      weeklyKpiTargetsUpdatedAt: new Date().toISOString(),
+    }) : null);
   };
   
   const handleDailyTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -16700,6 +16859,7 @@ const App: React.FC = () => {
                     weekStartDate={viewWeekStartDate}
                     data={weeklySummaryData}
                     weeklyKpiTargets={weeklyKpiTargets}
+                    weeklyKpiTargetsUpdatedAt={currentUserData?.weeklyKpiTargetsUpdatedAt}
                     onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                     onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
                     weekStartsOn={weekStartsOn}
@@ -16941,6 +17101,12 @@ const App: React.FC = () => {
                     <form className="modal-body" style={{padding:0}}>
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 週間目標</h3>
+                           <p className="weekly-target-change-notice">
+                             ここで変更すると、進行中の今週の進捗表示・達成判定にも即座に反映されます（週が終わった時点の最新の目標で最終判定されるため）。過去に終わった週の判定には影響しません。
+                             {currentUserData?.weeklyKpiTargetsUpdatedAt && (
+                               <> 最終変更: {new Date(currentUserData.weeklyKpiTargetsUpdatedAt).toLocaleString('ja-JP')}</>
+                             )}
+                           </p>
                            <div className="media-kpi-grid">
                              {activeMedia.map(source => {
                                  const sourceKey = source.id;
@@ -17183,6 +17349,8 @@ const App: React.FC = () => {
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
+                  sectionOrder={resolveAllUsersSectionOrder(currentUserData?.allUsersSectionOrder)}
+                  onMoveSection={handleMoveAllUsersSection}
                   showGrossProfit={false}
                   funnelPeriodOverride={dashboardPeriodOverride}
                   progressPeriodOverride={progressPeriodOverride}
@@ -17304,6 +17472,8 @@ const App: React.FC = () => {
                   visibility={{ progress: sectionVisibility.allUsersProgress, dowRate: sectionVisibility.allUsersDayOfWeekRate, weeklySummary: sectionVisibility.allUsersWeeklySummary, memberWeeklySummary: sectionVisibility.allUsersMemberWeeklySummary, grossProfit: sectionVisibility.allUsersGrossProfit, monthlyTrend: sectionVisibility.allUsersMonthlyTrend }}
                   toggleSection={toggleSection}
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
+                  sectionOrder={resolveAllUsersSectionOrder(currentUserData?.allUsersSectionOrder)}
+                  onMoveSection={handleMoveAllUsersSection}
                   funnelPeriodOverride={dashboardPeriodOverride}
                   progressPeriodOverride={progressPeriodOverride}
                   onPrevProgressMonth={() => handleShiftProgressMonth(-1)}

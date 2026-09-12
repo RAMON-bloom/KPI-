@@ -466,6 +466,50 @@ section {
 }
 
 
+/* 全ユーザー/チーム別タブの各カード見出し。ラベルと並び替えボタン（.section-move-controls）を
+   1つのflexグループにまとめておくことで、.section-title.collapsible-headerのjustify-content:
+   space-betweenが「ラベル+並び替えボタン」対「開閉矢印」の2グループの間にだけ働き、並び替え
+   ボタンが見出しの真ん中に浮いて見えることなくラベルのすぐ右に収まる。 */
+.section-title-label {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* AllUsersDashboardの各カードをユーザーごとに好きな順番へ並び替えるための▲▼ボタン群。
+   見出し（.section-title.collapsible-header）のクリックで開閉トグルが走らないよう、ボタン側の
+   onClickでstopPropagationしている（CSS側では特に対策不要）。 */
+.section-move-controls {
+  display: inline-flex;
+  gap: 0.15rem;
+}
+.section-move-button {
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-muted-color);
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  cursor: pointer;
+}
+.section-move-button:hover:not(:disabled) {
+  background-color: #fff;
+  color: var(--text-color);
+}
+.section-move-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* AllUsersDashboardのカード（全ユーザーの進捗・想定粗利・週間サマリー等）をユーザーごとの
+   allUsersSectionOrderの並びどおりに表示するための土台。各カード側でstyle={{order: ...}}を
+   指定するだけで見た目上の表示順を入れ替えられる（JSXの記述順は変更しない）。 */
+.all-users-dashboard-sections {
+  display: flex;
+  flex-direction: column;
+}
+
 .toggle-icon {
   transition: transform 0.3s ease;
 }
@@ -485,6 +529,20 @@ section {
   max-height: 5000px; /* A large value */
   padding: 1.5rem;
   transition: max-height 1s ease-in, padding 0.5s ease-in;
+}
+
+/* 全ユーザー/チーム別タブの「全ユーザーの進捗」「メンバー別想定粗利」「メンバー別週間サマリー」は
+   中身がメンバー1人につき1行（または1カード）増えていく作りのため、上の.collapsible-content.open
+   の固定5000pxではメンバー数が増えるとmax-heightを超えた分がoverflow:hidden（親の.collapsible-
+   contentから継承）で丸ごと切り取られてしまい、下の方のメンバーがスクロールしても一切表示され
+   なくなる不具合があった。特にメンバー別週間サマリーはメンバー1人ごとに媒体別の表をまるまる1つ
+   表示するため他よりずっと高さが伸びやすい。実際のメンバー数の伸びに耐えられるよう、この3つの
+   セクションだけ十分大きな上限に個別に引き上げる（他の小さいセクションは開閉アニメーションの
+   滑らかさを保つため5000pxのまま）。*/
+#all-users-progress-content.open,
+#all-users-gross-profit-content.open,
+#all-users-member-weekly-summary-content.open {
+  max-height: 200000px;
 }
 
 
@@ -3064,6 +3122,16 @@ p.memo-content-text {
 }
 .gross-profit-total-item.highlight strong {
   color: var(--success-color);
+}
+.weekly-target-change-notice {
+  background-color: #eaf6fb;
+  border: 1px solid #bfe4ef;
+  border-left: 4px solid var(--info-color);
+  border-radius: var(--border-radius);
+  padding: 0.6rem 0.85rem;
+  margin: 0 0 1rem 0;
+  font-size: 0.85rem;
+  color: var(--text-color);
 }
 .gross-profit-note {
   font-size: 0.85rem;
