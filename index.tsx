@@ -2172,6 +2172,20 @@ const computeGatedScoutRate = (mediaRates: ScoutMediaRate[]): number | null => {
   return Math.min(...eligible.map(m => (m.actual / m.target) * 100));
 };
 
+// 「今週の達成まであと少しのメンバー TOP3」（ScoutProgressLeaderboard）専用の表示用達成率。
+// 実際の達成判定（バッジ・お祝い演出・累計ログ）は上のcomputeGatedScoutRate/
+// getGatedScoutAchievementTierによるボトルネック方式（対象媒体すべてが個別に基準を満たして
+// 初めて達成）のまま変えない——ここを平均に変えると「1媒体だけ極端に低くても平均で達成扱いに
+// なってしまう」事故につながるため。一方でTOP3表示は「まだ達成していない人のモチベーションを
+// 上げる」ための演出なので、1媒体の出遅れがボトルネックとして全体の数字を過度に下げてしまう
+// より、対象媒体の進捗の単純平均のほうが「あと少し感」が伝わりやすいというユーザー要望に対応。
+const computeAverageScoutRate = (mediaRates: ScoutMediaRate[]): number | null => {
+  const eligible = getEligibleScoutMediaRates(mediaRates);
+  if (eligible.length === 0) return null;
+  const total = eligible.reduce((sum, m) => sum + (m.actual / m.target) * 100, 0);
+  return total / eligible.length;
+};
+
 const getGatedScoutAchievementTier = (mediaRates: ScoutMediaRate[]) => {
   const eligible = getEligibleScoutMediaRates(mediaRates);
   const rate = computeGatedScoutRate(mediaRates);
@@ -2387,8 +2401,10 @@ const computeUserScoutAchievement = (
   return {
     weekly: getGatedScoutAchievementTier(weeklyRates),
     monthly: getGatedScoutAchievementTier(monthlyRates),
-    weeklyRate: computeGatedScoutRate(weeklyRates),
-    monthlyRate: computeGatedScoutRate(monthlyRates),
+    // weeklyRate/monthlyRateはScoutProgressLeaderboard（TOP3）専用の表示値——上のweekly/
+    // monthly（達成判定そのもの）とは別物で、対象媒体の進捗の単純平均。
+    weeklyRate: computeAverageScoutRate(weeklyRates),
+    monthlyRate: computeAverageScoutRate(monthlyRates),
   };
 };
 
@@ -2686,25 +2702,28 @@ interface ScoutProgressLeaderboardEntry {
   rate: number;
 }
 
-// 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、達成率（対象媒体の
-// うち最も低い達成率＝ボトルネック、getGatedScoutAchievementTierと同じ考え方）が高い順に
-// 並べ、上位3件を返す。週次・月次は独立に集計する——同じ人が週次では未達成・月次では
-// 達成済み（あるいはその逆）ということがあり得るため、それぞれの期間だけで「まだ達成して
-// いないか」を判定する（両者を1つのランキングに混ぜない）。
+// 全ユーザー（自分を含む）のうち、まだ達成していないメンバーを対象に、表示用の達成率
+// （対象媒体の進捗の単純平均、computeAverageScoutRate）が高い順に並べ、上位3件を返す。
+// 「まだ達成していないか」自体は表示用の平均値ではなく、実際の達成判定（achieved、
+// getGatedScoutAchievementTierによるボトルネック方式）で判定する——平均だと1媒体だけ大きく
+// 出遅れていても他媒体の超過分で100%を超えてしまい得るため、rate<100を条件にすると本当は
+// 未達成の人がリストから漏れてしまう。週次・月次は独立に集計する——同じ人が週次では未達成・
+// 月次では達成済み（あるいはその逆）ということがあり得るため、それぞれの期間だけで判定する
+// （両者を1つのランキングに混ぜない）。
 const rankScoutProgress = (
-  candidates: { email: string; displayName: string; teamNames: string[]; rate: number | null }[]
+  candidates: { email: string; displayName: string; teamNames: string[]; rate: number | null; achieved: boolean }[]
 ): ScoutProgressLeaderboardEntry[] => {
   return candidates
-    .filter((c): c is { email: string; displayName: string; teamNames: string[]; rate: number } => c.rate !== null && c.rate < 100)
+    .filter((c): c is { email: string; displayName: string; teamNames: string[]; rate: number; achieved: boolean } => c.rate !== null && !c.achieved)
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 3);
 };
 
 const buildScoutProgressLeaderboards = (
-  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; monthlyRate: number | null }[]
+  candidates: { email: string; displayName: string; teamNames: string[]; weeklyRate: number | null; weeklyAchieved: boolean; monthlyRate: number | null; monthlyAchieved: boolean }[]
 ): { weekly: ScoutProgressLeaderboardEntry[]; monthly: ScoutProgressLeaderboardEntry[] } => ({
-  weekly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.weeklyRate }))),
-  monthly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.monthlyRate }))),
+  weekly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.weeklyRate, achieved: c.weeklyAchieved }))),
+  monthly: rankScoutProgress(candidates.map(c => ({ email: c.email, displayName: c.displayName, teamNames: c.teamNames, rate: c.monthlyRate, achieved: c.monthlyAchieved }))),
 });
 
 const ScoutProgressLeaderboardPanel: React.FC<{ title: string; entries: ScoutProgressLeaderboardEntry[] }> = ({ title, entries }) => {
@@ -16347,15 +16366,17 @@ const App: React.FC = () => {
       .filter(([email]) => normalizeEmail(email) !== selfEmail)
       .map(([email, data]: [string, UserData]) => {
         const awardMediaIds = resolveScoutAwardMediaIds(email, teams, activeMedia);
-        const { weeklyRate, monthlyRate } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
-        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyRate, monthlyRate };
+        const { weekly, monthly, weeklyRate, monthlyRate } = computeUserScoutAchievement(data, allMedia, awardMediaIds, weekStartsOn);
+        return { email, displayName: data.displayName || email, teamNames: teamNamesForEmail(email), weeklyRate, weeklyAchieved: weekly !== null, monthlyRate, monthlyAchieved: monthly !== null };
       });
     const selfCandidate = currentIdentity ? [{
       email: currentIdentity.email,
       displayName: currentUserData?.displayName || currentIdentity.email,
       teamNames: teamNamesForEmail(currentIdentity.email),
-      weeklyRate: computeGatedScoutRate(currentRealWeekScoutRates),
-      monthlyRate: computeGatedScoutRate(currentRealMonthScoutRates),
+      weeklyRate: computeAverageScoutRate(currentRealWeekScoutRates),
+      weeklyAchieved: getGatedScoutAchievementTier(currentRealWeekScoutRates) !== null,
+      monthlyRate: computeAverageScoutRate(currentRealMonthScoutRates),
+      monthlyAchieved: getGatedScoutAchievementTier(currentRealMonthScoutRates) !== null,
     }] : [];
     return buildScoutProgressLeaderboards([...selfCandidate, ...teammateCandidates]);
   }, [displayedAllUsersData, currentIdentity, currentUserData, allMedia, activeMedia, weekStartsOn, teams, currentRealWeekScoutRates, currentRealMonthScoutRates]);
