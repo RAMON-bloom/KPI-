@@ -2626,8 +2626,7 @@ button.agent-interview-status-badge:focus-visible {
   background: linear-gradient(90deg, var(--info-color), var(--primary-color));
 }
 
-/* 表示用の平均達成率が100%以上でも、対象媒体のどれかがまだ基準未満で実際には未達成の
-   （＝このメンバーがまだこのリストに載っている）ときだけ出す、足りていない媒体名の注記。 */
+/* 対象媒体のうち最も達成率が低い1件（次にフォーカスすべき媒体）を常に示す注記。 */
 .scout-progress-leaderboard-lowest-media {
   font-size: 0.75rem;
   color: var(--warning-color);

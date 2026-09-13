@@ -2718,10 +2718,9 @@ interface ScoutProgressLeaderboardEntry {
   displayName: string;
   teamNames: string[];
   rate: number;
-  // 表示用の平均達成率(rate)が100%以上なのに実際はまだ未達成（対象媒体のうちどれか1つが
-  // 基準未満）のとき、「あと足りていないのはどの媒体か」を示すための、最も達成率が低い
-  // 対象媒体。rate<100の間は使わない（平均も100%未満なのでどのみち足りていないのが伝わる
-  // ため、わざわざ1媒体だけ名指しする必要がない）。
+  // 「次に何を入力すれば達成に近づくか」を一目で示すための、対象媒体のうち最も達成率が
+  // 低い1件。rate（平均）が100%未満でも、進捗表示に添えて常に表示する——平均だけでは
+  // どの媒体がボトルネックなのか分からず、「あと一歩」感が伝わりにくいため。
   lowestMedia: { name: string; rate: number } | null;
 }
 
@@ -2770,10 +2769,9 @@ const ScoutProgressLeaderboardPanel: React.FC<{ title: string; entries: ScoutPro
               <span className="scout-progress-leaderboard-gauge" role="progressbar" aria-valuenow={Math.round(e.rate)} aria-valuemin={0} aria-valuemax={100}>
                 <span className="scout-progress-leaderboard-gauge-fill" style={{ width: `${Math.min(e.rate, 100)}%` }} />
               </span>
-              {/* 平均は100%以上でも対象媒体のどれかが基準未満で実際にはまだ未達成、という
-                  ケース（このリスト自体が「まだ未達成」限定なので起こり得る）だけ、足りて
-                  いない媒体名とその達成率を添える。 */}
-              {e.rate >= 100 && e.lowestMedia && (
+              {/* 平均だけでは「次にどの媒体を伸ばせばよいか」が分からないため、対象媒体の
+                  うち最も達成率が低い1件を常に添えて、フォーカスすべき媒体を明示する。 */}
+              {e.lowestMedia && (
                 <span className="scout-progress-leaderboard-lowest-media">
                   あと一歩: {e.lowestMedia.name} {e.lowestMedia.rate.toFixed(0)}%
                 </span>
