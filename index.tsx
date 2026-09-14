@@ -225,45 +225,113 @@ const filterMediaForReport = (allMedia: MediaEntry[]): MediaEntry[] => allMedia.
 /** Sums a team's raw スカウト返信数・初回面談数 across an arbitrary period, broken down per member —
  * used by the チーム別タブの「Google Chatに送信」機能（TeamChatReportPanel）。チーム合計は送信
  * メッセージに含めない（メンバー別の内訳のみで十分という要望のため）ので、ここでも合計は返さ
- * ない。個人ごとの目標値も使わない（送るのは実数のみのため）。メンバーの並び順はmemberEmails
- * の順（team.memberEmailsの登録順）。集計対象の媒体はfilterMediaForReportで絞り込む——媒体
- * 管理で「実績レポートに反映する」をオフにした媒体はここでだけ除外される。
+ * ない。メンバーの並び順はmemberEmailsの順（team.memberEmailsの登録順）。集計対象の媒体は
+ * filterMediaForReportで絞り込む——媒体管理で「実績レポートに反映する」をオフにした媒体は
+ * ここでだけ除外される。
+ *
+ * 対象期間の実数（replies/interviews）に加えて、monthlyTarget（TeamsConfig.
+ * reportMonthlyTarget——事業部として一元設定する月間目標。全メンバー共通の同じ値が「個人の
+ * 月目標」として適用される、個人の目標設定とは別の値）に対する今月の累計実績・達成率も一緒に
+ * 返す——月間ピッチ表示（buildTeamChatReportText）用。目標が未設定（0）の場合は
+ * monthlyRepliesRate/monthlyInterviewsRateがnullになる。
  */
 const computeTeamReplyInterviewBreakdown = (
   memberEmails: string[],
   allUsersData: Record<string, UserData>,
   allMedia: MediaEntry[],
   startDate: Date,
-  endDate: Date
-): { email: string; displayName: string; replies: number; interviews: number }[] => {
+  endDate: Date,
+  monthlyTarget: { repliesTarget?: number; interviewsTarget?: number }
+): {
+  email: string;
+  displayName: string;
+  replies: number;
+  interviews: number;
+  monthlyReplies: number;
+  monthlyRepliesTarget: number;
+  monthlyRepliesRate: number | null;
+  monthlyInterviews: number;
+  monthlyInterviewsTarget: number;
+  monthlyInterviewsRate: number | null;
+}[] => {
   const reportMedia = filterMediaForReport(allMedia);
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
   return memberEmails.map(email => {
     const userData = allUsersData[email];
     const displayName = userData?.displayName || email;
-    if (!userData) return { email, displayName, replies: 0, interviews: 0 };
+    const monthlyRepliesTarget = monthlyTarget.repliesTarget || 0;
+    const monthlyInterviewsTarget = monthlyTarget.interviewsTarget || 0;
+    if (!userData) {
+      return {
+        email, displayName, replies: 0, interviews: 0,
+        monthlyReplies: 0, monthlyRepliesTarget, monthlyRepliesRate: monthlyRepliesTarget > 0 ? 0 : null,
+        monthlyInterviews: 0, monthlyInterviewsTarget, monthlyInterviewsRate: monthlyInterviewsTarget > 0 ? 0 : null,
+      };
+    }
     const totals = calculateTotalsForRange(userData.entries || [], reportMedia, startDate, endDate);
     const replies = getTotalFromLump(totals, '_scoutReplies', reportMedia);
     const interviews = getTotalFromLump(totals, '_initialInterviews', reportMedia);
-    return { email, displayName, replies, interviews };
+
+    const monthlyTotals = calculateTotalsForRange(userData.entries || [], reportMedia, monthStart, monthEnd);
+    const monthlyReplies = getTotalFromLump(monthlyTotals, '_scoutReplies', reportMedia);
+    const monthlyInterviews = getTotalFromLump(monthlyTotals, '_initialInterviews', reportMedia);
+    const monthlyRepliesRate = monthlyRepliesTarget > 0 ? (monthlyReplies / monthlyRepliesTarget) * 100 : null;
+    const monthlyInterviewsRate = monthlyInterviewsTarget > 0 ? (monthlyInterviews / monthlyInterviewsTarget) * 100 : null;
+
+    return {
+      email, displayName, replies, interviews,
+      monthlyReplies, monthlyRepliesTarget, monthlyRepliesRate,
+      monthlyInterviews, monthlyInterviewsTarget, monthlyInterviewsRate,
+    };
   });
 };
 
 const formatChatReportDate = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 
+// 月間ピッチ（■=達成、□=未達）のブロック数。5ブロック＝1ブロックあたり20ポイント刻みで、
+// 「■■■□□なら達成度60〜80%」という粒度の要望に合わせている。
+const MONTHLY_PITCH_BLOCK_COUNT = 5;
+
+/** 達成率（%、100以上や未設定=nullもありうる）を■□のピッチ文字列にする。100%を超えても
+ * ブロックは5個で頭打ち（総取りで埋まりきる）。目標未設定（rate=null）は□のみ（未達扱い）
+ * にし、表示側で「目標未設定」の注記を別途添える。
+ */
+const buildPitchBar = (rate: number | null): string => {
+  if (rate === null) return '□'.repeat(MONTHLY_PITCH_BLOCK_COUNT);
+  const filled = Math.max(0, Math.min(MONTHLY_PITCH_BLOCK_COUNT, Math.floor(rate / (100 / MONTHLY_PITCH_BLOCK_COUNT))));
+  return '■'.repeat(filled) + '□'.repeat(MONTHLY_PITCH_BLOCK_COUNT - filled);
+};
+
+const formatMonthlyAchievementLine = (label: string, actual: number, rate: number | null): string =>
+  rate === null ? `　・${label}：${actual}件（目標未設定）` : `　・${label}：${actual}件（達成率${Math.round(rate)}％）`;
+
 /** Builds the Google Chat message text for a team's per-member reply/interview breakdown over
- * [start, end]. */
+ * [start, end]。各メンバーの対象期間の実数に加えて、本人の月間目標に対する今月累計の達成度を
+ * ■□のピッチと「・スカウト返信数：XX件（達成率XX％）」形式のテキストで併記する。
+ */
 const buildTeamChatReportText = (
   teamName: string,
   periodLabel: string,
   start: Date,
   end: Date,
-  members: { displayName: string; replies: number; interviews: number }[]
+  members: ReturnType<typeof computeTeamReplyInterviewBreakdown>
 ): string => {
   const rangeLabel = formatChatReportDate(start) === formatChatReportDate(end)
     ? formatChatReportDate(start)
     : `${formatChatReportDate(start)} 〜 ${formatChatReportDate(end)}`;
   const memberLines = members.length > 0
-    ? members.map(m => `・${m.displayName}: 返信数 ${m.replies} / 面談数 ${m.interviews}`).join('\n')
+    ? members.map(m => {
+        const repliesBar = buildPitchBar(m.monthlyRepliesRate);
+        const interviewsBar = buildPitchBar(m.monthlyInterviewsRate);
+        return [
+          `・${m.displayName}: 返信数 ${m.replies} / 面談数 ${m.interviews}`,
+          `　月間ピッチ：返信 ${repliesBar}／面談 ${interviewsBar}`,
+          formatMonthlyAchievementLine('スカウト返信数', m.monthlyReplies, m.monthlyRepliesRate),
+          formatMonthlyAchievementLine('新規面談数', m.monthlyInterviews, m.monthlyInterviewsRate),
+        ].join('\n');
+      }).join('\n\n')
     : '（メンバーがいません）';
   return `*${teamName} 実績レポート（${periodLabel}）*\n対象期間: ${rangeLabel}\n\nメンバー別\n${memberLines}`;
 };
@@ -1174,6 +1242,11 @@ interface TeamsConfig {
   // まだスレッドが作成されていない状態（チーム管理の「スレッドを作成」で作る）。
   reportChatWebhookUrl?: string;
   reportChatThreadKey?: string;
+  // 実績レポート（TeamChatReportPanel）の月間ピッチ・達成率表示で使う、事業部として一元設定
+  // する月間目標（返信数・面談数）。全メンバー共通の同じ値が「個人の月目標」としてそのまま
+  // 適用される——メンバー本人が個人タブで入力するkpiTargets（媒体別の月間目標、他の画面全般
+  // で使われる）とは別物。チーム別タブの「Google Chatに送信」パネル右側から直接設定する。
+  reportMonthlyTarget?: { repliesTarget?: number; interviewsTarget?: number };
 }
 
 // weekStartsOn: 0 = 日曜始まり（既定）, 6 = 土曜始まり。週間サマリー・各カレンダーの表示形式
@@ -12496,7 +12569,15 @@ const TeamChatReportPanel: React.FC<{
   // 全チーム共通の送信先 — チーム管理の「Google Chat通知設定」で設定する。
   reportChatWebhookUrl: string | undefined;
   reportChatThreadKey: string | undefined;
-}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey }) => {
+  // 事業部として一元設定する月間目標（返信数・面談数）。個人の目標設定とは別に、この同じ値が
+  // 全メンバー共通の「個人の月目標」としてそのまま適用される（TeamsConfig.reportMonthlyTarget
+  // 参照）。
+  monthlyTarget: { repliesTarget?: number; interviewsTarget?: number };
+  onSetMonthlyTarget: (field: 'repliesTarget' | 'interviewsTarget', value: number | undefined) => void;
+  // チーム管理と同じ権限保持者（isTeamsEditable）だけが目標値を編集できる。それ以外は現在値の
+  // 閲覧のみ。
+  canEditTargets: boolean;
+}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey, monthlyTarget, onSetMonthlyTarget, canEditTargets }) => {
   const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -12505,6 +12586,22 @@ const TeamChatReportPanel: React.FC<{
   const [isCustomPeriodPopupOpen, setIsCustomPeriodPopupOpen] = useState(false);
   const [customStartInput, setCustomStartInput] = useState('');
   const [customEndInput, setCustomEndInput] = useState('');
+  // 月間目標入力欄のドラフト値（key: field名）。フォーカスを外れたタイミングでonSetMonthlyTarget
+  // を呼んで確定・保存する——キー入力のたびに毎回保存しない（他のChat Webhook URL入力欄と同じ
+  // 確定タイミングの考え方）。
+  const [targetDrafts, setTargetDrafts] = useState<Record<string, string>>({});
+  const getTargetDraftValue = (field: 'repliesTarget' | 'interviewsTarget') => {
+    if (field in targetDrafts) return targetDrafts[field];
+    return String(monthlyTarget[field] ?? '');
+  };
+  const commitTargetDraft = (field: 'repliesTarget' | 'interviewsTarget') => {
+    const raw = (targetDrafts[field] ?? '').trim();
+    setTargetDrafts(prev => { const next = { ...prev }; delete next[field]; return next; });
+    const parsed = raw === '' ? undefined : Number(raw);
+    if (parsed !== undefined && (Number.isNaN(parsed) || parsed < 0)) return;
+    if (parsed === (monthlyTarget[field] ?? undefined)) return;
+    onSetMonthlyTarget(field, parsed);
+  };
 
   if (!team) return null;
 
@@ -12551,7 +12648,7 @@ const TeamChatReportPanel: React.FC<{
   };
 
   const members = pendingPeriod
-    ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end)
+    ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end, monthlyTarget)
     : null;
   const messageText = pendingPeriod && members
     ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, members)
@@ -12576,34 +12673,74 @@ const TeamChatReportPanel: React.FC<{
 
   return (
     <div className="custom-period-export-bar team-chat-report-panel" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
-      <span className="team-chat-report-panel-title">💬 Google Chatに送信（返信数・面談数）</span>
-      {!effectiveWebhookUrl || !effectiveThreadKey ? (
-        <p className="no-data-message" style={{ margin: 0 }}>
-          Google Chatの通知先・スレッドが未設定です。「チーム管理」の「Google Chat通知設定」から設定してください。
-        </p>
-      ) : (
-        <>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <button type="button" onClick={() => handlePickPeriod('yesterday')} className="chat-report-period-button">前日</button>
-            <button type="button" onClick={() => handlePickPeriod('week')} className="chat-report-period-button">今週</button>
-            <button type="button" onClick={() => handlePickPeriod('month')} className="chat-report-period-button">今月</button>
-            <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">期間を指定</button>
-          </div>
-          {pendingPeriod && (
-            <div className="chat-report-preview">
-              <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{messageText}</pre>
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
-                  {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
-                </button>
-                <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', alignItems: 'flex-start' }}>
+        <div style={{ flex: '1 1 320px', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <span className="team-chat-report-panel-title">💬 Google Chatに送信（返信数・面談数）</span>
+          {!effectiveWebhookUrl || !effectiveThreadKey ? (
+            <p className="no-data-message" style={{ margin: 0 }}>
+              Google Chatの通知先・スレッドが未設定です。「チーム管理」の「Google Chat通知設定」から設定してください。
+            </p>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <button type="button" onClick={() => handlePickPeriod('yesterday')} className="chat-report-period-button">前日</button>
+                <button type="button" onClick={() => handlePickPeriod('week')} className="chat-report-period-button">今週</button>
+                <button type="button" onClick={() => handlePickPeriod('month')} className="chat-report-period-button">今月</button>
+                <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">期間を指定</button>
               </div>
-            </div>
+              {pendingPeriod && (
+                <div className="chat-report-preview">
+                  <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{messageText}</pre>
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                    <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
+                      {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
+                    </button>
+                    <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
+                  </div>
+                </div>
+              )}
+              {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
+              {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
+            </>
           )}
-          {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
-          {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
-        </>
-      )}
+        </div>
+        <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
+          <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
+          <p className="no-data-message" style={{ margin: '0 0 0.5rem' }}>
+            ここで設定した値が、全メンバー共通の「個人の月目標」としてそのまま適用されます（メンバー本人の目標設定とは別です）。レポートの「月間ピッチ」「達成率」は、各メンバー本人の今月の累計実績をこの目標と比較して計算されます。
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ flex: '0 0 5em' }}>返信数</span>
+              <input
+                type="number"
+                min={0}
+                disabled={!canEditTargets}
+                value={getTargetDraftValue('repliesTarget')}
+                onChange={(e) => setTargetDrafts(prev => ({ ...prev, repliesTarget: e.target.value }))}
+                onBlur={() => commitTargetDraft('repliesTarget')}
+                style={{ width: '6em' }}
+                aria-label="月間目標: 返信数"
+              />
+              <span>件</span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ flex: '0 0 5em' }}>面談数</span>
+              <input
+                type="number"
+                min={0}
+                disabled={!canEditTargets}
+                value={getTargetDraftValue('interviewsTarget')}
+                onChange={(e) => setTargetDrafts(prev => ({ ...prev, interviewsTarget: e.target.value }))}
+                onBlur={() => commitTargetDraft('interviewsTarget')}
+                style={{ width: '6em' }}
+                aria-label="月間目標: 面談数"
+              />
+              <span>件</span>
+            </label>
+          </div>
+        </div>
+      </div>
       {isCustomPeriodPopupOpen && (
         <div className="modal-overlay" onClick={() => setIsCustomPeriodPopupOpen(false)} role="dialog" aria-modal="true" aria-labelledby="chat-report-custom-period-title">
           <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '360px' }}>
@@ -13732,6 +13869,9 @@ const App: React.FC = () => {
   // 参照）。
   const [reportChatWebhookUrl, setReportChatWebhookUrl] = useState<string | undefined>(undefined);
   const [reportChatThreadKey, setReportChatThreadKey] = useState<string | undefined>(undefined);
+  // 実績レポートの月間ピッチ用、事業部として一元設定する月間目標（TeamsConfig.
+  // reportMonthlyTarget参照）。
+  const [reportMonthlyTarget, setReportMonthlyTarget] = useState<{ repliesTarget?: number; interviewsTarget?: number }>({});
   // Guards the individual-Drive-permission reconciliation effect (see driveFileIdByEmail below)
   // from running against an empty middleEmails/teams before loadTeamsConfig has actually
   // finished even once — without this, "no teams yet" and "teams config still loading" would be
@@ -14325,6 +14465,7 @@ const App: React.FC = () => {
         setMiddleEmails(result.data?.middleEmails || []);
         setReportChatWebhookUrl(result.data?.reportChatWebhookUrl);
         setReportChatThreadKey(result.data?.reportChatThreadKey);
+        setReportMonthlyTarget(result.data?.reportMonthlyTarget || {});
         if (!hasAppliedDefaultDivisionRef.current) {
           hasAppliedDefaultDivisionRef.current = true;
           const ownDepartment = result.data?.memberDepartments?.[currentIdentity.email];
@@ -14789,16 +14930,18 @@ const App: React.FC = () => {
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  // 末尾2つ（Google Chat通知のWebhook URL・スレッドキー）はデフォルトで現在値を引き継ぐ —
-  // 既存の呼び出し元（チーム作成・部署設定など）はこの2つに一切関知しないので、渡さなければ
-  // そのまま維持される。Chat通知設定を変更するハンドラだけが明示的に新しい値を渡す。
+  // 末尾3つ（Google Chat通知のWebhook URL・スレッドキー・事業部の月間目標）はデフォルトで
+  // 現在値を引き継ぐ — 既存の呼び出し元（チーム作成・部署設定など）はこれらに一切関知しない
+  // ので、渡さなければそのまま維持される。それぞれを変更するハンドラだけが明示的に新しい値を
+  // 渡す。
   const persistTeamsConfig = (
     updatedTeams: Team[],
     updatedAuthorizedEditors: string[],
     updatedDepartments: Record<string, Department>,
     updatedMiddleEmails: string[],
     updatedReportChatWebhookUrl: string | undefined = reportChatWebhookUrl,
-    updatedReportChatThreadKey: string | undefined = reportChatThreadKey
+    updatedReportChatThreadKey: string | undefined = reportChatThreadKey,
+    updatedReportMonthlyTarget: { repliesTarget?: number; interviewsTarget?: number } = reportMonthlyTarget
   ) => {
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
@@ -14806,6 +14949,7 @@ const App: React.FC = () => {
     setMiddleEmails(updatedMiddleEmails);
     setReportChatWebhookUrl(updatedReportChatWebhookUrl);
     setReportChatThreadKey(updatedReportChatThreadKey);
+    setReportMonthlyTarget(updatedReportMonthlyTarget);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
@@ -14818,6 +14962,7 @@ const App: React.FC = () => {
           middleEmails: updatedMiddleEmails,
           reportChatWebhookUrl: updatedReportChatWebhookUrl,
           reportChatThreadKey: updatedReportChatThreadKey,
+          reportMonthlyTarget: updatedReportMonthlyTarget,
         };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
@@ -14960,6 +15105,15 @@ const App: React.FC = () => {
   const handleSetReportChatWebhookUrl = (url: string) => {
     const trimmed = url.trim();
     persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, trimmed || undefined, reportChatThreadKey);
+  };
+
+  // 実績レポートの「月間ピッチ」用、事業部として一元設定する月間目標（返信数・面談数）を更新
+  // する（TeamChatReportPanel右側の入力欄から呼ばれる）。この同じ値が全メンバー共通の「個人の
+  // 月目標」としてそのまま適用される。value=undefinedでその項目を未設定に戻す。個人の目標設定
+  // （kpiTargets）とは独立した、事業部側の一元管理用の値。
+  const handleSetReportMonthlyTarget = (field: 'repliesTarget' | 'interviewsTarget', value: number | undefined) => {
+    const updated = { ...reportMonthlyTarget, [field]: value };
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, reportChatThreadKey, updated);
   };
 
   // スペース内に返信数・面談数報告用のスレッドを作成する（既にある場合は作り直す＝以降の
@@ -17680,6 +17834,9 @@ const App: React.FC = () => {
                   weekStartsOn={weekStartsOn}
                   reportChatWebhookUrl={reportChatWebhookUrl}
                   reportChatThreadKey={reportChatThreadKey}
+                  monthlyTarget={reportMonthlyTarget}
+                  onSetMonthlyTarget={handleSetReportMonthlyTarget}
+                  canEditTargets={isTeamsEditable}
                 />
                 <TeamChatReminderPanel
                   team={teams.find(t => t.id === selectedTeamId)}
