@@ -1970,6 +1970,25 @@ section {
   padding: 0.6rem 0.75rem;
 }
 
+/* 事業部の月間目標——設定済みの値をクリック可能なバッジとして「埋め込み」表示する。誤操作で
+   直接タイプして書き換わらないよう、クリックして初めて実際の<input>に切り替わる（見た目にも
+   普通の入力欄と区別がつくようにする）。 */
+.monthly-target-value-display {
+  display: inline-block;
+  min-width: 4.5em;
+  padding: 0.3em 0.75em;
+  background-color: white;
+  border: 1px solid #bfe4ef;
+  border-radius: 6px;
+  font-weight: 600;
+  color: #0c6480;
+  cursor: pointer;
+  text-align: center;
+}
+.monthly-target-value-display:hover {
+  background-color: #f2fbfd;
+}
+
 .candidate-list {
   display: grid;
   gap: 1.5rem;

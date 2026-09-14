@@ -12591,6 +12591,10 @@ const TeamChatReportPanel: React.FC<{
   // で目標値が書き変わってしまわないようにするための要望。
   const [targetDrafts, setTargetDrafts] = useState<Record<string, string>>({});
   const [targetApplyStatus, setTargetApplyStatus] = useState<'idle' | 'applied'>('idle');
+  // 通常は現在の設定値を埋め込み済みのテキストとして表示するだけ（誤って書き換わらないよう、
+  // 直接タイプできない）——一度クリックした枠だけ実際の<input>に切り替わり、再入力できる
+  // ようになる。「設定」ボタンを押すと確定・保存し、両方の枠を表示モードに戻す。
+  const [editingFields, setEditingFields] = useState<Record<string, boolean>>({});
   const getTargetDraftValue = (field: 'repliesTarget' | 'interviewsTarget') => {
     if (field in targetDrafts) return targetDrafts[field];
     return String(monthlyTarget[field] ?? '');
@@ -12613,6 +12617,7 @@ const TeamChatReportPanel: React.FC<{
       }
     });
     setTargetDrafts({});
+    setEditingFields({});
     setTargetApplyStatus('applied');
   };
 
@@ -12720,32 +12725,35 @@ const TeamChatReportPanel: React.FC<{
         <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
           <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '1rem' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>返信数</span>
-              <input
-                type="number"
-                min={0}
-                disabled={!canEditTargets}
-                value={getTargetDraftValue('repliesTarget')}
-                onChange={(e) => { setTargetDrafts(prev => ({ ...prev, repliesTarget: e.target.value })); setTargetApplyStatus('idle'); }}
-                style={{ width: '6em' }}
-                aria-label="月間目標: 返信数"
-              />
-              <span>件</span>
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span>面談数</span>
-              <input
-                type="number"
-                min={0}
-                disabled={!canEditTargets}
-                value={getTargetDraftValue('interviewsTarget')}
-                onChange={(e) => { setTargetDrafts(prev => ({ ...prev, interviewsTarget: e.target.value })); setTargetApplyStatus('idle'); }}
-                style={{ width: '6em' }}
-                aria-label="月間目標: 面談数"
-              />
-              <span>件</span>
-            </label>
+            {([['repliesTarget', '返信数'], ['interviewsTarget', '面談数']] as const).map(([field, label]) => (
+              <label key={field} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span>{label}</span>
+                {editingFields[field] ? (
+                  <input
+                    type="number"
+                    min={0}
+                    autoFocus
+                    disabled={!canEditTargets}
+                    value={getTargetDraftValue(field)}
+                    onChange={(e) => { setTargetDrafts(prev => ({ ...prev, [field]: e.target.value })); setTargetApplyStatus('idle'); }}
+                    style={{ width: '6em' }}
+                    aria-label={`月間目標: ${label}`}
+                  />
+                ) : (
+                  <span
+                    role={canEditTargets ? 'button' : undefined}
+                    tabIndex={canEditTargets ? 0 : undefined}
+                    onClick={() => canEditTargets && setEditingFields(prev => ({ ...prev, [field]: true }))}
+                    onKeyDown={(e) => { if (canEditTargets && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setEditingFields(prev => ({ ...prev, [field]: true })); } }}
+                    className="monthly-target-value-display"
+                    style={{ cursor: canEditTargets ? 'pointer' : 'default' }}
+                    aria-label={`月間目標: ${label} ${monthlyTarget[field] ?? '未設定'}${monthlyTarget[field] !== undefined ? '件' : ''}（クリックして編集）`}
+                  >
+                    {monthlyTarget[field] !== undefined ? `${monthlyTarget[field]}件` : '未設定'}
+                  </span>
+                )}
+              </label>
+            ))}
             {canEditTargets && (
               <button type="button" onClick={handleApplyTargetDrafts} className="chat-report-send-button">設定</button>
             )}
