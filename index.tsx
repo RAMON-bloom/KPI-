@@ -12586,39 +12586,28 @@ const TeamChatReportPanel: React.FC<{
   const [isCustomPeriodPopupOpen, setIsCustomPeriodPopupOpen] = useState(false);
   const [customStartInput, setCustomStartInput] = useState('');
   const [customEndInput, setCustomEndInput] = useState('');
-  // 月間目標入力欄のドラフト値（key: field名）。フォーカスが外れただけでは保存せず、「設定」
-  // ボタンを押した時にだけ確定・保存する——誤操作（うっかり入力欄からフォーカスを外しただけ）
-  // で目標値が書き変わってしまわないようにするための要望。
+  // 月間目標入力欄のドラフト値（key: field名）。
   const [targetDrafts, setTargetDrafts] = useState<Record<string, string>>({});
-  const [targetApplyStatus, setTargetApplyStatus] = useState<'idle' | 'applied'>('idle');
   // 通常は現在の設定値を埋め込み済みのテキストとして表示するだけ（誤って書き換わらないよう、
   // 直接タイプできない）——一度クリックした枠だけ実際の<input>に切り替わり、再入力できる
-  // ようになる。「設定」ボタンを押すと確定・保存し、両方の枠を表示モードに戻す。
+  // ようになる。クリックという一手間自体が誤操作防止になっているため、確定は入力欄から
+  // フォーカスが外れた時点（またはEnterキー）で自動的に行い、専用の「設定」ボタンは持たない。
   const [editingFields, setEditingFields] = useState<Record<string, boolean>>({});
   const getTargetDraftValue = (field: 'repliesTarget' | 'interviewsTarget') => {
     if (field in targetDrafts) return targetDrafts[field];
     return String(monthlyTarget[field] ?? '');
   };
-  const handleApplyTargetDrafts = () => {
-    const fields = ['repliesTarget', 'interviewsTarget'] as const;
-    const parsedByField: Partial<Record<typeof fields[number], number | undefined>> = {};
-    for (const field of fields) {
-      const raw = getTargetDraftValue(field).trim();
-      const parsed = raw === '' ? undefined : Number(raw);
-      if (parsed !== undefined && (Number.isNaN(parsed) || parsed < 0)) {
-        alert('目標値には0以上の数値を入力してください。');
-        return;
-      }
-      parsedByField[field] = parsed;
+  const commitTargetField = (field: 'repliesTarget' | 'interviewsTarget') => {
+    const raw = getTargetDraftValue(field).trim();
+    const parsed = raw === '' ? undefined : Number(raw);
+    setTargetDrafts(prev => { const next = { ...prev }; delete next[field]; return next; });
+    setEditingFields(prev => { const next = { ...prev }; delete next[field]; return next; });
+    if (parsed !== undefined && (Number.isNaN(parsed) || parsed < 0)) {
+      alert('目標値には0以上の数値を入力してください。');
+      return;
     }
-    fields.forEach(field => {
-      if (parsedByField[field] !== (monthlyTarget[field] ?? undefined)) {
-        onSetMonthlyTarget(field, parsedByField[field]);
-      }
-    });
-    setTargetDrafts({});
-    setEditingFields({});
-    setTargetApplyStatus('applied');
+    if (parsed === (monthlyTarget[field] ?? undefined)) return;
+    onSetMonthlyTarget(field, parsed);
   };
 
   if (!team) return null;
@@ -12735,7 +12724,9 @@ const TeamChatReportPanel: React.FC<{
                     autoFocus
                     disabled={!canEditTargets}
                     value={getTargetDraftValue(field)}
-                    onChange={(e) => { setTargetDrafts(prev => ({ ...prev, [field]: e.target.value })); setTargetApplyStatus('idle'); }}
+                    onChange={(e) => setTargetDrafts(prev => ({ ...prev, [field]: e.target.value }))}
+                    onBlur={() => commitTargetField(field)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } }}
                     style={{ width: '6em' }}
                     aria-label={`月間目標: ${label}`}
                   />
@@ -12754,11 +12745,7 @@ const TeamChatReportPanel: React.FC<{
                 )}
               </label>
             ))}
-            {canEditTargets && (
-              <button type="button" onClick={handleApplyTargetDrafts} className="chat-report-send-button">設定</button>
-            )}
           </div>
-          {targetApplyStatus === 'applied' && <p className="gmail-scout-message" style={{ margin: '0.5rem 0 0' }}>設定しました。</p>}
         </div>
       </div>
       {isCustomPeriodPopupOpen && (
