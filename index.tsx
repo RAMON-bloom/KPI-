@@ -4773,6 +4773,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-09-14',
     items: [
       '「選考トラック」と「選考予定日」を1本の「選考日程」タイムラインに統合。過去に通過したフェーズ（実施日をクリックして直接修正可能）・現在のフェーズ（確定/調整中の切り替え）・企業が前もって確定させてきた先のフェーズの日程を、フェーズが一目で分かる一続きの流れとして表示・編集できるようにした。項目数が減った分カードもコンパクトになった。パイプラインカレンダーには先の確定日程も（破線枠付きで）表示され、実際にそのフェーズまで選考が進むと自動的に「選考予定日」へ昇格する',
+      '【改善】上記タイムラインの日時未入力欄を「＋ 日時を入力」という太字下線の案内文言にし、先の選考日程を追加するボタンも「＋」だけでなく「＋ 先の日程を追加」という文言にして分かりやすくした。また「打診」フェーズには元々確定した日時という概念がなじまないため、確定/調整中の入力欄を表示しないようにした',
     ],
   },
   {
@@ -9155,16 +9156,22 @@ const ScheduledDateTimeField: React.FC<{
   time: string | undefined;
   onCommitDate: (value: string | undefined) => void;
   onCommitTime: (value: string | undefined) => void;
-}> = ({ date, time, onCommitDate, onCommitTime }) => {
+  // アラベル・未入力時の案内文言をこの欄が何の日程かに合わせて変えられるように
+  // （選考予定日本体 or 先に確定した日程）。省略時は選考予定日として振る舞う。
+  ariaLabel?: string;
+}> = ({ date, time, onCommitDate, onCommitTime, ariaLabel = '選考予定日' }) => {
   const [isEditing, setIsEditing] = useState(false);
   const dateRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (isEditing) dateRef.current?.focus(); }, [isEditing]);
 
   if (!isEditing) {
+    // 未入力の間は「＋ 日時を入力」と行動を促す文言にして、クリックして入力できる欄だと
+    // 一目で分かるようにする（単に「未設定」とだけ表示すると、入力欄なのか単なる空欄なのか
+    // 分かりにくいという指摘を受けての改善）。
     const displayText = date
-      ? `${new Date(date + 'T00:00:00').toLocaleDateString('ja-JP')}${time ? ` ${time}` : ''}`
-      : '未設定';
-    return <span {...editableDisplayProps(() => setIsEditing(true), '選考予定日', !date ? 'is-empty' : '')}>{displayText}</span>;
+      ? `📅 ${new Date(date + 'T00:00:00').toLocaleDateString('ja-JP')}${time ? ` ${time}` : ''}`
+      : '＋ 日時を入力';
+    return <span {...editableDisplayProps(() => setIsEditing(true), ariaLabel, !date ? 'is-empty' : '')}>{displayText}</span>;
   }
   return (
     <span
@@ -9418,6 +9425,7 @@ const FutureStagePill: React.FC<{
         time={entry.time}
         onCommitDate={onChangeDate}
         onCommitTime={onChangeTime}
+        ariaLabel="先に確定した選考日程の日時"
       />
     ) : (
       <span className="stage-track-date">
@@ -9472,7 +9480,23 @@ const SelectionTimeline: React.FC<{
         </React.Fragment>
       ))}
       {pastEntries.length > 0 && <span className="stage-track-arrow">→</span>}
-      <CurrentStagePill app={app} editable={editable} onCommitSchedule={onCommitSchedule} idPrefix={idPrefix} />
+      {app.stage === '打診' ? (
+        // 打診は「まだ会う約束が決まっているわけではない最初の声がけ」であり、確定/調整中の
+        // 日時という概念自体がなじまない——過去のステップと同じく、いつ打診したかの記録日
+        // だけを持つ扱いにする。
+        <PastStagePill
+          stage={app.stage}
+          date={history[history.length - 1]?.date}
+          editable={editable}
+          onCommitDate={(v) => {
+            const next = [...history];
+            next[next.length - 1] = { ...next[next.length - 1], date: v };
+            onCommitStageHistory(next);
+          }}
+        />
+      ) : (
+        <CurrentStagePill app={app} editable={editable} onCommitSchedule={onCommitSchedule} idPrefix={idPrefix} />
+      )}
       {additional.map((entry) => {
         // entryの現在のstageが既にupcomingStagesから外れている（appのstageがそれを追い越した
         // 等）場合でも、セレクトが空にならないよう自分自身は常に選択肢に含める。
@@ -9504,8 +9528,8 @@ const SelectionTimeline: React.FC<{
               onCommitAdditionalDates([...additional, { id: `addl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, stage: defaultStage, date: '' }]);
             }}
             aria-label="先に確定した選考日程を追加"
-            title="先に確定した選考日程を追加"
-          >+</button>
+            title="企業が前もって確定させてきた、次以降の選考フェーズの日程を追加します"
+          >＋ 先の日程を追加</button>
         </>
       )}
     </div>

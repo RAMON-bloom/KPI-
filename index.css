@@ -900,7 +900,7 @@ section {
   font-weight: 600;
 }
 .stage-track-date {
-  font-size: 0.68rem;
+  font-size: 0.72rem;
 }
 .stage-track-arrow {
   color: var(--text-muted-color);
@@ -922,13 +922,13 @@ section {
   outline: none;
 }
 .stage-track-date-input {
-  font-size: 0.68rem;
-  padding: 0;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.15rem;
   border: none;
   background: rgba(255, 255, 255, 0.9);
   border-radius: 0.15rem;
   color: var(--text-color);
-  width: 6.5rem;
+  width: 7rem;
 }
 /* 現在のフェーズのステップ — 確定/調整中の切り替えと日時入力をそのままステップ内に収める。
    チェックボックスのラベル・入力欄は白背景の色付きピルの上に乗るため、既定の暗い文字色では
@@ -946,31 +946,44 @@ section {
 .stage-track-step.is-current .scheduling-ball-checkboxes {
   gap: 0.5rem;
   margin-bottom: 0;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
 }
 .stage-track-step.is-current .scheduling-status-checkboxes label,
 .stage-track-step.is-current .scheduling-ball-checkboxes label {
   color: white;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   gap: 0.2rem;
 }
 .stage-track-step.is-current .scheduled-date-time-inputs input,
 .stage-track-step.is-current .scheduling-note-input {
-  font-size: 0.68rem;
-  padding: 0.1rem 0.2rem;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.25rem;
   border: none;
   background: rgba(255, 255, 255, 0.9);
   border-radius: 0.15rem;
 }
 .stage-track-step.is-current .scheduled-date-time-inputs input[type="time"] {
-  width: 4.5rem;
+  width: 5rem;
 }
 .stage-track-step.is-current .editable-value {
   color: white;
+  font-size: 0.75rem;
 }
 .stage-track-step.is-current .editable-value:hover,
 .stage-track-step.is-current .editable-value:focus-visible {
   background-color: rgba(255, 255, 255, 0.3);
+}
+/* 日時未入力の間は下線付き太字にして「クリックして入力する欄」であることを目立たせる
+   （単に「未設定」と薄いテキストで出すだけだと、入力可能な欄だと気づかれにくかったため）。 */
+.stage-track-step.is-current .editable-value.is-empty,
+.stage-track-step.is-future .editable-value.is-empty {
+  font-style: normal;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+.stage-track-step.is-current .editable-value.is-empty {
+  color: white;
 }
 /* 先のフェーズのステップ（企業が前もって確定させてきた日程、まだ到達していない）— 破線枠と
    やや薄い背景で「まだ先の話」であることを視覚的に示す。 */
@@ -991,11 +1004,11 @@ section {
   color: var(--badge-color, var(--secondary-color));
 }
 .stage-track-step.is-future .scheduled-date-time-inputs input {
-  font-size: 0.68rem;
-  padding: 0.1rem 0.2rem;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.25rem;
 }
 .stage-track-step.is-future .scheduled-date-time-inputs input[type="time"] {
-  width: 4.5rem;
+  width: 5rem;
 }
 .stage-track-remove {
   background: none;
@@ -1012,18 +1025,19 @@ section {
 }
 .stage-track-add {
   background-color: transparent;
-  color: var(--text-muted-color);
-  border: 1px dashed var(--border-color);
+  color: var(--primary-color);
+  border: 1px dashed var(--primary-color);
   border-radius: 0.4rem;
-  font-size: 0.85rem;
-  font-weight: bold;
-  line-height: 1;
-  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 0.35rem 0.7rem;
   align-self: center;
+  white-space: nowrap;
 }
 .stage-track-add:hover {
-  color: var(--primary-color);
-  border-color: var(--primary-color);
+  background-color: var(--primary-color);
+  color: white;
 }
 
 
