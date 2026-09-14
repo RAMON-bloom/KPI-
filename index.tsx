@@ -476,6 +476,13 @@ interface CompanyApplication {
   schedulingBallOwner?: 'candidate' | 'company' | 'other';
   // schedulingBallOwner==='other'の時の自由記入内容。
   schedulingNote?: string;
+  // 企業が、まだ到達していない先のフェーズの選考日程まで前もって確定させてくることがある
+  // （例: 1次面接の結果を待たずに2次・最終面接の日時まで同時に提示される）。scheduledDate/
+  // scheduledTimeは常に「今まさにいるstageの」日程専用のため、そうした先付けの確定日程は
+  // 別枠でここに保持しておく。実際にそのstageへ進んだ時点でcomputeStageAdvanceUpdateが
+  // 自動的にscheduledDate/scheduledTimeへ昇格させ、この配列からは削除する（stageを飛ばして
+  // 別のstageへ進んだ場合は昇格されずここに残る——手動で削除できる）。
+  additionalScheduledDates?: { id: string; stage: PipelineStage; date: string; time?: string }[];
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
@@ -715,7 +722,26 @@ function computeStageAdvanceUpdate(
     // didn't also set a genuinely new date itself — a stage change with a fresh date entered in
     // the very same edit is left untouched.
     if (base.scheduledDate && base.scheduledDate === prevApp.scheduledDate) {
-      base = { ...base, scheduledDate: undefined, scheduledTime: undefined };
+      // Before simply clearing it, check whether the company had already pre-confirmed a date
+      // for the stage we just moved INTO (see CompanyApplication.additionalScheduledDates) —
+      // if so, promote that pre-confirmed date into scheduledDate/scheduledTime instead of
+      // losing it, and remove it from the pre-confirmed list (it's no longer "ahead of us").
+      // Only matches an exact same-stage entry; skipping past a stage that had one leaves it
+      // in the list untouched (the user can still see/remove it manually).
+      const promoted = (base.additionalScheduledDates || []).find(d => d.stage === app.stage);
+      if (promoted) {
+        base = {
+          ...base,
+          scheduledDate: promoted.date,
+          scheduledTime: promoted.time,
+          schedulingStatus: 'confirmed',
+          schedulingBallOwner: undefined,
+          schedulingNote: undefined,
+          additionalScheduledDates: base.additionalScheduledDates!.filter(d => d.id !== promoted.id),
+        };
+      } else {
+        base = { ...base, scheduledDate: undefined, scheduledTime: undefined };
+      }
     }
 
     if (EXIT_PIPELINE_STAGES.includes(app.stage) && !EXIT_PIPELINE_STAGES.includes(prevApp.stage)) {
@@ -4744,6 +4770,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-14',
+    items: [
+      '選考企業が、まだ到達していない先のフェーズの選考日時まで前もって確定させてきた場合に備え、「先に確定した今後の選考日程」を複数登録できるようにした。候補者登録フォームの選考一覧・選考情報編集モーダル・候補者詳細カードのいずれからも、フェーズを選んで日時を追加でき、パイプラインカレンダーにも（破線枠付きで）表示される。実際にそのフェーズまで選考が進んだ時点で、登録しておいた日時が自動的に「選考予定日」へ昇格する',
+    ],
+  },
+  {
     date: '2026-09-12',
     items: [
       '候補者カードの現職年収・希望年収・想定年収の入力を、円単位（例: 6543210）ではなく万円単位（例: 654）に戻した。ただし想定年収だけは、選考企業から内定が出た後は提示額を正確に記録できるよう、これまで通り円単位（1円まで）で入力できる',
@@ -7440,6 +7472,12 @@ const CandidateModal: React.FC<{
                               idPrefix={`scheduling-ball-${app.id}`}
                             />
                           )}
+                          <AdditionalScheduledDatesEditor
+                            currentStage={app.stage}
+                            value={app.additionalScheduledDates}
+                            onChange={next => handleApplicationSchedulingPatch(index, { additionalScheduledDates: next })}
+                            idPrefix={`additional-scheduled-dates-${app.id}`}
+                          />
                        </div>
                        <div className="form-group">
                           <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
@@ -7728,6 +7766,12 @@ const ApplicationModal: React.FC<{
                                 idPrefix="application-modal-scheduling-ball"
                             />
                         )}
+                        <AdditionalScheduledDatesEditor
+                            currentStage={application.stage}
+                            value={application.additionalScheduledDates}
+                            onChange={next => setApplication(prev => ({ ...prev, additionalScheduledDates: next }))}
+                            idPrefix="application-modal-additional-scheduled-dates"
+                        />
                     </div>
                     <div className="form-group">
                         <label htmlFor="expectedDecisionDate">意思決定時期</label>
@@ -8526,7 +8570,10 @@ const GrossProfitSummary: React.FC<{
 
 
 type PipelineCalendarEvent =
-    | { kind: 'application'; candidate: Candidate; application: CompanyApplication }
+    // additionalEntry is set when this event represents one of application.additionalScheduledDates
+    // (a company-confirmed date for a stage still AHEAD of the application's current one) rather
+    // than the application's own current scheduledDate — see CompanyApplication.additionalScheduledDates.
+    | { kind: 'application'; candidate: Candidate; application: CompanyApplication; additionalEntry?: NonNullable<CompanyApplication['additionalScheduledDates']>[number] }
     | { kind: 'revival'; candidate: Candidate };
 
 /**
@@ -8567,10 +8614,20 @@ const PipelineCalendarView: React.FC<{
         // is hidden (including via 掘り起しリスト, below), its past applications' scheduled
         // events stop cluttering the calendar.
         candidates.filter(c => !c.isHidden).forEach(c => {
-            c.applications.filter(app => !app.isHidden && app.scheduledDate).forEach(app => {
-                const list = map.get(app.scheduledDate!) || [];
-                list.push({ kind: 'application', candidate: c, application: app });
-                map.set(app.scheduledDate!, list);
+            c.applications.filter(app => !app.isHidden).forEach(app => {
+                if (app.scheduledDate) {
+                    const list = map.get(app.scheduledDate) || [];
+                    list.push({ kind: 'application', candidate: c, application: app });
+                    map.set(app.scheduledDate, list);
+                }
+                // Company-confirmed dates for stages still ahead of this application's current
+                // one (see CompanyApplication.additionalScheduledDates) belong on the calendar
+                // too — they're real confirmed appointments, just not "current" yet.
+                (app.additionalScheduledDates || []).forEach(entry => {
+                    const list = map.get(entry.date) || [];
+                    list.push({ kind: 'application', candidate: c, application: app, additionalEntry: entry });
+                    map.set(entry.date, list);
+                });
             });
         });
         // Revival reminders come from EVERY candidate regardless of isHidden — a 掘り起しリスト
@@ -8585,8 +8642,8 @@ const PipelineCalendarView: React.FC<{
         // Events without a start time (including every revival reminder) sort last, after every
         // timed application event on the same day.
         map.forEach(list => list.sort((a, b) => {
-            const aTime = a.kind === 'application' ? (a.application.scheduledTime || '99:99') : '99:99';
-            const bTime = b.kind === 'application' ? (b.application.scheduledTime || '99:99') : '99:99';
+            const aTime = a.kind === 'application' ? ((a.additionalEntry ? a.additionalEntry.time : a.application.scheduledTime) || '99:99') : '99:99';
+            const bTime = b.kind === 'application' ? ((b.additionalEntry ? b.additionalEntry.time : b.application.scheduledTime) || '99:99') : '99:99';
             return aTime.localeCompare(bTime);
         }));
         return map;
@@ -8651,19 +8708,26 @@ const PipelineCalendarView: React.FC<{
                                 e.stopPropagation();
                                 onEditApplication(ev.candidate, ev.application);
                             };
+                            // additionalEntry represents a company-confirmed date for a stage
+                            // still ahead of this application's current stage — show that
+                            // stage/time instead of the application's own current ones, but
+                            // clicking still opens the same ApplicationModal (where the entry
+                            // can be edited/removed).
+                            const eventStage = ev.additionalEntry?.stage ?? ev.application.stage;
+                            const eventTime = ev.additionalEntry?.time ?? ev.application.scheduledTime;
                             return (
                                 <div
                                     key={idx}
-                                    className={`pipeline-calendar-event ${isEditableEvent ? 'is-editable' : ''}`}
-                                    style={{ '--badge-color': STAGE_COLOR_MAP[ev.application.stage] } as React.CSSProperties}
-                                    title={`${ev.application.scheduledTime ? `${ev.application.scheduledTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${ev.application.stage}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
+                                    className={`pipeline-calendar-event ${isEditableEvent ? 'is-editable' : ''} ${ev.additionalEntry ? 'is-additional-scheduled-date' : ''}`}
+                                    style={{ '--badge-color': STAGE_COLOR_MAP[eventStage] } as React.CSSProperties}
+                                    title={`${eventTime ? `${eventTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${eventStage}${ev.additionalEntry ? '（先に確定した日程）' : ''}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
                                     role={isEditableEvent ? 'button' : undefined}
                                     tabIndex={isEditableEvent ? 0 : undefined}
                                     onClick={isEditableEvent ? handleEventActivate : undefined}
                                     onKeyDown={isEditableEvent ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleEventActivate(e); } } : undefined}
                                 >
-                                    <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[ev.application.stage]}</span>
-                                    {ev.application.scheduledTime && <span className="pipeline-calendar-event-time">{ev.application.scheduledTime}</span>}
+                                    <span className="pipeline-calendar-event-stage">{STAGE_SHORT_LABELS[eventStage]}</span>
+                                    {eventTime && <span className="pipeline-calendar-event-time">{eventTime}</span>}
                                     {ev.candidate.name} - {ev.application.companyName}
                                 </div>
                             );
@@ -9282,6 +9346,87 @@ const describeSchedulingBall = (app: CompanyApplication): string => {
   if (app.schedulingBallOwner === 'other') return app.schedulingNote ? `その他（${app.schedulingNote}）` : 'その他';
   return '未選択';
 };
+
+// 企業がまだ到達していない先のフェーズの選考日程まで前もって確定させてきた場合に、その
+// 日程を控えておくための追加リストの編集UI（see CompanyApplication.additionalScheduledDates）。
+// 選べるフェーズはcurrentStageより先のFORWARD_PIPELINE_STAGESのみ——現在のフェーズ自体の
+// 日程はscheduledDate/scheduledTime側の専用フィールドを使う。3箇所（候補者登録フォームの
+// 選考一覧、選考情報編集モーダル、候補者詳細カードのインライン編集）すべてで共通化している。
+const AdditionalScheduledDatesEditor: React.FC<{
+  currentStage: PipelineStage;
+  value: CompanyApplication['additionalScheduledDates'];
+  onChange: (next: NonNullable<CompanyApplication['additionalScheduledDates']>) => void;
+  idPrefix: string;
+}> = ({ currentStage, value, onChange, idPrefix }) => {
+  const entries = value || [];
+  const currentIdx = FORWARD_PIPELINE_STAGES.indexOf(currentStage);
+  const upcomingStages = currentIdx === -1 ? [] : FORWARD_PIPELINE_STAGES.slice(currentIdx + 1);
+
+  if (upcomingStages.length === 0 && entries.length === 0) return null;
+
+  const updateEntry = (id: string, patch: Partial<NonNullable<CompanyApplication['additionalScheduledDates']>[number]>) => {
+    onChange(entries.map(e => e.id === id ? { ...e, ...patch } : e));
+  };
+  const removeEntry = (id: string) => onChange(entries.filter(e => e.id !== id));
+  const addEntry = () => {
+    const usedStages = new Set(entries.map(e => e.stage));
+    const defaultStage = upcomingStages.find(s => !usedStages.has(s)) || upcomingStages[0];
+    onChange([...entries, { id: `addl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, stage: defaultStage, date: '' }]);
+  };
+
+  return (
+    <div className="additional-scheduled-dates">
+      <div className="additional-scheduled-dates-label">先に確定した今後の選考日程</div>
+      {entries.map((entry, i) => {
+        // The entry's own stage stays selectable even if it's no longer "ahead" of currentStage
+        // (e.g. currentStage moved past it without an exact match) so the row never renders an
+        // empty/broken select.
+        const options = upcomingStages.includes(entry.stage) ? upcomingStages : [entry.stage, ...upcomingStages];
+        return (
+          <div key={entry.id} className="additional-scheduled-date-row">
+            <select
+              value={entry.stage}
+              aria-label={`先に確定した選考日程 ${i + 1} のフェーズ`}
+              onChange={e => updateEntry(entry.id, { stage: e.target.value as PipelineStage })}
+            >
+              {options.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <input
+              type="date"
+              value={entry.date}
+              aria-label={`先に確定した選考日程 ${i + 1} の日付`}
+              onChange={e => updateEntry(entry.id, { date: e.target.value })}
+            />
+            <input
+              type="time"
+              value={entry.time || ''}
+              aria-label={`先に確定した選考日程 ${i + 1} の時刻`}
+              onChange={e => updateEntry(entry.id, { time: e.target.value })}
+            />
+            <button
+              type="button"
+              onClick={() => removeEntry(entry.id)}
+              className="remove-button"
+              aria-label={`先に確定した選考日程 ${i + 1} を削除`}
+            >&times;</button>
+          </div>
+        );
+      })}
+      {upcomingStages.length > 0 && (
+        <button type="button" onClick={addEntry} className="add-additional-scheduled-date-button" id={`${idPrefix}-add`}>
+          + 選考日程を追加
+        </button>
+      )}
+    </div>
+  );
+};
+
+// AdditionalScheduledDatesEditorの読み取り専用版（他人の候補者を閲覧中など、編集できない
+// 場面向け）。件数が0件なら何も表示しない。
+const describeAdditionalScheduledDates = (app: CompanyApplication): string =>
+  (app.additionalScheduledDates || [])
+    .map(d => `${d.stage}: ${new Date(d.date + 'T00:00:00').toLocaleDateString('ja-JP')}${d.time ? ` ${d.time}` : ''}`)
+    .join(' / ');
 
 // カーソルを合わせた時に、選考予定日時（確定/調整中いずれか）と、これまでの選考トラック
 // （いつどのフェーズに進んだか）をツールチップで見せる（それぞれ記録なしならその行は省く）
@@ -10492,6 +10637,12 @@ const PipelineCandidateCard: React.FC<{
                                                         idPrefix={`detail-scheduling-ball-${app.id}`}
                                                     />
                                                 )}
+                                                <AdditionalScheduledDatesEditor
+                                                    currentStage={app.stage}
+                                                    value={app.additionalScheduledDates}
+                                                    onChange={next => commitApplicationField(app.id, { additionalScheduledDates: next })}
+                                                    idPrefix={`detail-additional-scheduled-dates-${app.id}`}
+                                                />
                                             </div>
                                         ) : (
                                             <span>
@@ -10500,6 +10651,8 @@ const PipelineCandidateCard: React.FC<{
                                                   : (app.scheduledDate
                                                       ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
                                                       : '未設定')}
+                                                {app.additionalScheduledDates && app.additionalScheduledDates.length > 0 &&
+                                                  ` / 確定済み: ${describeAdditionalScheduledDates(app)}`}
                                             </span>
                                         )}
                                     </div>
