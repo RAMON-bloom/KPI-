@@ -12586,21 +12586,34 @@ const TeamChatReportPanel: React.FC<{
   const [isCustomPeriodPopupOpen, setIsCustomPeriodPopupOpen] = useState(false);
   const [customStartInput, setCustomStartInput] = useState('');
   const [customEndInput, setCustomEndInput] = useState('');
-  // 月間目標入力欄のドラフト値（key: field名）。フォーカスを外れたタイミングでonSetMonthlyTarget
-  // を呼んで確定・保存する——キー入力のたびに毎回保存しない（他のChat Webhook URL入力欄と同じ
-  // 確定タイミングの考え方）。
+  // 月間目標入力欄のドラフト値（key: field名）。フォーカスが外れただけでは保存せず、「設定」
+  // ボタンを押した時にだけ確定・保存する——誤操作（うっかり入力欄からフォーカスを外しただけ）
+  // で目標値が書き変わってしまわないようにするための要望。
   const [targetDrafts, setTargetDrafts] = useState<Record<string, string>>({});
+  const [targetApplyStatus, setTargetApplyStatus] = useState<'idle' | 'applied'>('idle');
   const getTargetDraftValue = (field: 'repliesTarget' | 'interviewsTarget') => {
     if (field in targetDrafts) return targetDrafts[field];
     return String(monthlyTarget[field] ?? '');
   };
-  const commitTargetDraft = (field: 'repliesTarget' | 'interviewsTarget') => {
-    const raw = (targetDrafts[field] ?? '').trim();
-    setTargetDrafts(prev => { const next = { ...prev }; delete next[field]; return next; });
-    const parsed = raw === '' ? undefined : Number(raw);
-    if (parsed !== undefined && (Number.isNaN(parsed) || parsed < 0)) return;
-    if (parsed === (monthlyTarget[field] ?? undefined)) return;
-    onSetMonthlyTarget(field, parsed);
+  const handleApplyTargetDrafts = () => {
+    const fields = ['repliesTarget', 'interviewsTarget'] as const;
+    const parsedByField: Partial<Record<typeof fields[number], number | undefined>> = {};
+    for (const field of fields) {
+      const raw = getTargetDraftValue(field).trim();
+      const parsed = raw === '' ? undefined : Number(raw);
+      if (parsed !== undefined && (Number.isNaN(parsed) || parsed < 0)) {
+        alert('目標値には0以上の数値を入力してください。');
+        return;
+      }
+      parsedByField[field] = parsed;
+    }
+    fields.forEach(field => {
+      if (parsedByField[field] !== (monthlyTarget[field] ?? undefined)) {
+        onSetMonthlyTarget(field, parsedByField[field]);
+      }
+    });
+    setTargetDrafts({});
+    setTargetApplyStatus('applied');
   };
 
   if (!team) return null;
@@ -12706,7 +12719,7 @@ const TeamChatReportPanel: React.FC<{
         </div>
         <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
           <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '1rem' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span>返信数</span>
               <input
@@ -12714,8 +12727,7 @@ const TeamChatReportPanel: React.FC<{
                 min={0}
                 disabled={!canEditTargets}
                 value={getTargetDraftValue('repliesTarget')}
-                onChange={(e) => setTargetDrafts(prev => ({ ...prev, repliesTarget: e.target.value }))}
-                onBlur={() => commitTargetDraft('repliesTarget')}
+                onChange={(e) => { setTargetDrafts(prev => ({ ...prev, repliesTarget: e.target.value })); setTargetApplyStatus('idle'); }}
                 style={{ width: '6em' }}
                 aria-label="月間目標: 返信数"
               />
@@ -12728,14 +12740,17 @@ const TeamChatReportPanel: React.FC<{
                 min={0}
                 disabled={!canEditTargets}
                 value={getTargetDraftValue('interviewsTarget')}
-                onChange={(e) => setTargetDrafts(prev => ({ ...prev, interviewsTarget: e.target.value }))}
-                onBlur={() => commitTargetDraft('interviewsTarget')}
+                onChange={(e) => { setTargetDrafts(prev => ({ ...prev, interviewsTarget: e.target.value })); setTargetApplyStatus('idle'); }}
                 style={{ width: '6em' }}
                 aria-label="月間目標: 面談数"
               />
               <span>件</span>
             </label>
+            {canEditTargets && (
+              <button type="button" onClick={handleApplyTargetDrafts} className="chat-report-send-button">設定</button>
+            )}
           </div>
+          {targetApplyStatus === 'applied' && <p className="gmail-scout-message" style={{ margin: '0.5rem 0 0' }}>設定しました。</p>}
         </div>
       </div>
       {isCustomPeriodPopupOpen && (
