@@ -12706,9 +12706,9 @@ const TeamChatReportPanel: React.FC<{
         </div>
         <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
           <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ flex: '0 0 5em' }}>返信数</span>
+              <span>返信数</span>
               <input
                 type="number"
                 min={0}
@@ -12722,7 +12722,7 @@ const TeamChatReportPanel: React.FC<{
               <span>件</span>
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ flex: '0 0 5em' }}>面談数</span>
+              <span>面談数</span>
               <input
                 type="number"
                 min={0}
