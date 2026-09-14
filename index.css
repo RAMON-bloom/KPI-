@@ -851,63 +851,11 @@ section {
   margin-top: 0.35rem;
   width: 100%;
 }
-/* 候補者詳細カードのインライン編集（detail-card-item）用 — ラベルの右側に確定/調整中の
-   切り替えと、その下の日時 or ボール選択を縦に積む。detail-card-itemは横並び・中央揃えの
-   ため、値側だけ右寄せで縦積みにする。 */
-.scheduling-field-inline {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.3rem;
-}
 /* 選考状況バッジに添える「・候補者ボール/企業ボール」— バッジ本体の色文字より一段目立たなく
    することで、あくまで補足情報であることを示す。 */
 .scheduling-ball-indicator {
   opacity: 0.85;
   font-weight: normal;
-}
-/* 企業が先に確定させてきた、今後のフェーズの選考日程一覧（CompanyApplication.
-   additionalScheduledDates）の編集UI。scheduling-field-inline（縦積み・右寄せ）の中でも、
-   通常のform-groupの中でも自然に収まるよう幅いっぱいに広げる。 */
-.additional-scheduled-dates {
-  width: 100%;
-  margin-top: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-.additional-scheduled-dates-label {
-  font-size: 0.8rem;
-  opacity: 0.75;
-}
-.additional-scheduled-date-row {
-  display: flex;
-  gap: 0.4rem;
-  align-items: center;
-}
-.additional-scheduled-date-row select {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.additional-scheduled-date-row input[type="time"] {
-  flex: 0 0 auto;
-  width: 7rem;
-}
-.additional-scheduled-date-row .remove-button {
-  font-size: 1.1rem;
-  padding: 0 0.25rem;
-}
-.add-additional-scheduled-date-button {
-  align-self: flex-start;
-  background-color: transparent;
-  color: var(--primary-color);
-  border: 1px dashed var(--primary-color);
-  font-size: 0.8rem;
-  padding: 0.2rem 0.6rem;
-}
-.add-additional-scheduled-date-button:hover {
-  background-color: var(--primary-color);
-  color: white;
 }
 /* 先に確定した今後の選考日程は、カレンダー上ではまだ「現在のフェーズ」ではないことが
    一目でわかるよう、通常の選考予定イベントと区別する破線枠を添える。 */
@@ -958,6 +906,124 @@ section {
   color: var(--text-muted-color);
   font-size: 0.9rem;
   flex-shrink: 0;
+}
+/* 選考日程の統合タイムライン（SelectionTimeline）— 過去に通過済みのフェーズの日付をクリック
+   して直接編集できるようにする（既定は読み取り専用のテキストと同じ見た目、hoverで初めて
+   編集可能だと分かる——editableDisplayPropsと同じ「クリックして編集」の作法）。 */
+.stage-track-date.is-editable {
+  cursor: pointer;
+  border-radius: 0.2rem;
+  padding: 0 0.15rem;
+  margin: 0 -0.15rem;
+}
+.stage-track-date.is-editable:hover,
+.stage-track-date.is-editable:focus-visible {
+  background-color: rgba(255, 255, 255, 0.3);
+  outline: none;
+}
+.stage-track-date-input {
+  font-size: 0.68rem;
+  padding: 0;
+  border: none;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 0.15rem;
+  color: var(--text-color);
+  width: 6.5rem;
+}
+/* 現在のフェーズのステップ — 確定/調整中の切り替えと日時入力をそのままステップ内に収める。
+   チェックボックスのラベル・入力欄は白背景の色付きピルの上に乗るため、既定の暗い文字色では
+   読みにくい——ここだけ白系に上書きする。 */
+.stage-track-step.is-current {
+  align-items: stretch;
+  gap: 0.2rem;
+}
+.stage-track-current-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.stage-track-step.is-current .scheduling-status-checkboxes,
+.stage-track-step.is-current .scheduling-ball-checkboxes {
+  gap: 0.5rem;
+  margin-bottom: 0;
+  font-size: 0.68rem;
+}
+.stage-track-step.is-current .scheduling-status-checkboxes label,
+.stage-track-step.is-current .scheduling-ball-checkboxes label {
+  color: white;
+  font-size: 0.68rem;
+  gap: 0.2rem;
+}
+.stage-track-step.is-current .scheduled-date-time-inputs input,
+.stage-track-step.is-current .scheduling-note-input {
+  font-size: 0.68rem;
+  padding: 0.1rem 0.2rem;
+  border: none;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 0.15rem;
+}
+.stage-track-step.is-current .scheduled-date-time-inputs input[type="time"] {
+  width: 4.5rem;
+}
+.stage-track-step.is-current .editable-value {
+  color: white;
+}
+.stage-track-step.is-current .editable-value:hover,
+.stage-track-step.is-current .editable-value:focus-visible {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+/* 先のフェーズのステップ（企業が前もって確定させてきた日程、まだ到達していない）— 破線枠と
+   やや薄い背景で「まだ先の話」であることを視覚的に示す。 */
+.stage-track-step.is-future {
+  background-color: transparent;
+  border: 1px dashed var(--badge-color, var(--secondary-color));
+  color: var(--text-color);
+}
+.stage-track-step.is-future .stage-track-stage {
+  color: var(--badge-color, var(--secondary-color));
+}
+.stage-track-stage-select {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--badge-color, var(--secondary-color));
+}
+.stage-track-step.is-future .scheduled-date-time-inputs input {
+  font-size: 0.68rem;
+  padding: 0.1rem 0.2rem;
+}
+.stage-track-step.is-future .scheduled-date-time-inputs input[type="time"] {
+  width: 4.5rem;
+}
+.stage-track-remove {
+  background: none;
+  border: none;
+  color: var(--danger-color);
+  font-size: 0.9rem;
+  font-weight: bold;
+  padding: 0;
+  line-height: 1;
+  align-self: flex-end;
+}
+.stage-track-arrow-future {
+  opacity: 0.6;
+}
+.stage-track-add {
+  background-color: transparent;
+  color: var(--text-muted-color);
+  border: 1px dashed var(--border-color);
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: bold;
+  line-height: 1;
+  padding: 0.25rem 0.6rem;
+  align-self: center;
+}
+.stage-track-add:hover {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
 }
 
 

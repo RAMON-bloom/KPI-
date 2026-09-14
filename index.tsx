@@ -4772,7 +4772,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-09-14',
     items: [
-      '選考企業が、まだ到達していない先のフェーズの選考日時まで前もって確定させてきた場合に備え、「先に確定した今後の選考日程」を複数登録できるようにした。候補者登録フォームの選考一覧・選考情報編集モーダル・候補者詳細カードのいずれからも、フェーズを選んで日時を追加でき、パイプラインカレンダーにも（破線枠付きで）表示される。実際にそのフェーズまで選考が進んだ時点で、登録しておいた日時が自動的に「選考予定日」へ昇格する',
+      '「選考トラック」と「選考予定日」を1本の「選考日程」タイムラインに統合。過去に通過したフェーズ（実施日をクリックして直接修正可能）・現在のフェーズ（確定/調整中の切り替え）・企業が前もって確定させてきた先のフェーズの日程を、フェーズが一目で分かる一続きの流れとして表示・編集できるようにした。項目数が減った分カードもコンパクトになった。パイプラインカレンダーには先の確定日程も（破線枠付きで）表示され、実際にそのフェーズまで選考が進むと自動的に「選考予定日」へ昇格する',
     ],
   },
   {
@@ -7437,46 +7437,15 @@ const CandidateModal: React.FC<{
                             aria-label={`次アクション ${index + 1}`}
                           />
                        </div>
-                       <div className="form-group">
-                          <label htmlFor={`scheduledDate-${app.id}`}>選考予定日</label>
-                          <SchedulingStatusToggle
-                            status={app.schedulingStatus || 'confirmed'}
-                            onChange={status => handleApplicationSchedulingPatch(index, status === 'confirmed'
-                              ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
-                              : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined })}
-                            idPrefix={`scheduling-status-${app.id}`}
-                          />
-                          {(app.schedulingStatus || 'confirmed') === 'confirmed' ? (
-                            <div className="scheduled-date-time-inputs">
-                              <input
-                                id={`scheduledDate-${app.id}`}
-                                type="date"
-                                value={app.scheduledDate || ''}
-                                onChange={e => handleApplicationChange(index, 'scheduledDate', e.target.value)}
-                                aria-label={`選考予定日 ${index + 1}`}
-                              />
-                              <input
-                                id={`scheduledTime-${app.id}`}
-                                type="time"
-                                value={app.scheduledTime || ''}
-                                onChange={e => handleApplicationChange(index, 'scheduledTime', e.target.value)}
-                                aria-label={`開始時刻 ${index + 1}`}
-                              />
-                            </div>
-                          ) : (
-                            <SchedulingBallField
-                              value={app.schedulingBallOwner}
-                              note={app.schedulingNote}
-                              onChangeBall={v => handleApplicationSchedulingPatch(index, { schedulingBallOwner: v, schedulingNote: v === 'other' ? app.schedulingNote : undefined })}
-                              onChangeNote={note => handleApplicationSchedulingPatch(index, { schedulingNote: note })}
-                              idPrefix={`scheduling-ball-${app.id}`}
-                            />
-                          )}
-                          <AdditionalScheduledDatesEditor
-                            currentStage={app.stage}
-                            value={app.additionalScheduledDates}
-                            onChange={next => handleApplicationSchedulingPatch(index, { additionalScheduledDates: next })}
-                            idPrefix={`additional-scheduled-dates-${app.id}`}
+                       <div className="form-group form-group-span-2">
+                          <label>選考日程</label>
+                          <SelectionTimeline
+                            app={app}
+                            editable
+                            onCommitStageHistory={(next) => handleApplicationSchedulingPatch(index, { stageHistory: next })}
+                            onCommitSchedule={(patch) => handleApplicationSchedulingPatch(index, patch)}
+                            onCommitAdditionalDates={(next) => handleApplicationSchedulingPatch(index, { additionalScheduledDates: next })}
+                            idPrefix={`scheduling-${app.id}`}
                           />
                        </div>
                        <div className="form-group">
@@ -7711,12 +7680,6 @@ const ApplicationModal: React.FC<{
                             {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
                         </select>
                     </div>
-                    {application.stageHistory && application.stageHistory.length > 0 && (
-                        <div className="form-group">
-                            <label>選考トラック</label>
-                            <StageTrack history={application.stageHistory} />
-                        </div>
-                    )}
                     <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
                         <input
@@ -7728,49 +7691,14 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label htmlFor="scheduledDate">選考予定日</label>
-                        <SchedulingStatusToggle
-                            status={application.schedulingStatus || 'confirmed'}
-                            onChange={status => setApplication(prev => ({
-                                ...prev,
-                                ...(status === 'confirmed'
-                                  ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
-                                  : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined }),
-                            }))}
-                            idPrefix="application-modal-scheduling-status"
-                        />
-                        {(application.schedulingStatus || 'confirmed') === 'confirmed' ? (
-                            <div className="scheduled-date-time-inputs">
-                                <input
-                                    type="date"
-                                    id="scheduledDate"
-                                    name="scheduledDate"
-                                    value={application.scheduledDate || ''}
-                                    onChange={handleChange}
-                                />
-                                <input
-                                    type="time"
-                                    id="scheduledTime"
-                                    name="scheduledTime"
-                                    aria-label="開始時刻"
-                                    value={application.scheduledTime || ''}
-                                    onChange={handleChange}
-                                />
-                            </div>
-                        ) : (
-                            <SchedulingBallField
-                                value={application.schedulingBallOwner}
-                                note={application.schedulingNote}
-                                onChangeBall={v => setApplication(prev => ({ ...prev, schedulingBallOwner: v, schedulingNote: v === 'other' ? prev.schedulingNote : undefined }))}
-                                onChangeNote={note => setApplication(prev => ({ ...prev, schedulingNote: note }))}
-                                idPrefix="application-modal-scheduling-ball"
-                            />
-                        )}
-                        <AdditionalScheduledDatesEditor
-                            currentStage={application.stage}
-                            value={application.additionalScheduledDates}
-                            onChange={next => setApplication(prev => ({ ...prev, additionalScheduledDates: next }))}
-                            idPrefix="application-modal-additional-scheduled-dates"
+                        <label>選考日程</label>
+                        <SelectionTimeline
+                            app={application}
+                            editable
+                            onCommitStageHistory={(next) => setApplication(prev => ({ ...prev, stageHistory: next }))}
+                            onCommitSchedule={(patch) => setApplication(prev => ({ ...prev, ...patch }))}
+                            onCommitAdditionalDates={(next) => setApplication(prev => ({ ...prev, additionalScheduledDates: next }))}
+                            idPrefix="application-modal-scheduling"
                         />
                     </div>
                     <div className="form-group">
@@ -9347,122 +9275,239 @@ const describeSchedulingBall = (app: CompanyApplication): string => {
   return '未選択';
 };
 
-// 企業がまだ到達していない先のフェーズの選考日程まで前もって確定させてきた場合に、その
-// 日程を控えておくための追加リストの編集UI（see CompanyApplication.additionalScheduledDates）。
-// 選べるフェーズはcurrentStageより先のFORWARD_PIPELINE_STAGESのみ——現在のフェーズ自体の
-// 日程はscheduledDate/scheduledTime側の専用フィールドを使う。3箇所（候補者登録フォームの
-// 選考一覧、選考情報編集モーダル、候補者詳細カードのインライン編集）すべてで共通化している。
-const AdditionalScheduledDatesEditor: React.FC<{
-  currentStage: PipelineStage;
-  value: CompanyApplication['additionalScheduledDates'];
-  onChange: (next: NonNullable<CompanyApplication['additionalScheduledDates']>) => void;
-  idPrefix: string;
-}> = ({ currentStage, value, onChange, idPrefix }) => {
-  const entries = value || [];
-  const currentIdx = FORWARD_PIPELINE_STAGES.indexOf(currentStage);
-  const upcomingStages = currentIdx === -1 ? [] : FORWARD_PIPELINE_STAGES.slice(currentIdx + 1);
-
-  if (upcomingStages.length === 0 && entries.length === 0) return null;
-
-  const updateEntry = (id: string, patch: Partial<NonNullable<CompanyApplication['additionalScheduledDates']>[number]>) => {
-    onChange(entries.map(e => e.id === id ? { ...e, ...patch } : e));
-  };
-  const removeEntry = (id: string) => onChange(entries.filter(e => e.id !== id));
-  const addEntry = () => {
-    const usedStages = new Set(entries.map(e => e.stage));
-    const defaultStage = upcomingStages.find(s => !usedStages.has(s)) || upcomingStages[0];
-    onChange([...entries, { id: `addl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, stage: defaultStage, date: '' }]);
-  };
-
-  return (
-    <div className="additional-scheduled-dates">
-      <div className="additional-scheduled-dates-label">先に確定した今後の選考日程</div>
-      {entries.map((entry, i) => {
-        // The entry's own stage stays selectable even if it's no longer "ahead" of currentStage
-        // (e.g. currentStage moved past it without an exact match) so the row never renders an
-        // empty/broken select.
-        const options = upcomingStages.includes(entry.stage) ? upcomingStages : [entry.stage, ...upcomingStages];
-        return (
-          <div key={entry.id} className="additional-scheduled-date-row">
-            <select
-              value={entry.stage}
-              aria-label={`先に確定した選考日程 ${i + 1} のフェーズ`}
-              onChange={e => updateEntry(entry.id, { stage: e.target.value as PipelineStage })}
-            >
-              {options.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <input
-              type="date"
-              value={entry.date}
-              aria-label={`先に確定した選考日程 ${i + 1} の日付`}
-              onChange={e => updateEntry(entry.id, { date: e.target.value })}
-            />
-            <input
-              type="time"
-              value={entry.time || ''}
-              aria-label={`先に確定した選考日程 ${i + 1} の時刻`}
-              onChange={e => updateEntry(entry.id, { time: e.target.value })}
-            />
-            <button
-              type="button"
-              onClick={() => removeEntry(entry.id)}
-              className="remove-button"
-              aria-label={`先に確定した選考日程 ${i + 1} を削除`}
-            >&times;</button>
-          </div>
-        );
-      })}
-      {upcomingStages.length > 0 && (
-        <button type="button" onClick={addEntry} className="add-additional-scheduled-date-button" id={`${idPrefix}-add`}>
-          + 選考日程を追加
-        </button>
-      )}
-    </div>
-  );
-};
-
-// AdditionalScheduledDatesEditorの読み取り専用版（他人の候補者を閲覧中など、編集できない
-// 場面向け）。件数が0件なら何も表示しない。
+// 先に確定した今後の選考日程（CompanyApplication.additionalScheduledDates）の表示用文字列。
+// 件数が0件なら空文字列を返す。
 const describeAdditionalScheduledDates = (app: CompanyApplication): string =>
   (app.additionalScheduledDates || [])
     .map(d => `${d.stage}: ${new Date(d.date + 'T00:00:00').toLocaleDateString('ja-JP')}${d.time ? ` ${d.time}` : ''}`)
     .join(' / ');
 
-// カーソルを合わせた時に、選考予定日時（確定/調整中いずれか）と、これまでの選考トラック
-// （いつどのフェーズに進んだか）をツールチップで見せる（それぞれ記録なしならその行は省く）
-// — カードの詳細を展開しなくても、バッジにホバーするだけで確認できるようにするため。
-// editableな（＝クリックで編集できる）バッジには末尾に案内文を足す。
+// カーソルを合わせた時に、選考予定日時（確定/調整中いずれか）・先に確定した今後の選考日程・
+// これまでの選考トラック（いつどのフェーズに進んだか）をツールチップで見せる（それぞれ記録
+// なしならその行は省く）— カードの詳細を展開しなくても、バッジにホバーするだけで確認できる
+// ようにするため。editableな（＝クリックで編集できる）バッジには末尾に案内文を足す。
 const buildStageTooltip = (app: CompanyApplication, editable: boolean): string => {
   const scheduleLine = (app.schedulingStatus || 'confirmed') === 'adjusting'
     ? `\n日程調整中: ${describeSchedulingBall(app)}`
     : (app.scheduledDate
         ? `\n選考予定日時: ${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
         : '');
+  const additionalLine = app.additionalScheduledDates && app.additionalScheduledDates.length > 0
+    ? `\n先に確定した日程: ${describeAdditionalScheduledDates(app)}`
+    : '';
   const trackLine = app.stageHistory && app.stageHistory.length > 0
     ? `\n選考トラック: ${app.stageHistory.map(h => `${h.stage}(${h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'})`).join(' → ')}`
     : '';
-  const base = `${app.companyName}: ${app.stage}${scheduleLine}${trackLine}`;
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}${additionalLine}${trackLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
 };
 
-// 選考トラック — stageHistoryをステージ→日付の一連のステップとして描画する。候補者カードの
-// 「詳細を表示（編集する）」を開いた時の詳細カードと、そこまで開かなくても選考情報を確認できる
-// ApplicationModal（バッジをクリックするだけで開く軽量な方）の両方から使えるよう共通化した。
-const StageTrack: React.FC<{ history: CompanyApplication['stageHistory'] }> = ({ history }) => {
-  if (!history || history.length === 0) return null;
+// 選考トラックの1ステップ（既に通過済みのフェーズ）— 実際にその選考が行われた日付を表示する。
+// 日付部分はクリックすると直接編集できる（stageHistoryの各エントリは元々、ステージ変更時に
+// 保存日を仮置きして後から実際の選考予定日で補正する「推測」だったが、ここから直接正しい日付
+// へ手動で修正できるようにし、選考トラックが常に正確な実施日の記録になるようにした）。
+const PastStagePill: React.FC<{
+  stage: PipelineStage;
+  date: string | undefined;
+  editable: boolean;
+  onCommitDate: (value: string | undefined) => void;
+}> = ({ stage, date, editable, onCommitDate }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
+  const display = date ? new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前';
   return (
-    <div className="stage-track">
-      {history.map((h, i) => (
-        <React.Fragment key={i}>
+    <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[stage] } as React.CSSProperties}>
+      <span className="stage-track-stage">{stage}</span>
+      {editable && isEditing ? (
+        <input
+          ref={inputRef}
+          type="date"
+          className="stage-track-date-input"
+          value={date || ''}
+          onChange={(e) => onCommitDate(e.target.value || undefined)}
+          onBlur={() => setIsEditing(false)}
+          aria-label={`${stage}の実施日`}
+        />
+      ) : (
+        <span
+          {...(editable ? editableDisplayProps(() => setIsEditing(true), `${stage}の実施日`, '') : {})}
+          className={`stage-track-date ${editable ? 'is-editable' : ''}`}
+        >{display}</span>
+      )}
+    </span>
+  );
+};
+
+// 選考トラックの現在のステップ（app.stageそのもの）— これまでの「選考予定日」フィールドと
+// 全く同じ確定/調整中の切り替え・入力欄を、トラックの一部として表示する。
+const CurrentStagePill: React.FC<{
+  app: CompanyApplication;
+  editable: boolean;
+  onCommitSchedule: (patch: Partial<CompanyApplication>) => void;
+  idPrefix: string;
+}> = ({ app, editable, onCommitSchedule, idPrefix }) => (
+  <span className="stage-track-step is-current" style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}>
+    <span className="stage-track-stage">{app.stage}</span>
+    {editable ? (
+      <div className="stage-track-current-schedule">
+        <SchedulingStatusToggle
+          status={app.schedulingStatus || 'confirmed'}
+          onChange={(status) => onCommitSchedule(status === 'confirmed'
+            ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
+            : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined })}
+          idPrefix={`${idPrefix}-status`}
+        />
+        {(app.schedulingStatus || 'confirmed') === 'confirmed' ? (
+          <ScheduledDateTimeField
+            date={app.scheduledDate}
+            time={app.scheduledTime}
+            onCommitDate={(v) => onCommitSchedule({ scheduledDate: v })}
+            onCommitTime={(v) => onCommitSchedule({ scheduledTime: v })}
+          />
+        ) : (
+          <SchedulingBallField
+            value={app.schedulingBallOwner}
+            note={app.schedulingNote}
+            onChangeBall={(v) => onCommitSchedule({ schedulingBallOwner: v, schedulingNote: v === 'other' ? app.schedulingNote : undefined })}
+            onChangeNote={(note) => onCommitSchedule({ schedulingNote: note })}
+            idPrefix={`${idPrefix}-ball`}
+          />
+        )}
+      </div>
+    ) : (
+      <span className="stage-track-date">
+        {(app.schedulingStatus || 'confirmed') === 'adjusting'
+          ? `調整中（${describeSchedulingBall(app)}）`
+          : (app.scheduledDate
+              ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
+              : '未設定')}
+      </span>
+    )}
+  </span>
+);
+
+// 選考トラックの先のステップ（企業がまだ到達していないフェーズの日程を前もって確定させて
+// きた場合、see CompanyApplication.additionalScheduledDates）— どのフェーズの日程かを選ぶ
+// セレクトと、日時の入力欄、削除ボタンを持つ。
+const FutureStagePill: React.FC<{
+  entry: NonNullable<CompanyApplication['additionalScheduledDates']>[number];
+  options: PipelineStage[];
+  editable: boolean;
+  onChangeStage: (stage: PipelineStage) => void;
+  onChangeDate: (date: string | undefined) => void;
+  onChangeTime: (time: string | undefined) => void;
+  onRemove: () => void;
+}> = ({ entry, options, editable, onChangeStage, onChangeDate, onChangeTime, onRemove }) => (
+  <span className="stage-track-step is-future" style={{ '--badge-color': STAGE_COLOR_MAP[entry.stage] } as React.CSSProperties}>
+    {editable ? (
+      <select
+        className="stage-track-stage-select"
+        value={entry.stage}
+        aria-label="先に確定した選考日程のフェーズ"
+        onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
+      >
+        {options.map(s => <option key={s} value={s}>{s}</option>)}
+      </select>
+    ) : (
+      <span className="stage-track-stage">{entry.stage}</span>
+    )}
+    {editable ? (
+      <ScheduledDateTimeField
+        date={entry.date || undefined}
+        time={entry.time}
+        onCommitDate={onChangeDate}
+        onCommitTime={onChangeTime}
+      />
+    ) : (
+      <span className="stage-track-date">
+        {entry.date ? `${new Date(entry.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}${entry.time ? ` ${entry.time}` : ''}` : '未設定'}
+      </span>
+    )}
+    {editable && (
+      <button type="button" className="stage-track-remove" onClick={onRemove} aria-label={`${entry.stage}の先付け日程を削除`}>&times;</button>
+    )}
+  </span>
+);
+
+// 選考日程の統合タイムライン — 過去に通過したフェーズ（stageHistory、実施日は直接編集可）、
+// 現在のフェーズ（app.stage、確定/調整中の切り替えと日時入力）、企業が前もって確定させてきた
+// 先のフェーズの日程（additionalScheduledDates）を、1本の横並びチェーンとして一度に表示・
+// 編集できるようにしたもの。以前は「選考トラック」（読み取り専用の履歴）と「選考予定日」
+// （現在のフェーズだけの入力欄）が別々のカード項目だったが、①どのフェーズがいつなのか一目で
+// 分かりにくい、②項目が増えてカードが縦に長くなる、という2つの問題があったため統合した。
+// 候補者登録フォームの選考一覧・選考情報編集モーダル・候補者詳細カードのインライン編集の
+// 3箇所すべてで共通化している。
+const SelectionTimeline: React.FC<{
+  app: CompanyApplication;
+  editable: boolean;
+  onCommitStageHistory: (nextHistory: NonNullable<CompanyApplication['stageHistory']>) => void;
+  onCommitSchedule: (patch: Partial<CompanyApplication>) => void;
+  onCommitAdditionalDates: (next: NonNullable<CompanyApplication['additionalScheduledDates']>) => void;
+  idPrefix: string;
+}> = ({ app, editable, onCommitStageHistory, onCommitSchedule, onCommitAdditionalDates, idPrefix }) => {
+  // stageHistoryが無い（この機能より前に作られた等）場合でも、少なくとも現在のフェーズの
+  // ステップだけは表示できるよう、その場限りのフォールバックを組み立てる。
+  const history = app.stageHistory && app.stageHistory.length > 0 ? app.stageHistory : [{ stage: app.stage }];
+  const pastEntries = history.slice(0, -1);
+  const additional = app.additionalScheduledDates || [];
+  const currentIdx = FORWARD_PIPELINE_STAGES.indexOf(app.stage);
+  const upcomingStages = currentIdx === -1 ? [] : FORWARD_PIPELINE_STAGES.slice(currentIdx + 1);
+
+  return (
+    <div className="stage-track selection-timeline">
+      {pastEntries.map((h, i) => (
+        <React.Fragment key={`past-${i}`}>
           {i > 0 && <span className="stage-track-arrow">→</span>}
-          <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[h.stage] } as React.CSSProperties}>
-            <span className="stage-track-stage">{h.stage}</span>
-            <span className="stage-track-date">
-              {h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'}
-            </span>
-          </span>
+          <PastStagePill
+            stage={h.stage}
+            date={h.date}
+            editable={editable}
+            onCommitDate={(v) => {
+              const next = [...history];
+              next[i] = { ...next[i], date: v };
+              onCommitStageHistory(next);
+            }}
+          />
         </React.Fragment>
       ))}
+      {pastEntries.length > 0 && <span className="stage-track-arrow">→</span>}
+      <CurrentStagePill app={app} editable={editable} onCommitSchedule={onCommitSchedule} idPrefix={idPrefix} />
+      {additional.map((entry) => {
+        // entryの現在のstageが既にupcomingStagesから外れている（appのstageがそれを追い越した
+        // 等）場合でも、セレクトが空にならないよう自分自身は常に選択肢に含める。
+        const options = upcomingStages.includes(entry.stage) ? upcomingStages : [entry.stage, ...upcomingStages];
+        return (
+          <React.Fragment key={entry.id}>
+            <span className="stage-track-arrow stage-track-arrow-future">→</span>
+            <FutureStagePill
+              entry={entry}
+              options={options}
+              editable={editable}
+              onChangeStage={(stage) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, stage } : e))}
+              onChangeDate={(date) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, date: date || '' } : e))}
+              onChangeTime={(time) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, time } : e))}
+              onRemove={() => onCommitAdditionalDates(additional.filter(e => e.id !== entry.id))}
+            />
+          </React.Fragment>
+        );
+      })}
+      {editable && upcomingStages.length > 0 && (
+        <>
+          <span className="stage-track-arrow stage-track-arrow-future">→</span>
+          <button
+            type="button"
+            className="stage-track-add"
+            onClick={() => {
+              const usedStages = new Set(additional.map(e => e.stage));
+              const defaultStage = upcomingStages.find(s => !usedStages.has(s)) || upcomingStages[0];
+              onCommitAdditionalDates([...additional, { id: `addl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, stage: defaultStage, date: '' }]);
+            }}
+            aria-label="先に確定した選考日程を追加"
+            title="先に確定した選考日程を追加"
+          >+</button>
+        </>
+      )}
     </div>
   );
 };
@@ -10596,64 +10641,23 @@ const PipelineCandidateCard: React.FC<{
                                             </span>
                                         )}
                                     </div>
-                                    {app.stageHistory && app.stageHistory.length > 0 && (
-                                        <div className="detail-card-item detail-card-item-track">
-                                            <span>選考トラック:</span>
-                                            <StageTrack history={app.stageHistory} />
-                                        </div>
-                                    )}
+                                    <div className="detail-card-item detail-card-item-track">
+                                        <span>選考日程:</span>
+                                        <SelectionTimeline
+                                            app={app}
+                                            editable={candidateIsOwn}
+                                            onCommitStageHistory={(next) => commitApplicationField(app.id, { stageHistory: next })}
+                                            onCommitSchedule={(patch) => commitApplicationField(app.id, patch)}
+                                            onCommitAdditionalDates={(next) => commitApplicationField(app.id, { additionalScheduledDates: next })}
+                                            idPrefix={`detail-scheduling-${app.id}`}
+                                        />
+                                    </div>
                                     <div className="detail-card-item">
                                         <span>次アクション:</span>
                                         {candidateIsOwn ? (
                                             <InlineTextField value={app.nextAction || ''} onCommit={(v) => commitApplicationField(app.id, { nextAction: v })} placeholder="次アクション" ariaLabel="次アクション" />
                                         ) : (
                                             <span>{app.nextAction || '未設定'}</span>
-                                        )}
-                                    </div>
-                                    <div className="detail-card-item">
-                                        <span>選考予定日:</span>
-                                        {candidateIsOwn ? (
-                                            <div className="scheduling-field-inline">
-                                                <SchedulingStatusToggle
-                                                    status={app.schedulingStatus || 'confirmed'}
-                                                    onChange={(status) => commitApplicationField(app.id, status === 'confirmed'
-                                                      ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
-                                                      : { schedulingStatus: 'adjusting', scheduledDate: undefined, scheduledTime: undefined })}
-                                                    idPrefix={`detail-scheduling-status-${app.id}`}
-                                                />
-                                                {(app.schedulingStatus || 'confirmed') === 'confirmed' ? (
-                                                    <ScheduledDateTimeField
-                                                        date={app.scheduledDate}
-                                                        time={app.scheduledTime}
-                                                        onCommitDate={(v) => commitApplicationField(app.id, { scheduledDate: v })}
-                                                        onCommitTime={(v) => commitApplicationField(app.id, { scheduledTime: v })}
-                                                    />
-                                                ) : (
-                                                    <SchedulingBallField
-                                                        value={app.schedulingBallOwner}
-                                                        note={app.schedulingNote}
-                                                        onChangeBall={(v) => commitApplicationField(app.id, { schedulingBallOwner: v, schedulingNote: v === 'other' ? app.schedulingNote : undefined })}
-                                                        onChangeNote={(note) => commitApplicationField(app.id, { schedulingNote: note })}
-                                                        idPrefix={`detail-scheduling-ball-${app.id}`}
-                                                    />
-                                                )}
-                                                <AdditionalScheduledDatesEditor
-                                                    currentStage={app.stage}
-                                                    value={app.additionalScheduledDates}
-                                                    onChange={next => commitApplicationField(app.id, { additionalScheduledDates: next })}
-                                                    idPrefix={`detail-additional-scheduled-dates-${app.id}`}
-                                                />
-                                            </div>
-                                        ) : (
-                                            <span>
-                                                {(app.schedulingStatus || 'confirmed') === 'adjusting'
-                                                  ? `調整中（${describeSchedulingBall(app)}）`
-                                                  : (app.scheduledDate
-                                                      ? `${new Date(app.scheduledDate + 'T00:00:00').toLocaleDateString('ja-JP')}${app.scheduledTime ? ` ${app.scheduledTime}` : ''}`
-                                                      : '未設定')}
-                                                {app.additionalScheduledDates && app.additionalScheduledDates.length > 0 &&
-                                                  ` / 確定済み: ${describeAdditionalScheduledDates(app)}`}
-                                            </span>
                                         )}
                                     </div>
                                     <div className="detail-card-item">
