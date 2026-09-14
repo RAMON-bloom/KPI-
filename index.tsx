@@ -12706,9 +12706,6 @@ const TeamChatReportPanel: React.FC<{
         </div>
         <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
           <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
-          <p className="no-data-message" style={{ margin: '0 0 0.5rem' }}>
-            ここで設定した値が、全メンバー共通の「個人の月目標」としてそのまま適用されます（メンバー本人の目標設定とは別です）。レポートの「月間ピッチ」「達成率」は、各メンバー本人の今月の累計実績をこの目標と比較して計算されます。
-          </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span style={{ flex: '0 0 5em' }}>返信数</span>
