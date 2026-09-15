@@ -619,7 +619,44 @@ interface MemoEntry {
   title: string;
   content: string;
   updatedAt: string; // ISO timestamp, set automatically whenever this entry is saved
+  // Only set on entries created from a 面談ログ取り込み (音声/Drive議事録/手動ファイル) — the
+  // actual date the interview happened, distinct from updatedAt (which moves whenever the entry
+  // is later edited). Used to display multiple interview logs in chronological order regardless
+  // of the order they were imported in. Absent on manually-typed free memos.
+  logDate?: string;
+  // Drive file id of the 議事録 this entry was generated from (Drive検索から取り込んだ場合のみ)
+  // — lets the Drive search results list flag files that have already been imported, without
+  // relying on fragile title-text matching.
+  sourceFileId?: string;
 }
+
+// 面談ログ・メモを時系列順に並べ替える —面談ログは実際の面談日（logDate）、手入力メモは
+// 作成/更新日時（updatedAt）を基準にする。日時が同じ・片方欠けている場合は元の並び順を保つ
+// （安定ソート）。
+const sortMemosChronologically = (memos: MemoEntry[]): MemoEntry[] =>
+  memos
+    .map((memo, index) => ({ memo, index }))
+    .sort((a, b) => {
+      const ta = a.memo.logDate ?? a.memo.updatedAt;
+      const tb = b.memo.logDate ?? b.memo.updatedAt;
+      if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+      return a.index - b.index;
+    })
+    .map(({ memo }) => memo);
+
+// Drive file idのうち、既にmemosへ取り込み済み（sourceFileIdが一致するmemoが存在する）ものの集合。
+const getImportedInterviewLogFileIds = (memos: MemoEntry[] | undefined): Set<string> =>
+  new Set((memos || []).map(m => m.sourceFileId).filter((id): id is string => !!id));
+
+// Drive検索結果を「未取込みのものを先に、取込み済みのものは後ろに」の順で並べ替える —
+// 候補者に新しい面談ログが増えたときに、どれが新規かひと目でわかるようにするため。
+const sortInterviewLogResultsByImportStatus = (results: InterviewLogFile[], importedFileIds: Set<string>): InterviewLogFile[] =>
+  [...results].sort((a, b) => {
+    const aImported = importedFileIds.has(a.id);
+    const bImported = importedFileIds.has(b.id);
+    if (aImported !== bImported) return aImported ? 1 : -1;
+    return new Date(b.modifiedTime).getTime() - new Date(a.modifiedTime).getTime();
+  });
 
 interface Candidate {
   id: string;
@@ -4849,6 +4886,13 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-15',
+    items: [
+      '候補者の面談ログ・メモを、面談の実施日（音声はアップロード日、議事録・ファイルはその日付）に基づいて時系列順に表示するようにした。取り込んだ順によらず、複数回分の面談要約が実際にあった順番で並ぶ',
+      '登録済み候補者の面談ログをGoogleドライブから検索する際、既に取り込み済みのファイルには「（取込み済み）」と表示し、一覧の下側にまとめるようにした。まだ取り込んでいない新しい面談ログだけを見分けて取り込めるようになる（既存の面談ログを選び直して再取込みすることも引き続き可能）',
+    ],
+  },
+  {
     date: '2026-09-14',
     items: [
       '「選考トラック」と「選考予定日」を1本の「選考日程」タイムラインに統合。過去に通過したフェーズ（実施日をクリックして直接修正可能）・現在のフェーズ（確定/調整中の切り替え）・企業が前もって確定させてきた先のフェーズの日程を、フェーズが一目で分かる一続きの流れとして表示・編集できるようにした。項目数が減った分カードもコンパクトになった。パイプラインカレンダーには先の確定日程も（破線枠付きで）表示され、実際にそのフェーズまで選考が進むと自動的に「選考予定日」へ昇格する',
@@ -6980,12 +7024,14 @@ const CandidateModal: React.FC<{
 
             // 面談ごとに分けて保存する — memosに1件ずつ追加するので、複数の音声を取り込んでも
             // 前回分が消えずに残る。
-            const dateLabel = new Date().toLocaleDateString('ja-JP');
+            const now = new Date();
+            const dateLabel = now.toLocaleDateString('ja-JP');
             const newMemo: MemoEntry = {
                 id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                 title: `面談ログ（音声: ${audioFile.name}・${dateLabel}）`,
                 content: response.text.trim(),
-                updatedAt: new Date().toISOString(),
+                updatedAt: now.toISOString(),
+                logDate: now.toISOString(),
             };
             setCandidate(prev => ({
                 ...prev,
@@ -7060,7 +7106,10 @@ const CandidateModal: React.FC<{
     // extract text from those formats client-side.
     // 面談ごとに分けて保存する — 複数の面談ログを取り込んでも、それぞれ独立したメモとして
     // memosに追加されるので、1つの文字列に連結されて読みづらくなることがない。
-    const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
+    // logDateは実際の面談日（Drive議事録のmodifiedTime／ファイルのlastModified）、sourceFileId
+    // はDrive検索経由で取り込んだ場合のみそのDriveファイルidを渡す（検索結果一覧での
+    // 「取込み済み」判定に使う）。
+    const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string, logDate: string, sourceFileId?: string) => {
         setIsSummarizingInterviewLog(true);
         try {
             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
@@ -7073,6 +7122,8 @@ const CandidateModal: React.FC<{
                 title: `面談ログ（${sourceLabel}・${dateLabel}）`,
                 content: response.text.trim(),
                 updatedAt: new Date().toISOString(),
+                logDate,
+                sourceFileId,
             };
             setCandidate(prev => ({
                 ...prev,
@@ -7093,11 +7144,14 @@ const CandidateModal: React.FC<{
     const handleUseInterviewLog = async (file: InterviewLogFile) => {
         try {
             const text = await exportGoogleDocAsText(file.id);
+            const logDate = new Date(file.modifiedTime).toISOString();
             const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
             await summarizeAndAppendInterviewLog(
                 buildInterviewSummaryTranscriptPrompt(text),
                 file.name,
-                dateLabel
+                dateLabel,
+                logDate,
+                file.id
             );
             setInterviewLogResults(null);
         } catch (error) {
@@ -7114,6 +7168,7 @@ const CandidateModal: React.FC<{
     const handleInterviewLogFile = async (files: FileList) => {
         if (!files || files.length === 0) return;
         const file = files[0];
+        const logDate = new Date(file.lastModified).toISOString();
         const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
         if (file.name.toLowerCase().endsWith('.gdoc')) {
             try {
@@ -7123,7 +7178,7 @@ const CandidateModal: React.FC<{
                     return;
                 }
                 const text = await exportGoogleDocAsText(docId);
-                await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+                await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel, logDate);
             } catch (error) {
                 console.error('Error reading .gdoc pointer file:', error);
                 alert('Googleドキュメントの取得中にエラーが発生しました。');
@@ -7141,7 +7196,8 @@ const CandidateModal: React.FC<{
                 await summarizeAndAppendInterviewLog(
                     buildInterviewSummaryTranscriptPrompt(text),
                     file.name,
-                    dateLabel
+                    dateLabel,
+                    logDate
                 );
             } else {
                 const base64Data = await fileToBase64(file);
@@ -7153,7 +7209,8 @@ const CandidateModal: React.FC<{
                         ],
                     },
                     file.name,
-                    dateLabel
+                    dateLabel,
+                    logDate
                 );
             }
         } catch (error) {
@@ -7340,15 +7397,23 @@ const CandidateModal: React.FC<{
                     >
                         {isSearchingInterviewLogs ? '検索中...' : '候補者名でGoogleドライブを検索'}
                     </button>
-                    {interviewLogResults && interviewLogResults.length > 0 && (
+                    {interviewLogResults && interviewLogResults.length > 0 && (() => {
+                        const importedFileIds = getImportedInterviewLogFileIds(candidate.memos);
+                        const sortedResults = sortInterviewLogResultsByImportStatus(interviewLogResults, importedFileIds);
+                        return (
                         <ul className="user-management-list" style={{ marginTop: '0.5rem' }}>
-                            {interviewLogResults.map(file => (
-                                <li key={file.id} className="user-management-item">
+                            {sortedResults.map(file => {
+                                const alreadyImported = importedFileIds.has(file.id);
+                                return (
+                                <li key={file.id} className="user-management-item" style={alreadyImported ? { opacity: 0.6 } : undefined}>
                                     <span className="user-management-name">
                                         {file.name}
                                         <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>
                                             {new Date(file.modifiedTime).toLocaleDateString('ja-JP')}
                                         </span>
+                                        {alreadyImported && (
+                                            <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>（取込み済み）</span>
+                                        )}
                                     </span>
                                     <div className="user-management-actions">
                                         <button
@@ -7357,13 +7422,15 @@ const CandidateModal: React.FC<{
                                             disabled={isSummarizingInterviewLog}
                                             className="save-user-button"
                                         >
-                                            {isSummarizingInterviewLog ? '要約中...' : 'この面談ログを使う'}
+                                            {isSummarizingInterviewLog ? '要約中...' : (alreadyImported ? '再取込み' : 'この面談ログを使う')}
                                         </button>
                                     </div>
                                 </li>
-                            ))}
+                                );
+                            })}
                         </ul>
-                    )}
+                        );
+                    })()}
                     <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
                         Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Word・Googleドキュメント）を直接アップロードしてください。
                     </p>
@@ -7492,7 +7559,7 @@ const CandidateModal: React.FC<{
                     <label>面談ログ（AI要約・面談ごとに保存されます）</label>
                     {candidate.memos && candidate.memos.length > 0 ? (
                         <div className="file-list">
-                            {candidate.memos.map(memo => (
+                            {sortMemosChronologically(candidate.memos).map(memo => (
                                 <div key={memo.id} className="file-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
                                     <strong>{memo.title}</strong>
                                     <p className="form-helper-text" style={{ whiteSpace: 'pre-wrap' }}>{memo.content}</p>
@@ -9901,12 +9968,14 @@ const PipelineCandidateCard: React.FC<{
       // 面談ごとに分けて保存する — 以前は毎回interviewSummaryを丸ごと上書きしていたため、
       // 新しい音声をアップロードすると前回分の要約が消えてしまっていた。今はmemosに1件ずつ
       // 追加するので、過去の面談分もすべて残る。
-      const dateLabel = new Date().toLocaleDateString('ja-JP');
+      const now = new Date();
+      const dateLabel = now.toLocaleDateString('ja-JP');
       const newMemo: MemoEntry = {
         id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         title: `面談ログ（音声: ${audioFile.name}・${dateLabel}）`,
         content: response.text.trim(),
-        updatedAt: new Date().toISOString(),
+        updatedAt: now.toISOString(),
+        logDate: now.toISOString(),
       };
       onSave({
         ...c,
@@ -9981,7 +10050,10 @@ const PipelineCandidateCard: React.FC<{
   // 面談ごとに分けて保存する — 以前は1つのinterviewSummary文字列にすべての面談ログの要約を
   // 連結していたため、どこからどこまでが1回分の面談かが読みづらかった。今は面談ログ1件ごとに
   // 独立したメモ（memos）として追加するので、それぞれ個別にタイトル編集・削除ができる。
-  const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string) => {
+  // logDateは実際の面談日（Drive議事録のmodifiedTime／ファイルのlastModified）、sourceFileId
+  // はDrive検索経由で取り込んだ場合のみそのDriveファイルidを渡す（検索結果一覧での
+  // 「取込み済み」判定に使う）。
+  const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string, logDate: string, sourceFileId?: string) => {
     setIsSummarizingInterviewLog(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
@@ -9994,6 +10066,8 @@ const PipelineCandidateCard: React.FC<{
         title: `面談ログ（${sourceLabel}・${dateLabel}）`,
         content: response.text.trim(),
         updatedAt: new Date().toISOString(),
+        logDate,
+        sourceFileId,
       };
       onSave({
         ...c,
@@ -10016,8 +10090,9 @@ const PipelineCandidateCard: React.FC<{
   const handleUseInterviewLog = async (file: InterviewLogFile) => {
     try {
       const text = await exportGoogleDocAsText(file.id);
+      const logDate = new Date(file.modifiedTime).toISOString();
       const dateLabel = new Date(file.modifiedTime).toLocaleDateString('ja-JP');
-      await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+      await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel, logDate, file.id);
       setInterviewLogResults(null);
     } catch (error) {
       console.error('Error fetching interview log from Drive:', error);
@@ -10028,6 +10103,7 @@ const PipelineCandidateCard: React.FC<{
   const handleInterviewLogFile = async (files: FileList) => {
     if (!files || files.length === 0) return;
     const file = files[0];
+    const logDate = new Date(file.lastModified).toISOString();
     const dateLabel = new Date(file.lastModified).toLocaleDateString('ja-JP');
     if (file.name.toLowerCase().endsWith('.gdoc')) {
       try {
@@ -10037,7 +10113,7 @@ const PipelineCandidateCard: React.FC<{
           return;
         }
         const text = await exportGoogleDocAsText(docId);
-        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel, logDate);
       } catch (error) {
         console.error('Error reading .gdoc pointer file:', error);
         alert('Googleドキュメントの取得中にエラーが発生しました。');
@@ -10052,13 +10128,14 @@ const PipelineCandidateCard: React.FC<{
     try {
       if (mimeType === 'text/plain') {
         const text = await file.text();
-        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel);
+        await summarizeAndAppendInterviewLog(buildInterviewSummaryTranscriptPrompt(text), file.name, dateLabel, logDate);
       } else {
         const base64Data = await fileToBase64(file);
         await summarizeAndAppendInterviewLog(
           { parts: [{ inlineData: { mimeType, data: base64Data } }, { text: INTERVIEW_SUMMARY_FILE_INSTRUCTION }] },
           file.name,
-          dateLabel
+          dateLabel,
+          logDate
         );
       }
     } catch (error) {
@@ -10630,15 +10707,23 @@ const PipelineCandidateCard: React.FC<{
                     >
                         {isSearchingInterviewLogs ? '検索中...' : '候補者名でGoogleドライブを検索'}
                     </button>
-                    {interviewLogResults && interviewLogResults.length > 0 && (
+                    {interviewLogResults && interviewLogResults.length > 0 && (() => {
+                        const importedFileIds = getImportedInterviewLogFileIds(c.memos);
+                        const sortedResults = sortInterviewLogResultsByImportStatus(interviewLogResults, importedFileIds);
+                        return (
                         <ul className="user-management-list" style={{ marginTop: '0.5rem' }}>
-                            {interviewLogResults.map(file => (
-                                <li key={file.id} className="user-management-item">
+                            {sortedResults.map(file => {
+                                const alreadyImported = importedFileIds.has(file.id);
+                                return (
+                                <li key={file.id} className="user-management-item" style={alreadyImported ? { opacity: 0.6 } : undefined}>
                                     <span className="user-management-name">
                                         {file.name}
                                         <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>
                                             {new Date(file.modifiedTime).toLocaleDateString('ja-JP')}
                                         </span>
+                                        {alreadyImported && (
+                                            <span style={{ color: '#888', fontSize: '0.85rem', marginLeft: '0.5rem' }}>（取込み済み）</span>
+                                        )}
                                     </span>
                                     <div className="user-management-actions">
                                         <button
@@ -10647,13 +10732,15 @@ const PipelineCandidateCard: React.FC<{
                                             disabled={isSummarizingInterviewLog}
                                             className="save-user-button"
                                         >
-                                            {isSummarizingInterviewLog ? '要約中...' : 'この面談ログを使う'}
+                                            {isSummarizingInterviewLog ? '要約中...' : (alreadyImported ? '再取込み' : 'この面談ログを使う')}
                                         </button>
                                     </div>
                                 </li>
-                            ))}
+                                );
+                            })}
                         </ul>
-                    )}
+                        );
+                    })()}
                     <p className="form-helper-text" style={{ marginTop: '0.75rem' }}>
                         Driveから自動取得できない場合は、議事録のファイル（テキスト・PDF・Word・Googleドキュメント）を直接アップロードしてください。
                     </p>
@@ -10688,7 +10775,7 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item summary-item memo-list-section">
                     <span className="info-label">面談ログ・メモ</span>
                     <div className="memo-list">
-                        {displayMemos.map(memo => (
+                        {sortMemosChronologically(displayMemos).map(memo => (
                             <div key={memo.id} className="memo-entry">
                                 <div className="memo-entry-header">
                                     {candidateIsOwn ? (
