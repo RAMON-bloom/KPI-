@@ -1180,12 +1180,10 @@ interface Team {
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   weekStartDay?: 'saturday';
   // チームごとのGoogle Chat通知を「機能」単位で複数持てるようにする入れ物。キーは
-  // CHAT_WEBHOOK_FEATURESの各idと対応する（例: 'reminder'=前日KPI未入力リマインド）。
-  // 新しい通知機能を追加したい場合はCHAT_WEBHOOK_FEATURESに1エントリ足すだけでよく、
-  // この型・チーム管理UIの変更は不要（getTeamChatWebhookConfig・TeamsModalのループ参照）。
-  // 実績レポート（返信数・面談数）はこの仕組みから外れており、常に全チーム共通スペース
-  // （TeamsConfig.reportChatWebhookUrl/reportChatThreadKey）にのみ送信する
-  // （2026-09-08、チームごとの専用スペースをやめて共通スペースに一本化する方針に変更。
+  // CHAT_WEBHOOK_FEATURESの各idと対応する。新しい通知機能を追加したい場合はそちらに
+  // 1エントリ足すだけでよく、この型・チーム管理UIの変更は不要（getTeamChatWebhookConfig・
+  // TeamsModalのループ参照）。CHAT_WEBHOOK_FEATURESは現在空（実績レポートは常に全チーム
+  // 共通スペースに送信、前日KPI未入力リマインドは2026-09-16に機能自体を廃止——いずれも
   // kpi-mgr-team-chat-webhook-history参照）。
   chatWebhooks?: Partial<Record<string, TeamChatWebhookConfig>>;
   // スカウト送信数の週次/月次目標達成バッジ（ScoutAchievementBanner/TeamsAchievementList）の
@@ -1200,8 +1198,8 @@ interface Team {
   // 実績レポート（TeamChatReportPanel、返信数・面談数のGoogle Chat送信）に載せるメンバー、
   // memberEmailsの表記のまま。mediaIds/scoutAwardMediaIdsと同じ考え方——undefined = 絞り込み
   // なし（メンバー全員が対象、この機能導入前と同じ挙動）。数字目標を追っていないメンバー
-  // （アシスタント業務のみ等）をレポート本文から除外したい、という要望のため。実績入力画面や
-  // 前日KPI未入力リマインドの対象範囲には影響しない——レポート本文にだけ効く絞り込み。
+  // （アシスタント業務のみ等）をレポート本文から除外したい、という要望のため。実績入力画面
+  // の対象範囲には影響しない——レポート本文にだけ効く絞り込み。
   reportMemberEmails?: string[];
 }
 
@@ -1212,10 +1210,9 @@ interface TeamChatWebhookConfig {
   // なってしまうのを防ぐため）。
   threadKey?: string;
   // この機能で最後に送信済みの日付（YYYY-MM-DD、ローカル日付）。「1日1回だけ送る」系の
-  // 機能（前日KPI未入力リマインドの自動送信）が二重送信を防ぐために使う。手動送信
-  // （TeamChatReminderPanelの「この内容で送信する」）でも同じ日付を書き込み、自動送信と
-  // 手動送信のどちらが先でも当日はもう一方が重複送信しないようにする。自動送信を持たない
-  // 機能では書き込まれない（未使用のままでよい）。
+  // 自動送信機能が二重送信を防ぐために使う想定のフィールド（前日KPI未入力リマインドが
+  // 2026-09-16に廃止されるまではそちらが使っていた）。自動送信を持たない機能では書き込まれ
+  // ない（未使用のままでよい）。
   lastAutoSentDate?: string;
 }
 
@@ -1248,19 +1245,12 @@ interface ChatWebhookFeature {
  * 実績レポート（返信数・面談数）はこの配列に含まれない——2026-09-08にチーム専用スペースの
  * 選択肢をやめ、常に全チーム共通スペース（TeamsConfig.reportChatWebhookUrl/
  * reportChatThreadKey、チーム管理の「Google Chat通知設定」で設定）にのみ送信する方針に
- * 変更したため（TeamChatReportPanel参照）。ここに追加する新規機能に共通スペースという
- * 概念を持たせたい場合は、機能ごとに個別のフォールバック先を呼び出し側で用意すること
- * （汎用の仕組みとしては持たせていない）。
+ * 変更したため（TeamChatReportPanel参照）。前日KPI未入力リマインド（'reminder'）も
+ * 2026-09-16に機能自体を廃止したため、現在この配列は空——ここに追加する新規機能に共通
+ * スペースという概念を持たせたい場合は、機能ごとに個別のフォールバック先を呼び出し側で
+ * 用意すること（汎用の仕組みとしては持たせていない）。
  */
-const CHAT_WEBHOOK_FEATURES: ChatWebhookFeature[] = [
-  {
-    id: 'reminder',
-    label: '前日KPI未入力リマインド',
-    helperText: 'このチーム専用のスペースにのみ送信されます（実績レポートと違い、共通スペースへのフォールバックはありません）。設定すると、チーム別タブから前日分のKPI未入力メンバーへのリマインドを手動で送れるほか、毎日9時以降に誰かが最初にこのアプリにログインしたタイミングで自動送信されます（1日1回まで）。',
-    unsetStatusLabel: '未設定（送信されません）',
-    defaultOpeningText: '前日KPI未入力リマインド',
-  },
-];
+const CHAT_WEBHOOK_FEATURES: ChatWebhookFeature[] = [];
 
 // BCA事業部 is split into two departments — every member belongs to one of these two (or is
 // unassigned); "BCA" itself isn't a real assignment, just the header switcher's "show both
@@ -6037,7 +6027,7 @@ const TeamsModal: React.FC<{
                                     <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
                                         <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>実績レポート（Google Chat送信）に載せるメンバー</span>
                                         <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
-                                            チェックを外したメンバーは、「チーム別」タブの「Google Chatに送信（返信数・面談数）」の本文から除外されます（実績入力画面や前日KPI未入力リマインドの対象には影響しません）。数字目標を追っていないメンバーの除外にお使いください。未設定（すべてチェック）の場合はメンバー全員が対象になります。
+                                            チェックを外したメンバーは、「チーム別」タブの「Google Chatに送信（返信数・面談数）」の本文から除外されます（実績入力画面の対象には影響しません）。数字目標を追っていないメンバーの除外にお使いください。未設定（すべてチェック）の場合はメンバー全員が対象になります。
                                         </p>
                                         {team.memberEmails.length === 0 ? (
                                             <p className="no-data-message">このチームにメンバーがまだいません。</p>
@@ -12911,132 +12901,6 @@ const TeamChatReportPanel: React.FC<{
   );
 };
 
-/** 指定日（YYYY-MM-DD）についてKpiEntryが1件も無いメンバーを一覧で返す——前日KPI未入力
- * リマインド機能で使う。値がすべて0のentryでも「保存されていれば入力済み」扱い（todayTotals
- * 算出やGoogle Chatレポートと同じ、entriesの有無だけを見る考え方）。allUsersDataにまだその
- * メンバーのデータ自体が読み込めていない場合も、判定できないので保守的に「未入力」扱いにする。
- * team.memberEmailsは自由入力のため、実際のサインインメールと大文字・小文字が食い違っている
- * ケースがある（resolveUserDataEntry参照）——ここで直接`allUsersData[email]`を引くと、入力
- * 履歴があるメンバーでも一致せず「未入力」と誤判定される上、表示名も引けずメールアドレスの
- * まま送信されてしまっていたため、大文字・小文字を無視して解決する。
- */
-const computeMembersMissingEntryForDate = (
-  memberEmails: string[],
-  allUsersData: Record<string, UserData>,
-  dateStr: string
-): { email: string; displayName: string }[] => {
-  return memberEmails
-    .filter(email => {
-      const resolved = resolveUserDataEntry(allUsersData, email);
-      if (!resolved) return true;
-      const [, userData] = resolved;
-      return !(userData.entries || []).some(e => e.date === dateStr);
-    })
-    .map(email => {
-      const resolved = resolveUserDataEntry(allUsersData, email);
-      return { email, displayName: resolved?.[1].displayName || email };
-    });
-};
-
-const formatReminderDateLabel = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-
-/** 前日KPI未入力リマインドのGoogle Chatメッセージ本文を組み立てる。未入力者がいない日は
- * その旨だけ知らせる（空メッセージを送らないため）。 */
-const buildTeamReminderText = (
-  teamName: string,
-  dateLabel: string,
-  missing: { displayName: string }[]
-): string => {
-  if (missing.length === 0) {
-    return `*${teamName} 前日KPI未入力リマインド（${dateLabel}）*\n${dateLabel}分は全員入力済みです。`;
-  }
-  const memberLines = missing.map(m => `・${m.displayName}`).join('\n');
-  return `*${teamName} 前日KPI未入力リマインド（${dateLabel}）*\n以下のメンバーは${dateLabel}分の実績が未入力です。入力をお願いします。\n\n${memberLines}`;
-};
-
-/**
- * チーム別タブに表示する「前日KPI未入力リマインドを送信」パネル。ボタンを押すと前日分の
- * entriesが無いメンバーを集計してプレビュー表示し、確認の上でこのチーム専用のGoogle Chat
- * スペース（CHAT_WEBHOOK_FEATURES の'reminder'、チーム管理の各チームの設定欄で設定）へ
- * 送信する。TeamChatReportPanel（実績レポート）と違い、未設定時に全チーム共通スペースへ
- * フォールバックすることはない——「実績を送信する全体スペースではなく、チームごとのスペースに
- * 送りたい」という要望どおり、このチーム専用の送信先が無ければ送信不可のまま（チーム管理での
- * 設定を促すメッセージのみ表示）。
- */
-const TeamChatReminderPanel: React.FC<{
-  team: Team | undefined;
-  memberEmails: string[];
-  allUsersData: Record<string, UserData>;
-  // 送信成功後にlastAutoSentDate（今日の日付）を書き込むためのコールバック。9時以降の
-  // 自動送信（App内のuseEffect）と同じ「1日1回」の目印を共有し、手動でこのボタンから送った
-  // 日は自動送信の方がその日もう一度送らないようにする。
-  onSent: (teamId: string, dateStr: string) => void;
-}> = ({ team, memberEmails, allUsersData, onSent }) => {
-  const [preview, setPreview] = useState<{ dateLabel: string; text: string; missingCount: number } | null>(null);
-  const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
-  const [sendError, setSendError] = useState<string | null>(null);
-
-  if (!team) return null;
-
-  const cfg = getTeamChatWebhookConfig(team, 'reminder');
-
-  const handlePreview = () => {
-    setSendStatus('idle');
-    setSendError(null);
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    const dateStr = d.toLocaleDateString('sv-SE'); // YYYY-MM-DD format（KpiEntry.dateと同じ形式）
-    const dateLabel = formatReminderDateLabel(d);
-    const missing = computeMembersMissingEntryForDate(memberEmails, allUsersData, dateStr);
-    setPreview({ dateLabel, text: buildTeamReminderText(team.name, dateLabel, missing), missingCount: missing.length });
-  };
-
-  const handleSend = async () => {
-    if (!cfg?.url || !preview) return;
-    setSendStatus('sending');
-    setSendError(null);
-    try {
-      await sendChatWebhookMessage(cfg.url, preview.text, cfg.threadKey);
-      setSendStatus('sent');
-      setPreview(null);
-      onSent(team.id, new Date().toLocaleDateString('sv-SE'));
-    } catch (err: any) {
-      setSendStatus('error');
-      setSendError(err?.message || '送信に失敗しました。');
-    }
-  };
-
-  return (
-    <div className="custom-period-export-bar team-chat-report-panel" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
-      <span className="team-chat-report-panel-title">📋 前日KPI未入力リマインドを送信</span>
-      {!cfg?.url || !cfg?.threadKey ? (
-        <p className="no-data-message" style={{ margin: 0 }}>
-          このチーム専用のリマインド送信先が未設定です。「チーム管理」の各チームの設定欄（前日KPI未入力リマインド）から設定してください。
-        </p>
-      ) : (
-        <>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <button type="button" onClick={handlePreview} className="chat-report-period-button">前日分の未入力者を確認</button>
-          </div>
-          {preview && (
-            <div className="chat-report-preview">
-              <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{preview.text}</pre>
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
-                  {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
-                </button>
-                <button type="button" onClick={() => { setPreview(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
-              </div>
-            </div>
-          )}
-          {sendStatus === 'sent' && <p className="gmail-scout-message" style={{ margin: 0 }}>送信しました。</p>}
-          {sendStatus === 'error' && <p className="no-data-message" style={{ margin: 0 }}>{sendError}</p>}
-        </>
-      )}
-    </div>
-  );
-};
-
 // 全ユーザー/チーム別タブ（AllUsersDashboard）の各カードをユーザーごとに好きな順番へ並び替え、
 // 保存できるようにするためのキー一覧。'grossProfit'（showGrossProfit=falseの文脈）や'dowRate'
 // （dayOfWeekReplyRateDataが無い場合）は実際には表示されないことがあるが、並び順自体は他の
@@ -15275,82 +15139,6 @@ const App: React.FC = () => {
     persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, newThreadKey);
   };
 
-  // TeamChatReminderPanelの「この内容で送信する」（手動送信）が成功した直後に呼ばれ、
-  // lastAutoSentDateを今日の日付にする——下の自動送信useEffectと同じ目印を共有することで、
-  // 手動で送った日は自動送信の方がその日もう一度送らないようにする。
-  const handleTeamReminderSent = (teamId: string, dateStr: string) => {
-    const team = teams.find(t => t.id === teamId);
-    const cfg = team ? getTeamChatWebhookConfig(team, 'reminder') : undefined;
-    if (!cfg) return;
-    updateTeamChatWebhook(teamId, 'reminder', { ...cfg, lastAutoSentDate: dateStr });
-  };
-
-  // 前日KPI未入力リマインドの「9時以降・1日1回」自動送信。サーバー側にGoogle認証情報を持たない
-  // 構成（kpi-mgr-auto-deploy参照）のため、真の定時cronではなく「9時以降に誰かが最初に
-  // サインインしてこのアプリを開いたら、その人のセッションから代わりに送る」ベストエフォート
-  // 方式——その日誰もログインしなければその日は送信されない。1セッションにつき1回だけ判定
-  // する（autoReminderCheckedRef）。
-  //
-  // 判定はteamsConfigLoaded（TeamsConfig読み込み完了）だけをトリガーにし、view/モーダルの
-  // 状態は問わない——「誰かがアプリにログインしてさえいれば送信されるように」という要望どおり、
-  // どのタブを開いていても発火する。対象チームが無ければドメイン全体のユーザーデータ取得
-  // （重い処理）自体をスキップするので、その日最初の1人以外のログインではTeamsConfigの
-  // 読み込み以上のコストはかからない。
-  const autoReminderCheckedRef = useRef(false);
-  useEffect(() => {
-    if (!currentIdentity || !isInitialized || !teamsConfigLoaded) return;
-    if (autoReminderCheckedRef.current) return;
-    autoReminderCheckedRef.current = true;
-
-    const now = new Date();
-    if (now.getHours() < 9) return; // 9時より前は対象外（このセッション中に9時を跨いでも再判定はしない）
-    const todayStr = now.toLocaleDateString('sv-SE');
-    const yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toLocaleDateString('sv-SE');
-    const yesterdayLabel = formatReminderDateLabel(yesterday);
-
-    const dueTeams = teams.filter(t => {
-      const cfg = getTeamChatWebhookConfig(t, 'reminder');
-      return !!(cfg?.url && cfg?.threadKey) && cfg.lastAutoSentDate !== todayStr;
-    });
-    if (dueTeams.length === 0) return;
-
-    (async () => {
-      let teammates: { email: string; data: UserData }[];
-      try {
-        teammates = await loadAllTeammatesData<UserData>();
-      } catch (error) {
-        console.error('Failed to load teammates data for auto reminder', error);
-        return;
-      }
-      const dataByEmail: Record<string, UserData> = {};
-      teammates.forEach(({ email, data }) => { dataByEmail[email] = { ...data, entries: data.entries || [] }; });
-
-      const sentTeamIds: string[] = [];
-      for (const team of dueTeams) {
-        const cfg = getTeamChatWebhookConfig(team, 'reminder')!;
-        try {
-          const missing = computeMembersMissingEntryForDate(team.memberEmails, dataByEmail, yesterdayStr);
-          if (missing.length > 0) {
-            const text = buildTeamReminderText(team.name, yesterdayLabel, missing);
-            await sendChatWebhookMessage(cfg.url, text, cfg.threadKey);
-          }
-          sentTeamIds.push(team.id);
-        } catch (error) {
-          console.error(`Failed to auto-send reminder for team ${team.id}`, error);
-        }
-      }
-      if (sentTeamIds.length > 0) {
-        persistTeams(teams.map(t => {
-          if (!sentTeamIds.includes(t.id)) return t;
-          const cfg = getTeamChatWebhookConfig(t, 'reminder')!;
-          return { ...t, chatWebhooks: { ...(t.chatWebhooks || {}), reminder: { ...cfg, lastAutoSentDate: todayStr } } };
-        }));
-      }
-    })();
-  }, [currentIdentity, isInitialized, teamsConfigLoaded, teams]);
-
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
   // Writes through to a local cache immediately so the UI never waits on the network.
   //
@@ -16579,19 +16367,8 @@ const App: React.FC = () => {
   // に絞り込むのが正しい一方、実績を報告するメッセージからヘッダーの表示状態のせいでメンバーが
   // 消えるのは意図しない挙動（選択中の事業部にそのメンバーの所属部署が一致しないだけで、
   // レポートから丸ごと抜け落ちてしまっていた）。そのためレポート送信では常にチーム全員を対象と
-  // する。
-  const selectedTeamAllMemberEmails = useMemo(() => {
-    if (!selectedTeamId) return [];
-    const memberEmails = teams.find(t => t.id === selectedTeamId)?.memberEmails || [];
-    const resolved = memberEmails.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email);
-    return Array.from(new Set(resolved));
-  }, [teams, selectedTeamId, displayedAllUsersData]);
-
-  // selectedTeamAllMemberEmailsからさらに、チーム管理の「実績レポートに載せるメンバー」
-  // （Team.reportMemberEmails）で絞り込んだもの——TeamChatReportPanel専用。数字目標を追って
-  // いないメンバーをレポート本文から除外したい、という要望のため。前日KPI未入力リマインド
-  // （TeamChatReminderPanel）はこの絞り込みの対象外で、引き続きselectedTeamAllMemberEmails
-  // （チーム全員）を使う。
+  // した上で、さらにチーム管理の「実績レポートに載せるメンバー」（Team.reportMemberEmails）
+  // で絞り込む——数字目標を追っていないメンバーをレポート本文から除外したい、という要望のため。
   const selectedTeamReportMemberEmails = useMemo(() => {
     if (!selectedTeamId) return [];
     const team = teams.find(t => t.id === selectedTeamId);
@@ -17988,26 +17765,18 @@ const App: React.FC = () => {
               </button>
             </div>
             {selectedTeamId && (
-              <>
-                <TeamChatReportPanel
-                  team={teams.find(t => t.id === selectedTeamId)}
-                  memberEmails={selectedTeamReportMemberEmails}
-                  allUsersData={displayedAllUsersData}
-                  allMedia={allMedia}
-                  weekStartsOn={weekStartsOn}
-                  reportChatWebhookUrl={reportChatWebhookUrl}
-                  reportChatThreadKey={reportChatThreadKey}
-                  monthlyTarget={reportMonthlyTarget}
-                  onSetMonthlyTarget={handleSetReportMonthlyTarget}
-                  canEditTargets={isTeamsEditable}
-                />
-                <TeamChatReminderPanel
-                  team={teams.find(t => t.id === selectedTeamId)}
-                  memberEmails={selectedTeamAllMemberEmails}
-                  allUsersData={displayedAllUsersData}
-                  onSent={handleTeamReminderSent}
-                />
-              </>
+              <TeamChatReportPanel
+                team={teams.find(t => t.id === selectedTeamId)}
+                memberEmails={selectedTeamReportMemberEmails}
+                allUsersData={displayedAllUsersData}
+                allMedia={allMedia}
+                weekStartsOn={weekStartsOn}
+                reportChatWebhookUrl={reportChatWebhookUrl}
+                reportChatThreadKey={reportChatThreadKey}
+                monthlyTarget={reportMonthlyTarget}
+                onSetMonthlyTarget={handleSetReportMonthlyTarget}
+                canEditTargets={isTeamsEditable}
+              />
             )}
             {!selectedTeamId ? (
               <p className="no-data-message">チームを選択してください。チームがまだない場合は「チーム管理」から作成してください。</p>
