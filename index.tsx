@@ -1160,6 +1160,12 @@ interface Team {
   // すると対象媒体ゼロ＝そのチームでは表彰そのものが成立しなくなる。複数チームに所属する
   // メンバーは、他の所属判定（myTeamId等）と同じく先頭のチームの設定を継承する。
   scoutAwardMediaIds?: string[];
+  // 実績レポート（TeamChatReportPanel、返信数・面談数のGoogle Chat送信）に載せるメンバー、
+  // memberEmailsの表記のまま。mediaIds/scoutAwardMediaIdsと同じ考え方——undefined = 絞り込み
+  // なし（メンバー全員が対象、この機能導入前と同じ挙動）。数字目標を追っていないメンバー
+  // （アシスタント業務のみ等）をレポート本文から除外したい、という要望のため。実績入力画面や
+  // 前日KPI未入力リマインドの対象範囲には影響しない——レポート本文にだけ効く絞り込み。
+  reportMemberEmails?: string[];
 }
 
 interface TeamChatWebhookConfig {
@@ -5537,6 +5543,7 @@ const TeamsModal: React.FC<{
     onToggleMiddle: (email: string, isMiddle: boolean) => void;
     onSetTeamMedia: (teamId: string, mediaIds: string[]) => void;
     onSetTeamScoutAwardMedia: (teamId: string, mediaIds: string[]) => void;
+    onSetTeamReportMembers: (teamId: string, memberEmails: string[]) => void;
     onSetTeamWeekStartDay: (teamId: string, value: 'saturday' | undefined) => void;
     onSetTeamChatWebhookUrl: (teamId: string, featureId: string, url: string) => void;
     onCreateOrResetTeamThread: (teamId: string, featureId: string, openingText: string) => Promise<void>;
@@ -5544,7 +5551,7 @@ const TeamsModal: React.FC<{
     reportChatThreadKey: string | undefined;
     onSetReportChatWebhookUrl: (url: string) => void;
     onCreateOrResetReportThread: (openingText: string) => Promise<void>;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamScoutAwardMedia, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamScoutAwardMedia, onSetTeamReportMembers, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -5645,6 +5652,14 @@ const TeamsModal: React.FC<{
         const current = team.scoutAwardMediaIds ?? activeMedia.map(m => m.id);
         const next = checked ? [...current, mediaId] : current.filter(id => id !== mediaId);
         onSetTeamScoutAwardMedia(team.id, next);
+    };
+
+    // handleToggleTeamMediaと同じ考え方（未設定＝全メンバーからの絞り込み）だが、対象は
+    // 「実績レポート（Google Chat送信）に載せるメンバー」（reportMemberEmails）。
+    const handleToggleTeamReportMember = (team: Team, email: string, checked: boolean) => {
+        const current = team.reportMemberEmails ?? team.memberEmails;
+        const next = checked ? [...current, email] : current.filter(e => e !== email);
+        onSetTeamReportMembers(team.id, next);
     };
 
     const handleAddMember = (teamId: string, emailOverride?: string) => {
@@ -5972,6 +5987,39 @@ const TeamsModal: React.FC<{
                                         ) : (
                                             <span style={{ fontSize: '0.9rem' }}>
                                                 {team.scoutAwardMediaIds ? (team.scoutAwardMediaIds.length > 0 ? activeMedia.filter(m => team.scoutAwardMediaIds!.includes(m.id)).map(m => m.name).join('、') : '（なし＝表彰なし）') : 'すべての媒体'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ marginTop: '0.75rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-color)' }}>
+                                        <span className="user-management-name" style={{ display: 'block', marginBottom: '0.25rem' }}>実績レポート（Google Chat送信）に載せるメンバー</span>
+                                        <p className="form-helper-text" style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                                            チェックを外したメンバーは、「チーム別」タブの「Google Chatに送信（返信数・面談数）」の本文から除外されます（実績入力画面や前日KPI未入力リマインドの対象には影響しません）。数字目標を追っていないメンバーの除外にお使いください。未設定（すべてチェック）の場合はメンバー全員が対象になります。
+                                        </p>
+                                        {team.memberEmails.length === 0 ? (
+                                            <p className="no-data-message">このチームにメンバーがまだいません。</p>
+                                        ) : isEditable ? (
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                                                {team.memberEmails.map(email => {
+                                                    const isChecked = team.reportMemberEmails ? team.reportMemberEmails.includes(email) : true;
+                                                    return (
+                                                        <label key={email} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.9rem' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={isChecked}
+                                                                onChange={(e) => handleToggleTeamReportMember(team, email, e.target.checked)}
+                                                            />
+                                                            {labelByEmail.get(email) || email}
+                                                        </label>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <span style={{ fontSize: '0.9rem' }}>
+                                                {team.reportMemberEmails
+                                                    ? (team.reportMemberEmails.length > 0
+                                                        ? team.reportMemberEmails.map(e => labelByEmail.get(e) || e).join('、')
+                                                        : '（なし）')
+                                                    : 'メンバー全員'}
                                             </span>
                                         )}
                                     </div>
@@ -15062,6 +15110,10 @@ const App: React.FC = () => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, scoutAwardMediaIds: mediaIds } : t)));
   };
 
+  const handleSetTeamReportMembers = (teamId: string, memberEmails: string[]) => {
+    persistTeams(teams.map(t => (t.id === teamId ? { ...t, reportMemberEmails: memberEmails } : t)));
+  };
+
   // 週間サマリー・カレンダーの週の始まりのチーム既定値。value=undefinedで日曜（既定）に戻す。
   const handleSetTeamWeekStartDay = (teamId: string, value: 'saturday' | undefined) => {
     persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
@@ -16448,6 +16500,22 @@ const App: React.FC = () => {
     return Array.from(new Set(resolved));
   }, [teams, selectedTeamId, displayedAllUsersData]);
 
+  // selectedTeamAllMemberEmailsからさらに、チーム管理の「実績レポートに載せるメンバー」
+  // （Team.reportMemberEmails）で絞り込んだもの——TeamChatReportPanel専用。数字目標を追って
+  // いないメンバーをレポート本文から除外したい、という要望のため。前日KPI未入力リマインド
+  // （TeamChatReminderPanel）はこの絞り込みの対象外で、引き続きselectedTeamAllMemberEmails
+  // （チーム全員）を使う。
+  const selectedTeamReportMemberEmails = useMemo(() => {
+    if (!selectedTeamId) return [];
+    const team = teams.find(t => t.id === selectedTeamId);
+    if (!team) return [];
+    const included = team.reportMemberEmails
+      ? team.memberEmails.filter(e => team.reportMemberEmails!.includes(e))
+      : team.memberEmails;
+    const resolved = included.map(email => resolveUserDataEntry(displayedAllUsersData, email)?.[0] || email);
+    return Array.from(new Set(resolved));
+  }, [teams, selectedTeamId, displayedAllUsersData]);
+
   // チーム別タブのAllUsersDashboardに渡す媒体一覧——選択中のチームで「使用する媒体」
   // （Team.mediaIds、entryActiveMediaが実績入力画面の絞り込みに使っているのと同じ設定）が
   // 絞り込まれていれば、その媒体だけに限定する（媒体別の内訳・合計とも）。未設定のチーム、
@@ -16936,6 +17004,7 @@ const App: React.FC = () => {
           onToggleMiddle={handleToggleMiddle}
           onSetTeamMedia={handleSetTeamMedia}
           onSetTeamScoutAwardMedia={handleSetTeamScoutAwardMedia}
+          onSetTeamReportMembers={handleSetTeamReportMembers}
           onSetTeamWeekStartDay={handleSetTeamWeekStartDay}
           onSetTeamChatWebhookUrl={handleSetTeamChatWebhookUrl}
           onCreateOrResetTeamThread={handleCreateOrResetTeamThread}
@@ -17835,7 +17904,7 @@ const App: React.FC = () => {
               <>
                 <TeamChatReportPanel
                   team={teams.find(t => t.id === selectedTeamId)}
-                  memberEmails={selectedTeamAllMemberEmails}
+                  memberEmails={selectedTeamReportMemberEmails}
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   weekStartsOn={weekStartsOn}
