@@ -482,6 +482,26 @@ const STAGE_COLOR_MAP: Record<PipelineStage, string> = {
     '選考辞退': 'salmon',
 };
 
+// STAGE_COLOR_MAPの色を背景にしたバッジ・セレクトは既定で白文字にしているが、lightblue/
+// goldenrod/orange/limegreen/salmonのような明るい色は白文字だと読みにくい（選択できない
+// ように見える）ため、この5色だけ濃色文字に切り替える。輝度計算ではなく固定の目視判定に
+// している（対象がSTAGE_COLOR_MAPの13色に固定されているため）。
+const STAGE_LIGHT_BACKGROUND_STAGES = new Set<PipelineStage>(['カジュアル面談', 'オファー面談', '内定', '内定承諾', '選考辞退']);
+const STAGE_DARK_TEXT_COLOR = '#25292e';
+
+// STAGE_COLOR_MAPを背景色に使うすべてのバッジ・セレクト（進捗状況セレクト、選考状況バッジ、
+// パイプラインカレンダーのイベント等）で共通して使う、CSS変数2つ分のstyleオブジェクトを作る。
+// --badge-textはCSS側で`color: var(--badge-text, white)`という形で使われ、この関数を経由しない
+// 既存の（ステージ以外の）バッジ用途は白文字のまま変わらない。
+const getStageBadgeStyle = (stage: PipelineStage): React.CSSProperties => ({
+  '--badge-color': STAGE_COLOR_MAP[stage],
+  '--badge-text': STAGE_LIGHT_BACKGROUND_STAGES.has(stage) ? STAGE_DARK_TEXT_COLOR : 'white',
+  // 先のフェーズ（.is-future）のように「ステージの色を背景ではなく文字色として」使う場面用
+  // — 明るい色をそのまま白背景の上の文字色にすると同じく読みにくいため、その5色だけは濃色に
+  // 差し替える（それ以外の8色はそのまま文字色として使っても十分読める濃さがある）。
+  '--badge-text-on-white': STAGE_LIGHT_BACKGROUND_STAGES.has(stage) ? STAGE_DARK_TEXT_COLOR : STAGE_COLOR_MAP[stage],
+} as React.CSSProperties);
+
 /** Short labels for the pipeline calendar, where space is tight — e.g. "1次面接" → "1次". */
 const STAGE_SHORT_LABELS: Record<PipelineStage, string> = {
     '打診': '打診',
@@ -8635,7 +8655,7 @@ const GrossProfitSummary: React.FC<{
                 {visibleStageTotals.filter(s => s.count > 0).map(s => (
                     <div key={s.stage} className="detail-application-card" style={{ borderLeftColor: STAGE_COLOR_MAP[s.stage] }}>
                         <div className="detail-card-header">
-                            <span className="status-badge" style={{ '--badge-color': STAGE_COLOR_MAP[s.stage] } as React.CSSProperties}>{s.stage}</span>
+                            <span className="status-badge" style={getStageBadgeStyle(s.stage)}>{s.stage}</span>
                             <span className="company-pipeline-count">{s.count}件</span>
                         </div>
                         <div className="detail-card-body">
@@ -8842,7 +8862,7 @@ const PipelineCalendarView: React.FC<{
                                 <div
                                     key={idx}
                                     className={`pipeline-calendar-event ${isEditableEvent ? 'is-editable' : ''} ${ev.additionalEntry ? 'is-additional-scheduled-date' : ''}`}
-                                    style={{ '--badge-color': STAGE_COLOR_MAP[eventStage] } as React.CSSProperties}
+                                    style={getStageBadgeStyle(eventStage)}
                                     title={`${eventTime ? `${eventTime} ` : ''}${ev.candidate.name} / ${ev.application.companyName} / ${eventStage}${ev.additionalEntry ? '（先に確定した日程）' : ''}${ev.candidate.ownerLabel ? ` (${ev.candidate.ownerLabel})` : ''}${isEditableEvent ? ' — クリックして編集' : ''}`}
                                     role={isEditableEvent ? 'button' : undefined}
                                     tabIndex={isEditableEvent ? 0 : undefined}
@@ -8969,7 +8989,7 @@ const CompanyPipelineView: React.FC<{
                                         </span>
                                         <span
                                             className={`status-badge ${candidateIsOwn ? 'status-badge-clickable' : ''}`}
-                                            style={{ '--badge-color': STAGE_COLOR_MAP[application.stage] } as React.CSSProperties}
+                                            style={getStageBadgeStyle(application.stage)}
                                             onClick={candidateIsOwn ? () => onEditApplication(candidate, application) : undefined}
                                             role={candidateIsOwn ? 'button' : undefined}
                                             tabIndex={candidateIsOwn ? 0 : undefined}
@@ -9546,7 +9566,7 @@ const PastStagePill: React.FC<{
   useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
   const display = date ? new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前';
   return (
-    <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[stage] } as React.CSSProperties}>
+    <span className="stage-track-step" style={getStageBadgeStyle(stage)}>
       {editable && onChangeStage ? (
         <>
           <select
@@ -9591,7 +9611,7 @@ const CurrentStagePill: React.FC<{
   onChangeStage: (stage: PipelineStage) => void;
   idPrefix: string;
 }> = ({ app, editable, onCommitSchedule, onChangeStage, idPrefix }) => (
-  <span className="stage-track-step is-current" style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}>
+  <span className="stage-track-step is-current" style={getStageBadgeStyle(app.stage)}>
     {editable ? (
       <select
         className="stage-track-stage-select"
@@ -9657,7 +9677,7 @@ const FutureStagePill: React.FC<{
   onRemove: () => void;
   idPrefix: string;
 }> = ({ entry, options, editable, onChangeStage, onCommitPatch, onRemove, idPrefix }) => (
-  <span className="stage-track-step is-future" style={{ '--badge-color': STAGE_COLOR_MAP[entry.stage] } as React.CSSProperties}>
+  <span className="stage-track-step is-future" style={getStageBadgeStyle(entry.stage)}>
     {editable ? (
       <select
         className="stage-track-stage-select"
@@ -9837,7 +9857,7 @@ const ApplicationStageBadge: React.FC<{
 }> = ({ app, onClick }) => (
   <span
     className="status-badge status-badge-clickable"
-    style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}
+    style={getStageBadgeStyle(app.stage)}
     title={buildStageTooltip(app, true)}
     role="button"
     tabIndex={0}
@@ -10546,7 +10566,7 @@ const PipelineCandidateCard: React.FC<{
                                 <span
                                     key={app.id}
                                     className="status-badge"
-                                    style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
+                                    style={getStageBadgeStyle(app.stage)}
                                     title={buildStageTooltip(app, false)}
                                 >
                                     {app.companyName}: {app.stage}

@@ -787,7 +787,7 @@ section {
 }
 .pipeline-calendar-event {
   font-size: 0.75rem;
-  color: white;
+  color: var(--badge-text, white);
   background-color: var(--badge-color, var(--secondary-color));
   border-radius: 0.3rem;
   padding: 0.15rem 0.4rem;
@@ -890,7 +890,10 @@ section {
   flex-direction: column;
   align-items: center;
   background-color: var(--badge-color, var(--secondary-color));
-  color: white;
+  /* lightblue/orange等の明るいステージ色では白文字だと読めなくなるため、getStageBadgeStyleが
+     ステージごとに設定する--badge-text（白 or 濃色）を使う。設定されていない（ステージ以外の
+     バッジ）場合は従来通り白のまま。 */
+  color: var(--badge-text, white);
   border-radius: 0.4rem;
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
@@ -950,7 +953,7 @@ section {
 }
 .stage-track-step.is-current .scheduling-status-checkboxes label,
 .stage-track-step.is-current .scheduling-ball-checkboxes label {
-  color: white;
+  color: var(--badge-text, white);
   font-size: 0.72rem;
   gap: 0.2rem;
 }
@@ -966,7 +969,7 @@ section {
   width: 5rem;
 }
 .stage-track-step.is-current .editable-value {
-  color: white;
+  color: var(--badge-text, white);
   font-size: 0.75rem;
 }
 .stage-track-step.is-current .editable-value:hover,
@@ -983,7 +986,7 @@ section {
   text-underline-offset: 0.15rem;
 }
 .stage-track-step.is-current .editable-value.is-empty {
-  color: white;
+  color: var(--badge-text, white);
 }
 /* 先のフェーズのステップ（企業が前もって確定させてきた日程、まだ到達していない）— 破線枠と
    やや薄い背景で「まだ先の話」であることを視覚的に示す。 */
@@ -993,7 +996,7 @@ section {
   color: var(--text-color);
 }
 .stage-track-step.is-future .stage-track-stage {
-  color: var(--badge-color, var(--secondary-color));
+  color: var(--badge-text-on-white, var(--badge-color, var(--secondary-color)));
 }
 .stage-track-stage-select {
   font-size: 0.75rem;
@@ -1001,12 +1004,13 @@ section {
   padding: 0;
   border: none;
   background: transparent;
-  /* 過去・現在のステップは背景そのものが--badge-color（塗りつぶし）なので白文字で継承させる。
-     先のステップ（.is-future）だけ背景が透明なので、下のルールで--badge-colorに上書きする。 */
+  /* 過去・現在のステップは背景そのものが--badge-color（塗りつぶし）なので継承させる（親の
+     color: var(--badge-text, white)に従う）。先のステップ（.is-future）だけ背景が透明なので、
+     下のルールで--badge-text-on-whiteに上書きする。 */
   color: inherit;
 }
 .stage-track-step.is-future .stage-track-stage-select {
-  color: var(--badge-color, var(--secondary-color));
+  color: var(--badge-text-on-white, var(--badge-color, var(--secondary-color)));
 }
 .stage-track-step.is-future .scheduled-date-time-inputs input {
   font-size: 0.72rem;
@@ -1045,11 +1049,13 @@ section {
   color: white;
 }
 /* 「→ 次へ」クイックボタン — 色付きピル（過去/現在のステップ、背景そのものが塗りつぶし）の
-   上に乗るので、stage-track-addとは逆に白系の縁取りにして馴染ませる。 */
+   上に乗る。文字色は親から継承（白 or 濃色、いずれもgetStageBadgeStyleが決める）、縁取り・
+   背景はcolor-mixでその文字色を薄めた半透明にすることで、白文字・濃色文字どちらでも自然に
+   馴染む（濃色文字のステージで白系の縁取りのまま固定していると、逆に目立たなくなるため）。 */
 .stage-track-advance {
-  background-color: rgba(255, 255, 255, 0.15);
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.55);
+  background-color: color-mix(in srgb, currentColor 16%, transparent);
+  color: inherit;
+  border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
   border-radius: 0.3rem;
   font-size: 0.68rem;
   font-weight: 600;
@@ -1060,7 +1066,7 @@ section {
   cursor: pointer;
 }
 .stage-track-advance:hover {
-  background-color: rgba(255, 255, 255, 0.35);
+  background-color: color-mix(in srgb, currentColor 32%, transparent);
 }
 
 
@@ -1665,7 +1671,7 @@ section {
   font-style: italic;
 }
 .status-badge {
-  color: white;
+  color: var(--badge-text, white);
   background-color: var(--badge-color, var(--secondary-color));
   padding: 0.4rem 0.8rem;
   border-radius: 0.5rem;
@@ -1686,7 +1692,7 @@ section {
    (PipelineCandidateCard's 進捗状況 dropdown), so choosing a new stage still reads as "the same
    colored pill" rather than a plain form control. */
 .status-badge-select {
-  color: white;
+  color: var(--badge-text, white);
   background-color: var(--badge-color, var(--secondary-color));
   padding: 0.35rem 0.6rem;
   border-radius: 0.5rem;
