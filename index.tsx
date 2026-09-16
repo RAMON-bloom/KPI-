@@ -392,6 +392,16 @@ const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適�
 // (from a placement standpoint) branches off the main path.
 const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '内定承諾後辞退'];
 
+// 選考日程タイムラインの「→ 次へ進める」クイックボタン用 — 通常の選考はほぼ必ずこの順で
+// 前進するため、13択のプルダウンを毎回開かなくても1クリックで次のフェーズへ進められるように
+// する。stageがFORWARD_PIPELINE_STAGESの最後（内定承諾）、またはそこに含まれない（お見送り
+// 等の終了フェーズ）場合はundefined（＝ボタンを出さない）。
+const getNextForwardStage = (stage: PipelineStage): PipelineStage | undefined => {
+  const idx = FORWARD_PIPELINE_STAGES.indexOf(stage);
+  if (idx === -1 || idx === FORWARD_PIPELINE_STAGES.length - 1) return undefined;
+  return FORWARD_PIPELINE_STAGES[idx + 1];
+};
+
 // 選考企業から内定（またはその先の内定承諾）が出ているかどうか。想定年収の入力単位を、内定が
 // 出るまでは万円単位、内定が出た後は実際の円単位（1円単位）に切り替える判定に使う — 内定が出る
 // と提示年収の金額が確定し、円単位まで正確に把握できることが多いため。
@@ -544,13 +554,23 @@ interface CompanyApplication {
   schedulingBallOwner?: 'candidate' | 'company' | 'other';
   // schedulingBallOwner==='other'の時の自由記入内容。
   schedulingNote?: string;
-  // 企業が、まだ到達していない先のフェーズの選考日程まで前もって確定させてくることがある
-  // （例: 1次面接の結果を待たずに2次・最終面接の日時まで同時に提示される）。scheduledDate/
-  // scheduledTimeは常に「今まさにいるstageの」日程専用のため、そうした先付けの確定日程は
-  // 別枠でここに保持しておく。実際にそのstageへ進んだ時点でcomputeStageAdvanceUpdateが
-  // 自動的にscheduledDate/scheduledTimeへ昇格させ、この配列からは削除する（stageを飛ばして
-  // 別のstageへ進んだ場合は昇格されずここに残る——手動で削除できる）。
-  additionalScheduledDates?: { id: string; stage: PipelineStage; date: string; time?: string }[];
+  // 企業が、まだ到達していない先のフェーズの選考日程を前もって伝えてくることがある（例: 1次
+  // 面接の結果を待たずに2次・最終面接の日時まで同時に提示される、あるいは「2次面接の日程は
+  // 現在調整中」とだけ伝えられる）。scheduledDate/scheduledTimeは常に「今まさにいるstageの」
+  // 日程専用のため、そうした先のフェーズの日程情報は別枠でここに保持しておく。schedulingStatus
+  // 以下3つは現在のフェーズのものと全く同じ意味・扱い（未設定は'confirmed'として後方互換）。
+  // 実際にそのstageへ進んだ時点でcomputeStageAdvanceUpdateがscheduledDate/scheduledTime等へ
+  // 自動的に昇格させ、この配列からは削除する（stageを飛ばして別のstageへ進んだ場合は昇格
+  // されずここに残る——手動で削除できる）。
+  additionalScheduledDates?: {
+    id: string;
+    stage: PipelineStage;
+    date: string;
+    time?: string;
+    schedulingStatus?: 'confirmed' | 'adjusting';
+    schedulingBallOwner?: 'candidate' | 'company' | 'other';
+    schedulingNote?: string;
+  }[];
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
@@ -835,13 +855,16 @@ function computeStageAdvanceUpdate(
       // in the list untouched (the user can still see/remove it manually).
       const promoted = (base.additionalScheduledDates || []).find(d => d.stage === app.stage);
       if (promoted) {
+        // 先のフェーズの日程自体が「調整中」のまま（＝まだボール待ちで、日時自体は未確定）
+        // だったケースもあるため、昇格時にconfirmedへ決め打ちせず、そのエントリ自身が持って
+        // いたscheduling状態をそのまま引き継ぐ。
         base = {
           ...base,
           scheduledDate: promoted.date,
           scheduledTime: promoted.time,
-          schedulingStatus: 'confirmed',
-          schedulingBallOwner: undefined,
-          schedulingNote: undefined,
+          schedulingStatus: promoted.schedulingStatus || 'confirmed',
+          schedulingBallOwner: promoted.schedulingBallOwner,
+          schedulingNote: promoted.schedulingNote,
           additionalScheduledDates: base.additionalScheduledDates!.filter(d => d.id !== promoted.id),
         };
       } else {
@@ -4879,6 +4902,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-09-16',
     items: [
       '候補者の「進捗状況」と「選考日程」の入力欄を1つにまとめた。これまでは進捗状況（ステージ）のプルダウンと選考日程のタイムラインが別々に並んでいたが、進捗状況の変更もタイムライン内の「現在のフェーズ」表示から直接行えるようにし、独立したプルダウンは廃止した。候補者登録フォーム・選考情報編集モーダル・候補者詳細カードのインライン編集の3箇所すべてに反映',
+      '選考日程タイムラインの現在のフェーズに「→ 次へ」ボタンを追加。ほぼ一本道で進む通常の選考であれば、13択のプルダウンを開かなくても1クリックで次のフェーズへ進められる（打診→書類選考のような例外的な遷移は引き続きプルダウンから選択可能）',
+      '「先の日程」（企業が前もって伝えてきた、まだ到達していないフェーズの日程）にも、現在のフェーズと同じ「確定/調整中」「候補者ボール/企業ボール/その他」の入力を追加。まだそのフェーズに進んでいなくても、日程調整中であることを記録できるようになった',
     ],
   },
   {
@@ -9443,19 +9468,23 @@ const SchedulingBallField: React.FC<{
 );
 
 // schedulingBallOwnerの表示用ラベル。'other'はschedulingNoteがあればその内容を、無ければ
-// 「その他」とだけ表示する。
-const describeSchedulingBall = (app: CompanyApplication): string => {
-  if (app.schedulingBallOwner === 'candidate') return '候補者ボール';
-  if (app.schedulingBallOwner === 'company') return '企業ボール';
-  if (app.schedulingBallOwner === 'other') return app.schedulingNote ? `その他（${app.schedulingNote}）` : 'その他';
+// 「その他」とだけ表示する。現在のフェーズ（CompanyApplication）・先のフェーズ
+// （additionalScheduledDatesの各エントリ）どちらの形からも同じ2フィールドだけで呼べるよう、
+// 引数の型は最小限（Pick同等）にしてある。
+const describeSchedulingBall = (entry: { schedulingBallOwner?: CompanyApplication['schedulingBallOwner']; schedulingNote?: string }): string => {
+  if (entry.schedulingBallOwner === 'candidate') return '候補者ボール';
+  if (entry.schedulingBallOwner === 'company') return '企業ボール';
+  if (entry.schedulingBallOwner === 'other') return entry.schedulingNote ? `その他（${entry.schedulingNote}）` : 'その他';
   return '未選択';
 };
 
 // 先に確定した今後の選考日程（CompanyApplication.additionalScheduledDates）の表示用文字列。
-// 件数が0件なら空文字列を返す。
+// 件数が0件なら空文字列を返す。調整中（まだdateが未確定）のエントリはボール状況を代わりに表示する。
 const describeAdditionalScheduledDates = (app: CompanyApplication): string =>
   (app.additionalScheduledDates || [])
-    .map(d => `${d.stage}: ${new Date(d.date + 'T00:00:00').toLocaleDateString('ja-JP')}${d.time ? ` ${d.time}` : ''}`)
+    .map(d => `${d.stage}: ${(d.schedulingStatus || 'confirmed') === 'adjusting'
+      ? `調整中（${describeSchedulingBall(d)}）`
+      : `${new Date(d.date + 'T00:00:00').toLocaleDateString('ja-JP')}${d.time ? ` ${d.time}` : ''}`}`)
     .join(' / ');
 
 // カーソルを合わせた時に、選考予定日時（確定/調整中いずれか）・先に確定した今後の選考日程・
@@ -9476,6 +9505,26 @@ const buildStageTooltip = (app: CompanyApplication, editable: boolean): string =
     : '';
   const base = `${app.companyName}: ${app.stage}${scheduleLine}${additionalLine}${trackLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
+};
+
+// 「→ 次へ進める」クイックボタン — 現在のフェーズの隣に置き、13択のプルダウンを開かなくても
+// 1クリックで次のフェーズへ進められるようにする（PastStagePillの打診ケース・CurrentStagePill
+// 共通）。次のフェーズが無い（内定承諾、またはお見送り等の終了フェーズ）場合は何も描画しない。
+const AdvanceStageButton: React.FC<{
+  stage: PipelineStage;
+  onChangeStage: (stage: PipelineStage) => void;
+}> = ({ stage, onChangeStage }) => {
+  const next = getNextForwardStage(stage);
+  if (!next) return null;
+  return (
+    <button
+      type="button"
+      className="stage-track-advance"
+      onClick={() => onChangeStage(next)}
+      aria-label={`次のフェーズ（${next}）へ進める`}
+      title={`${next}へ進める`}
+    >→ 次へ（{next}）</button>
+  );
 };
 
 // 選考トラックの1ステップ（既に通過済みのフェーズ）— 実際にその選考が行われた日付を表示する。
@@ -9499,14 +9548,17 @@ const PastStagePill: React.FC<{
   return (
     <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[stage] } as React.CSSProperties}>
       {editable && onChangeStage ? (
-        <select
-          className="stage-track-stage-select"
-          value={stage}
-          aria-label="進捗状況"
-          onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
-        >
-          {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        <>
+          <select
+            className="stage-track-stage-select"
+            value={stage}
+            aria-label="進捗状況"
+            onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
+          >
+            {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <AdvanceStageButton stage={stage} onChangeStage={onChangeStage} />
+        </>
       ) : (
         <span className="stage-track-stage">{stage}</span>
       )}
@@ -9552,6 +9604,7 @@ const CurrentStagePill: React.FC<{
     ) : (
       <span className="stage-track-stage">{app.stage}</span>
     )}
+    {editable && <AdvanceStageButton stage={app.stage} onChangeStage={onChangeStage} />}
     {editable ? (
       <div className="stage-track-current-schedule">
         <SchedulingStatusToggle
@@ -9590,24 +9643,26 @@ const CurrentStagePill: React.FC<{
   </span>
 );
 
-// 選考トラックの先のステップ（企業がまだ到達していないフェーズの日程を前もって確定させて
+// 選考トラックの先のステップ（企業がまだ到達していないフェーズの日程情報を前もって伝えて
 // きた場合、see CompanyApplication.additionalScheduledDates）— どのフェーズの日程かを選ぶ
-// セレクトと、日時の入力欄、削除ボタンを持つ。
+// セレクト、現在のフェーズと全く同じ確定/調整中の切り替え・日時入力（またはボール選択）、
+// 削除ボタンを持つ。「まだ到達していないフェーズだが日程調整中」というケースも表現できる
+// ようにするため、現在のフェーズ用のCurrentStagePillと同じ部品を再利用している。
 const FutureStagePill: React.FC<{
   entry: NonNullable<CompanyApplication['additionalScheduledDates']>[number];
   options: PipelineStage[];
   editable: boolean;
   onChangeStage: (stage: PipelineStage) => void;
-  onChangeDate: (date: string | undefined) => void;
-  onChangeTime: (time: string | undefined) => void;
+  onCommitPatch: (patch: Partial<NonNullable<CompanyApplication['additionalScheduledDates']>[number]>) => void;
   onRemove: () => void;
-}> = ({ entry, options, editable, onChangeStage, onChangeDate, onChangeTime, onRemove }) => (
+  idPrefix: string;
+}> = ({ entry, options, editable, onChangeStage, onCommitPatch, onRemove, idPrefix }) => (
   <span className="stage-track-step is-future" style={{ '--badge-color': STAGE_COLOR_MAP[entry.stage] } as React.CSSProperties}>
     {editable ? (
       <select
         className="stage-track-stage-select"
         value={entry.stage}
-        aria-label="先に確定した選考日程のフェーズ"
+        aria-label="先の選考日程のフェーズ"
         onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
       >
         {options.map(s => <option key={s} value={s}>{s}</option>)}
@@ -9616,20 +9671,41 @@ const FutureStagePill: React.FC<{
       <span className="stage-track-stage">{entry.stage}</span>
     )}
     {editable ? (
-      <ScheduledDateTimeField
-        date={entry.date || undefined}
-        time={entry.time}
-        onCommitDate={onChangeDate}
-        onCommitTime={onChangeTime}
-        ariaLabel="先に確定した選考日程の日時"
-      />
+      <div className="stage-track-current-schedule">
+        <SchedulingStatusToggle
+          status={entry.schedulingStatus || 'confirmed'}
+          onChange={(status) => onCommitPatch(status === 'confirmed'
+            ? { schedulingStatus: 'confirmed', schedulingBallOwner: undefined, schedulingNote: undefined }
+            : { schedulingStatus: 'adjusting', date: '', time: undefined })}
+          idPrefix={`${idPrefix}-status`}
+        />
+        {(entry.schedulingStatus || 'confirmed') === 'confirmed' ? (
+          <ScheduledDateTimeField
+            date={entry.date || undefined}
+            time={entry.time}
+            onCommitDate={(v) => onCommitPatch({ date: v || '' })}
+            onCommitTime={(v) => onCommitPatch({ time: v })}
+            ariaLabel="先の選考日程の日時"
+          />
+        ) : (
+          <SchedulingBallField
+            value={entry.schedulingBallOwner}
+            note={entry.schedulingNote}
+            onChangeBall={(v) => onCommitPatch({ schedulingBallOwner: v, schedulingNote: v === 'other' ? entry.schedulingNote : undefined })}
+            onChangeNote={(note) => onCommitPatch({ schedulingNote: note })}
+            idPrefix={`${idPrefix}-ball`}
+          />
+        )}
+      </div>
     ) : (
       <span className="stage-track-date">
-        {entry.date ? `${new Date(entry.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}${entry.time ? ` ${entry.time}` : ''}` : '未設定'}
+        {(entry.schedulingStatus || 'confirmed') === 'adjusting'
+          ? `調整中（${describeSchedulingBall(entry)}）`
+          : (entry.date ? `${new Date(entry.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}${entry.time ? ` ${entry.time}` : ''}` : '未設定')}
       </span>
     )}
     {editable && (
-      <button type="button" className="stage-track-remove" onClick={onRemove} aria-label={`${entry.stage}の先付け日程を削除`}>&times;</button>
+      <button type="button" className="stage-track-remove" onClick={onRemove} aria-label={`${entry.stage}の先の日程を削除`}>&times;</button>
     )}
   </span>
 );
@@ -9712,9 +9788,9 @@ const SelectionTimeline: React.FC<{
               options={options}
               editable={editable}
               onChangeStage={(stage) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, stage } : e))}
-              onChangeDate={(date) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, date: date || '' } : e))}
-              onChangeTime={(time) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, time } : e))}
+              onCommitPatch={(patch) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, ...patch } : e))}
               onRemove={() => onCommitAdditionalDates(additional.filter(e => e.id !== entry.id))}
+              idPrefix={`${idPrefix}-future-${entry.id}`}
             />
           </React.Fragment>
         );
