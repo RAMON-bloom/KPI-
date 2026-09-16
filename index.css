@@ -1001,6 +1001,11 @@ section {
   padding: 0;
   border: none;
   background: transparent;
+  /* 過去・現在のステップは背景そのものが--badge-color（塗りつぶし）なので白文字で継承させる。
+     先のステップ（.is-future）だけ背景が透明なので、下のルールで--badge-colorに上書きする。 */
+  color: inherit;
+}
+.stage-track-step.is-future .stage-track-stage-select {
   color: var(--badge-color, var(--secondary-color));
 }
 .stage-track-step.is-future .scheduled-date-time-inputs input {
