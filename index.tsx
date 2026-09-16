@@ -392,6 +392,14 @@ const ACTIVE_PIPELINE_STAGES: PipelineStage[] = ['打診', '書類選考', '適�
 // (from a placement standpoint) branches off the main path.
 const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '内定承諾後辞退'];
 
+// 「確定した日時」を誰かと調整する、という概念自体がなじまないフェーズ——打診（まだ会う約束が
+// 決まっているわけではない最初の声がけ）と書類選考（面談・面接のような日程調整を伴わない書類
+// 提出・審査）——では、選考日程タイムライン上でも確定/調整中の切り替えや日時入力を出さず、
+// 過去のステップと同じ「実施日（＝ステージに入った日）」だけを持つ扱いにする。この日付は
+// computeStageAdvanceUpdateがステージ変更のたびに自動でstageHistoryへ記録するため、確定/調整中
+// を手動で入力しなくても「登録した時点でその日時が登録される」形になる（必要なら手動修正も可能）。
+const STAGES_WITHOUT_SCHEDULING = new Set<PipelineStage>(['打診', '書類選考']);
+
 // 選考日程タイムラインの「→ 次へ進める」クイックボタン用 — 通常の選考はほぼ必ずこの順で
 // 前進するため、13択のプルダウンを毎回開かなくても1クリックで次のフェーズへ進められるように
 // する。stageがFORWARD_PIPELINE_STAGESの最後（内定承諾）、またはそこに含まれない（お見送り
@@ -4924,6 +4932,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者の「進捗状況」と「選考日程」の入力欄を1つにまとめた。これまでは進捗状況（ステージ）のプルダウンと選考日程のタイムラインが別々に並んでいたが、進捗状況の変更もタイムライン内の「現在のフェーズ」表示から直接行えるようにし、独立したプルダウンは廃止した。候補者登録フォーム・選考情報編集モーダル・候補者詳細カードのインライン編集の3箇所すべてに反映',
       '選考日程タイムラインの現在のフェーズに「→ 次へ」ボタンを追加。ほぼ一本道で進む通常の選考であれば、13択のプルダウンを開かなくても1クリックで次のフェーズへ進められる（打診→書類選考のような例外的な遷移は引き続きプルダウンから選択可能）',
       '「先の日程」（企業が前もって伝えてきた、まだ到達していないフェーズの日程）にも、現在のフェーズと同じ「確定/調整中」「候補者ボール/企業ボール/その他」の入力を追加。まだそのフェーズに進んでいなくても、日程調整中であることを記録できるようになった',
+      '進捗状況セレクトを開いた時に選択肢の文字が見えなくなる不具合、明るい色のフェーズ（カジュアル面談・オファー面談・内定・内定承諾・選考辞退）でバッジ/セレクトの文字が読みにくくなる不具合を修正',
+      '書類選考は「日程調整」の概念がなじまないため、打診と同じく確定/調整中の入力欄を出さず、ステージに入った日をそのまま記録・表示するようにした',
     ],
   },
   {
@@ -9556,9 +9566,10 @@ const PastStagePill: React.FC<{
   date: string | undefined;
   editable: boolean;
   onCommitDate: (value: string | undefined) => void;
-  // Only passed for the special "現在のステージが打診" case (see SelectionTimeline) — 打診には
-  // 確定/調整中の概念がなくCurrentStagePillを使えないため、このピルに直接ステージ変更の口を
-  // 持たせている。通常の過去ステップ（読み取り専用の実施日のみ）ではundefinedのまま。
+  // Only passed for the special "現在のステージがSTAGES_WITHOUT_SCHEDULINGに含まれる" case (see
+  // SelectionTimeline) — 打診・書類選考には確定/調整中の概念がなくCurrentStagePillを使えない
+  // ため、このピルに直接ステージ変更の口を持たせている。通常の過去ステップ（読み取り専用の
+  // 実施日のみ）ではundefinedのまま。
   onChangeStage?: (stage: PipelineStage) => void;
 }> = ({ stage, date, editable, onCommitDate, onChangeStage }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -9758,7 +9769,9 @@ const SelectionTimeline: React.FC<{
   const pastEntries = history.slice(0, -1);
   const additional = app.additionalScheduledDates || [];
   const currentIdx = FORWARD_PIPELINE_STAGES.indexOf(app.stage);
-  const upcomingStages = currentIdx === -1 ? [] : FORWARD_PIPELINE_STAGES.slice(currentIdx + 1);
+  // 書類選考のような「日程調整の概念がない」フェーズは、まだ到達していない先の日程としても
+  // 選べないようにする（確定/調整中・日時入力欄を出す意味自体がないため）。
+  const upcomingStages = currentIdx === -1 ? [] : FORWARD_PIPELINE_STAGES.slice(currentIdx + 1).filter(s => !STAGES_WITHOUT_SCHEDULING.has(s));
 
   return (
     <div className="stage-track selection-timeline">
@@ -9778,10 +9791,10 @@ const SelectionTimeline: React.FC<{
         </React.Fragment>
       ))}
       {pastEntries.length > 0 && <span className="stage-track-arrow">→</span>}
-      {app.stage === '打診' ? (
-        // 打診は「まだ会う約束が決まっているわけではない最初の声がけ」であり、確定/調整中の
-        // 日時という概念自体がなじまない——過去のステップと同じく、いつ打診したかの記録日
-        // だけを持つ扱いにする。
+      {STAGES_WITHOUT_SCHEDULING.has(app.stage) ? (
+        // 打診・書類選考は確定/調整中の日時という概念自体がなじまない——過去のステップと同じく、
+        // ステージに入った日（＝登録・遷移した時点でstageHistoryへ自動記録される日付）だけを
+        // 持つ扱いにする。
         <PastStagePill
           stage={app.stage}
           date={history[history.length - 1]?.date}
