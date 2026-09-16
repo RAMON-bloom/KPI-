@@ -1012,6 +1012,15 @@ section {
 .stage-track-step.is-future .stage-track-stage-select {
   color: var(--badge-text-on-white, var(--badge-color, var(--secondary-color)));
 }
+/* <select>のcolorはブラウザによって開いた時の選択肢リスト（<option>）にもそのまま継承される
+   ——閉じた状態の見た目をバッジの背景色に合わせて白文字にしていると、リストを開いた瞬間は
+   白背景に白文字になり選択肢が読めなくなる。<option>側だけ明示的に通常の文字色・白背景へ
+   固定して、閉じた状態の見た目には影響させない。 */
+.stage-track-stage-select option {
+  color: var(--text-color);
+  background: white;
+  font-weight: normal;
+}
 .stage-track-step.is-future .scheduled-date-time-inputs input {
   font-size: 0.72rem;
   padding: 0.1rem 0.25rem;
@@ -1700,6 +1709,13 @@ section {
   font-weight: 500;
   border: none;
   cursor: pointer;
+}
+/* stage-track-stage-selectと同じ理由 — 閉じた状態の白文字が開いた選択肢リストにも継承されて
+   読めなくなるのを防ぐため、<option>だけ通常の文字色・白背景に固定する。 */
+.status-badge-select option {
+  color: var(--text-color);
+  background: white;
+  font-weight: normal;
 }
 .actions-cell {
   display: flex;
