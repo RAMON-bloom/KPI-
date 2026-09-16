@@ -4876,6 +4876,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-16',
+    items: [
+      '候補者の「進捗状況」と「選考日程」の入力欄を1つにまとめた。これまでは進捗状況（ステージ）のプルダウンと選考日程のタイムラインが別々に並んでいたが、進捗状況の変更もタイムライン内の「現在のフェーズ」表示から直接行えるようにし、独立したプルダウンは廃止した。候補者登録フォーム・選考情報編集モーダル・候補者詳細カードのインライン編集の3箇所すべてに反映',
+    ],
+  },
+  {
     date: '2026-09-15',
     items: [
       '候補者の面談ログ・メモを、面談の実施日（音声はアップロード日、議事録・ファイルはその日付）に基づいて時系列順に表示するようにした。取り込んだ順によらず、複数回分の面談要約が実際にあった順番で並ぶ',
@@ -7594,17 +7600,6 @@ const CandidateModal: React.FC<{
                             aria-label={`企業名 ${index + 1}`}
                           />
                        </div>
-                       <div className="form-group">
-                         <label htmlFor={`stage-${app.id}`}>進捗状況</label>
-                         <select 
-                            id={`stage-${app.id}`}
-                            value={app.stage} 
-                            onChange={e => handleApplicationChange(index, 'stage', e.target.value)}
-                            aria-label={`選考ステージ ${index + 1}`}
-                          >
-                              {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
-                          </select>
-                       </div>
                        <div className="form-group form-group-span-2">
                           <label htmlFor={`nextAction-${app.id}`}>次アクション</label>
                           <input
@@ -7617,13 +7612,14 @@ const CandidateModal: React.FC<{
                           />
                        </div>
                        <div className="form-group form-group-span-2">
-                          <label>選考日程</label>
+                          <label>進捗状況・選考日程</label>
                           <SelectionTimeline
                             app={app}
                             editable
                             onCommitStageHistory={(next) => handleApplicationSchedulingPatch(index, { stageHistory: next })}
                             onCommitSchedule={(patch) => handleApplicationSchedulingPatch(index, patch)}
                             onCommitAdditionalDates={(next) => handleApplicationSchedulingPatch(index, { additionalScheduledDates: next })}
+                            onChangeStage={(stage) => handleApplicationChange(index, 'stage', stage)}
                             idPrefix={`scheduling-${app.id}`}
                           />
                        </div>
@@ -7782,18 +7778,23 @@ const ApplicationModal: React.FC<{
             setApplication(prev => ({ ...prev, [name]: value === '' ? undefined : Number(value) }));
             return;
         }
-        if (name === 'stage' && !initialData) {
+        setApplication(prev => ({ ...prev, [name]: value }));
+    };
+
+    // 進捗状況（app.stage）の変更 — 選考日程タイムライン内の「現在のステージ」ピルから呼ばれる。
+    const handleStageChange = (stage: PipelineStage) => {
+        if (!initialData) {
             // Adding a brand-new application — keep the seed 選考トラック entry in sync with
             // whatever starting stage is picked here (e.g. skipping straight to 1次面接), so the
             // track reflects where the application actually began instead of always showing 打診.
             setApplication(prev => ({
                 ...prev,
-                stage: value as PipelineStage,
-                stageHistory: [{ stage: value as PipelineStage, date: prev.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }],
+                stage,
+                stageHistory: [{ stage, date: prev.stageHistory?.[0]?.date ?? new Date().toLocaleDateString('sv-SE') }],
             }));
             return;
         }
-        setApplication(prev => ({ ...prev, [name]: value }));
+        setApplication(prev => ({ ...prev, stage }));
     };
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -7849,17 +7850,6 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label htmlFor="stage">進捗状況</label>
-                        <select
-                            id="stage"
-                            name="stage"
-                            value={application.stage}
-                            onChange={handleChange}
-                        >
-                            {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
-                        </select>
-                    </div>
-                    <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
                         <input
                             type="text"
@@ -7870,13 +7860,14 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label>選考日程</label>
+                        <label>進捗状況・選考日程</label>
                         <SelectionTimeline
                             app={application}
                             editable
                             onCommitStageHistory={(next) => setApplication(prev => ({ ...prev, stageHistory: next }))}
                             onCommitSchedule={(patch) => setApplication(prev => ({ ...prev, ...patch }))}
                             onCommitAdditionalDates={(next) => setApplication(prev => ({ ...prev, additionalScheduledDates: next }))}
+                            onChangeStage={handleStageChange}
                             idPrefix="application-modal-scheduling"
                         />
                     </div>
@@ -9496,14 +9487,29 @@ const PastStagePill: React.FC<{
   date: string | undefined;
   editable: boolean;
   onCommitDate: (value: string | undefined) => void;
-}> = ({ stage, date, editable, onCommitDate }) => {
+  // Only passed for the special "現在のステージが打診" case (see SelectionTimeline) — 打診には
+  // 確定/調整中の概念がなくCurrentStagePillを使えないため、このピルに直接ステージ変更の口を
+  // 持たせている。通常の過去ステップ（読み取り専用の実施日のみ）ではundefinedのまま。
+  onChangeStage?: (stage: PipelineStage) => void;
+}> = ({ stage, date, editable, onCommitDate, onChangeStage }) => {
   const [isEditing, setIsEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
   const display = date ? new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前';
   return (
     <span className="stage-track-step" style={{ '--badge-color': STAGE_COLOR_MAP[stage] } as React.CSSProperties}>
-      <span className="stage-track-stage">{stage}</span>
+      {editable && onChangeStage ? (
+        <select
+          className="stage-track-stage-select"
+          value={stage}
+          aria-label="進捗状況"
+          onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
+        >
+          {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      ) : (
+        <span className="stage-track-stage">{stage}</span>
+      )}
       {editable && isEditing ? (
         <input
           ref={inputRef}
@@ -9530,10 +9536,22 @@ const CurrentStagePill: React.FC<{
   app: CompanyApplication;
   editable: boolean;
   onCommitSchedule: (patch: Partial<CompanyApplication>) => void;
+  onChangeStage: (stage: PipelineStage) => void;
   idPrefix: string;
-}> = ({ app, editable, onCommitSchedule, idPrefix }) => (
+}> = ({ app, editable, onCommitSchedule, onChangeStage, idPrefix }) => (
   <span className="stage-track-step is-current" style={{ '--badge-color': STAGE_COLOR_MAP[app.stage] } as React.CSSProperties}>
-    <span className="stage-track-stage">{app.stage}</span>
+    {editable ? (
+      <select
+        className="stage-track-stage-select"
+        value={app.stage}
+        aria-label="進捗状況"
+        onChange={(e) => onChangeStage(e.target.value as PipelineStage)}
+      >
+        {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+      </select>
+    ) : (
+      <span className="stage-track-stage">{app.stage}</span>
+    )}
     {editable ? (
       <div className="stage-track-current-schedule">
         <SchedulingStatusToggle
@@ -9630,8 +9648,14 @@ const SelectionTimeline: React.FC<{
   onCommitStageHistory: (nextHistory: NonNullable<CompanyApplication['stageHistory']>) => void;
   onCommitSchedule: (patch: Partial<CompanyApplication>) => void;
   onCommitAdditionalDates: (next: NonNullable<CompanyApplication['additionalScheduledDates']>) => void;
+  // 進捗状況（app.stage）自体の変更口 — 以前は選考日程タイムラインの外に独立した「進捗状況」
+  // プルダウンがあったが、①ステージだけ変えても選考トラックに反映されないまま保存できてしまう
+  // ②日程を確認しながらステージを変える、という自然な流れができない、という2つの問題があった
+  // ため、タイムライン内の「現在のステージ」ピル自身をこの口で直接編集できるようにし、独立した
+  // プルダウンは廃止した（呼び出し元3箇所すべて）。
+  onChangeStage: (stage: PipelineStage) => void;
   idPrefix: string;
-}> = ({ app, editable, onCommitStageHistory, onCommitSchedule, onCommitAdditionalDates, idPrefix }) => {
+}> = ({ app, editable, onCommitStageHistory, onCommitSchedule, onCommitAdditionalDates, onChangeStage, idPrefix }) => {
   // stageHistoryが無い（この機能より前に作られた等）場合でも、少なくとも現在のフェーズの
   // ステップだけは表示できるよう、その場限りのフォールバックを組み立てる。
   const history = app.stageHistory && app.stageHistory.length > 0 ? app.stageHistory : [{ stage: app.stage }];
@@ -9671,9 +9695,10 @@ const SelectionTimeline: React.FC<{
             next[next.length - 1] = { ...next[next.length - 1], date: v };
             onCommitStageHistory(next);
           }}
+          onChangeStage={onChangeStage}
         />
       ) : (
-        <CurrentStagePill app={app} editable={editable} onCommitSchedule={onCommitSchedule} idPrefix={idPrefix} />
+        <CurrentStagePill app={app} editable={editable} onCommitSchedule={onCommitSchedule} onChangeStage={onChangeStage} idPrefix={idPrefix} />
       )}
       {additional.map((entry) => {
         // entryの現在のstageが既にupcomingStagesから外れている（appのstageがそれを追い越した
@@ -10845,32 +10870,15 @@ const PipelineCandidateCard: React.FC<{
                                     )}
                                 </div>
                                 <div className="detail-card-body">
-                                    <div className="detail-card-item">
-                                        <span>進捗状況:</span>
-                                        {candidateIsOwn ? (
-                                            <select
-                                                value={app.stage}
-                                                onChange={(e) => commitApplicationField(app.id, { stage: e.target.value as PipelineStage })}
-                                                style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}
-                                                className="status-badge-select"
-                                                aria-label="進捗状況"
-                                            >
-                                                {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
-                                            </select>
-                                        ) : (
-                                            <span className="status-badge" style={{'--badge-color': STAGE_COLOR_MAP[app.stage]} as React.CSSProperties}>
-                                                {app.stage}
-                                            </span>
-                                        )}
-                                    </div>
                                     <div className="detail-card-item detail-card-item-track">
-                                        <span>選考日程:</span>
+                                        <span>進捗状況・選考日程:</span>
                                         <SelectionTimeline
                                             app={app}
                                             editable={candidateIsOwn}
                                             onCommitStageHistory={(next) => commitApplicationField(app.id, { stageHistory: next })}
                                             onCommitSchedule={(patch) => commitApplicationField(app.id, patch)}
                                             onCommitAdditionalDates={(next) => commitApplicationField(app.id, { additionalScheduledDates: next })}
+                                            onChangeStage={(stage) => commitApplicationField(app.id, { stage })}
                                             idPrefix={`detail-scheduling-${app.id}`}
                                         />
                                     </div>
