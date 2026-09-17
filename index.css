@@ -1028,6 +1028,22 @@ section {
 .stage-track-step.is-future .scheduled-date-time-inputs input[type="time"] {
   width: 5rem;
 }
+.stage-track-future-actions {
+  display: flex;
+  gap: 0.4rem;
+  align-self: flex-end;
+}
+/* 先の日程を現在のステータスに昇格させるボタン——.stage-track-removeと対になる操作なので
+   同じ並びに置く。緑（--success-color）にして削除ボタンの赤と役割を視覚的に区別する。 */
+.stage-track-promote {
+  background: none;
+  border: none;
+  color: var(--success-color);
+  font-size: 0.9rem;
+  font-weight: bold;
+  padding: 0;
+  line-height: 1;
+}
 .stage-track-remove {
   background: none;
   border: none;
@@ -1036,7 +1052,6 @@ section {
   font-weight: bold;
   padding: 0;
   line-height: 1;
-  align-self: flex-end;
 }
 .stage-track-arrow-future {
   opacity: 0.6;

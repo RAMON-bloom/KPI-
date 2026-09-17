@@ -4937,6 +4937,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '「＋ 先の日程を追加」ボタンの文言を「＋ 選考を追加」に変更し、分かりやすくした',
       '選考ステータスが「内定」（またはその先）まで進んだ選考企業ごとに「オファー金額」を円単位で入力できるようにした。報酬形態が「料率(%)」の選考では、入力したオファー金額が想定年収より優先して想定粗利の計算に使われる。候補者が複数社から同時にオファーを受けている場合でも、各社の確定額を別々に記録できる（候補者登録フォーム・選考情報の編集・候補者詳細カードのインライン編集の3箇所すべてに反映）',
       '【不具合修正】上記「オファー金額」の入力欄が、報酬形態が「固定報酬」の選考企業では表示されない不具合を修正。固定報酬の場合も実際の提示額を記録として残せるようにした（想定粗利の計算には引き続き使われません）',
+      '選考日程タイムラインの「先の日程」（企業が前もって確定させてきた、まだ到達していないフェーズの日程）に、その日程を現在のステータスへ昇格させる「✓」ボタンを追加。クリックすると入力済みの日時・確定/調整中の内容ごとそのまま現在のフェーズへ引き継がれ、破線の未到達表示から色塗りの現在のステータス表示に切り替わる。プルダウンで選び直す手間なく、企業から伝えられていた通りに選考が進んだ時点でワンクリックで反映できる',
     ],
   },
   {
@@ -5334,6 +5335,7 @@ const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[
         '報酬形態は「料率(%) × 想定年収」か「固定報酬（万円）」のどちらかを選べます。企業によっては年収に関係なく固定額の紹介料になる場合に対応しています。',
         '選考ステータスが「内定」（またはその先）まで進むと、その選考企業だけの「オファー金額」を円単位で入力できるようになります。料率(%)の選考では、入力すると想定年収より優先して想定粗利の計算に使われるため、複数社から同時にオファーが出ている場合でも各社の確定額を別々に記録できます。',
         '選考予定日時を入れるとパイプラインカレンダーに表示され、選考トラックでこれまでの経緯（いつどのフェーズに進んだか）を確認できます。',
+        '企業が前もって確定させてきた「先の日程」には、日時ごと現在のステータスへ昇格させる「✓」ボタンがあります。実際にそのフェーズまで進んだらクリックするだけで、破線の未到達表示から色塗りの現在のステータス表示に切り替わります。',
         '見送りたくない候補者は「非表示（選考終了）」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
       ],
     },
@@ -9729,8 +9731,13 @@ const FutureStagePill: React.FC<{
   onChangeStage: (stage: PipelineStage) => void;
   onCommitPatch: (patch: Partial<NonNullable<CompanyApplication['additionalScheduledDates']>[number]>) => void;
   onRemove: () => void;
+  // この先の日程を、今まさに到達した現在のステータスへ昇格させる（日時・確定/調整中の入力
+  // 内容ごとそのまま引き継ぎ、破線の「先のステップ」表示から色塗りの「現在のステップ」表示に
+  // 切り替わる）。企業が前もって確定させてきた日程がその通りに実現した時、選び直す手間なく
+  // ワンクリックで反映できるようにするため。
+  onPromote: () => void;
   idPrefix: string;
-}> = ({ entry, options, editable, onChangeStage, onCommitPatch, onRemove, idPrefix }) => (
+}> = ({ entry, options, editable, onChangeStage, onCommitPatch, onRemove, onPromote, idPrefix }) => (
   <span className="stage-track-step is-future" style={getStageBadgeStyle(entry.stage)}>
     {editable ? (
       <select
@@ -9779,7 +9786,16 @@ const FutureStagePill: React.FC<{
       </span>
     )}
     {editable && (
-      <button type="button" className="stage-track-remove" onClick={onRemove} aria-label={`${entry.stage}の先の日程を削除`}>&times;</button>
+      <span className="stage-track-future-actions">
+        <button
+          type="button"
+          className="stage-track-promote"
+          onClick={onPromote}
+          aria-label={`${entry.stage}を現在のステータスにする`}
+          title="クリックすると、この日程が現在の選考ステータスになります"
+        >✓</button>
+        <button type="button" className="stage-track-remove" onClick={onRemove} aria-label={`${entry.stage}の先の日程を削除`}>&times;</button>
+      </span>
     )}
   </span>
 );
@@ -9866,6 +9882,15 @@ const SelectionTimeline: React.FC<{
               onChangeStage={(stage) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, stage } : e))}
               onCommitPatch={(patch) => onCommitAdditionalDates(additional.map(e => e.id === entry.id ? { ...e, ...patch } : e))}
               onRemove={() => onCommitAdditionalDates(additional.filter(e => e.id !== entry.id))}
+              onPromote={() => onCommitSchedule({
+                stage: entry.stage,
+                scheduledDate: entry.date,
+                scheduledTime: entry.time,
+                schedulingStatus: entry.schedulingStatus || 'confirmed',
+                schedulingBallOwner: entry.schedulingBallOwner,
+                schedulingNote: entry.schedulingNote,
+                additionalScheduledDates: additional.filter(e => e.id !== entry.id),
+              })}
               idPrefix={`${idPrefix}-future-${entry.id}`}
             />
           </React.Fragment>
