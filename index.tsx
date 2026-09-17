@@ -4933,6 +4933,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '選考日程タイムラインの「→ 次へ」ボタンを廃止した。進捗状況はプルダウンから選ぶ形に一本化し、各フェーズのトラック（実施日時）を意識して記録しやすくした',
       '「＋ 先の日程を追加」ボタンの文言を「＋ 選考を追加」に変更し、分かりやすくした',
       '選考ステータスが「内定」（またはその先）まで進んだ選考企業ごとに「オファー金額」を円単位で入力できるようにした。報酬形態が「料率(%)」の選考では、入力したオファー金額が想定年収より優先して想定粗利の計算に使われる。候補者が複数社から同時にオファーを受けている場合でも、各社の確定額を別々に記録できる（候補者登録フォーム・選考情報の編集・候補者詳細カードのインライン編集の3箇所すべてに反映）',
+      '【不具合修正】上記「オファー金額」の入力欄が、報酬形態が「固定報酬」の選考企業では表示されない不具合を修正。固定報酬の場合も実際の提示額を記録として残せるようにした（想定粗利の計算には引き続き使われません）',
     ],
   },
   {
@@ -7739,7 +7740,7 @@ const CandidateModal: React.FC<{
                             />
                          </div>
                        )}
-                       {(app.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(app) && (
+                       {applicationHasReceivedOffer(app) && (
                          <div className="form-group">
                             <label htmlFor={`offerAmount-${app.id}`}>オファー金額 (円)</label>
                             <input
@@ -7755,7 +7756,11 @@ const CandidateModal: React.FC<{
                               }}
                               aria-label={`オファー金額 ${index + 1}`}
                             />
-                            <p className="form-helper-text">この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。</p>
+                            <p className="form-helper-text">
+                              {(app.feeType || 'rate') === 'rate'
+                                ? 'この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。'
+                                : '固定報酬のため想定粗利の計算には使われませんが、実際の提示額を記録しておけます。'}
+                            </p>
                          </div>
                        )}
                        <div className="form-group">
@@ -8006,7 +8011,7 @@ const ApplicationModal: React.FC<{
                             />
                         </div>
                     )}
-                    {(application.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(application) && (
+                    {applicationHasReceivedOffer(application) && (
                         <div className="form-group">
                             <label htmlFor="offerAmount">オファー金額 (円)</label>
                             <input
@@ -8022,7 +8027,11 @@ const ApplicationModal: React.FC<{
                                     setApplication(prev => ({ ...prev, offerAmount: yen === undefined ? undefined : yen / 10000 }));
                                 }}
                             />
-                            <p className="form-helper-text">この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。</p>
+                            <p className="form-helper-text">
+                                {(application.feeType || 'rate') === 'rate'
+                                    ? 'この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。'
+                                    : '固定報酬のため想定粗利の計算には使われませんが、実際の提示額を記録しておけます。'}
+                            </p>
                         </div>
                     )}
                     <div className="form-group">
@@ -11080,7 +11089,7 @@ const PipelineCandidateCard: React.FC<{
                                             </>
                                         )}
                                     </div>
-                                    {(app.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(app) && (
+                                    {applicationHasReceivedOffer(app) && (
                                         <div className="detail-card-item">
                                             <span>オファー金額:</span>
                                             {candidateIsOwn ? (
