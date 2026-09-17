@@ -400,15 +400,19 @@ const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '
 // を手動で入力しなくても「登録した時点でその日時が登録される」形になる（必要なら手動修正も可能）。
 const STAGES_WITHOUT_SCHEDULING = new Set<PipelineStage>(['打診', '書類選考']);
 
+// この選考（CompanyApplication）単体が内定（またはその先の内定承諾）まで進んでいるかどうか。
+// 「オファー金額」入力欄の表示判定、および想定粗利の計算で候補者共通の想定年収より優先して
+// 使うかどうかの判定に使う——同じ候補者が複数社から同時にオファーを受けている場合、各社の
+// 確定額はそれぞれ別々のはずなので、選考ごとに個別判定する必要がある。
+const applicationHasReceivedOffer = (app: Pick<CompanyApplication, 'stage'>): boolean =>
+  FORWARD_PIPELINE_STAGES.includes(app.stage) &&
+  FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('内定');
+
 // 選考企業から内定（またはその先の内定承諾）が出ているかどうか。想定年収の入力単位を、内定が
 // 出るまでは万円単位、内定が出た後は実際の円単位（1円単位）に切り替える判定に使う — 内定が出る
 // と提示年収の金額が確定し、円単位まで正確に把握できることが多いため。
 const hasReceivedOffer = (candidate: Pick<Candidate, 'applications'>): boolean =>
-  candidate.applications.some(app =>
-    !app.isHidden &&
-    FORWARD_PIPELINE_STAGES.includes(app.stage) &&
-    FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('内定')
-  );
+  candidate.applications.some(app => !app.isHidden && applicationHasReceivedOffer(app));
 
 // Maps "an application just advanced INTO this stage" to the GENERAL_KPIS key(s) representing
 // having passed the gate immediately before it. Reaching 内定 fires BOTH finalInterviewPassed
@@ -605,6 +609,13 @@ interface CompanyApplication {
   // feeType === 'fixed' の場合の固定報酬額（万円）。expectedAnnualSalaryと同じ単位にすることで、
   // computeApplicationGrossProfitがrate/fixedどちらでも同じ単位のrevenueを返せるようにしている。
   fixedFeeAmount?: number;
+  // この選考企業から実際に提示された内定金額（万円、expectedAnnualSalaryと同じ単位）。
+  // applicationHasReceivedOffer(このapp)がtrueになって初めて入力可能になる——候補者が複数社
+  // から同時にオファーを受けている場合でも、各社の確定額を候補者共通のexpectedAnnualSalary
+  // （あくまで見込み・想定額）とは別に、選考ごとに正確に記録できるようにするため。feeType
+  // が'rate'の選考では、computeApplicationGrossProfitがこの値をexpectedAnnualSalaryより
+  // 優先してrevenue計算のベースに使う。
+  offerAmount?: number;
   // Likelihood ratings for this specific application: offerConfidence = chance of receiving
   // an offer at all, acceptanceConfidence = chance the candidate accepts it if offered. Used
   // to pick the single most-likely-to-close application per candidate for the gross-profit
@@ -4921,6 +4932,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '選考日程タイムラインの「→ 次へ」ボタンを廃止した。進捗状況はプルダウンから選ぶ形に一本化し、各フェーズのトラック（実施日時）を意識して記録しやすくした',
       '「＋ 先の日程を追加」ボタンの文言を「＋ 選考を追加」に変更し、分かりやすくした',
+      '選考ステータスが「内定」（またはその先）まで進んだ選考企業ごとに「オファー金額」を円単位で入力できるようにした。報酬形態が「料率(%)」の選考では、入力したオファー金額が想定年収より優先して想定粗利の計算に使われる。候補者が複数社から同時にオファーを受けている場合でも、各社の確定額を別々に記録できる（候補者登録フォーム・選考情報の編集・候補者詳細カードのインライン編集の3箇所すべてに反映）',
     ],
   },
   {
@@ -5316,6 +5328,7 @@ const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[
       items: [
         '候補者カードの「+ 選考追加」で応募企業を追加し、進捗状況（打診〜内定承諾・内定承諾後辞退・お見送り・選考辞退）を更新します。',
         '報酬形態は「料率(%) × 想定年収」か「固定報酬（万円）」のどちらかを選べます。企業によっては年収に関係なく固定額の紹介料になる場合に対応しています。',
+        '選考ステータスが「内定」（またはその先）まで進むと、その選考企業だけの「オファー金額」を円単位で入力できるようになります。料率(%)の選考では、入力すると想定年収より優先して想定粗利の計算に使われるため、複数社から同時にオファーが出ている場合でも各社の確定額を別々に記録できます。',
         '選考予定日時を入れるとパイプラインカレンダーに表示され、選考トラックでこれまでの経緯（いつどのフェーズに進んだか）を確認できます。',
         '見送りたくない候補者は「非表示（選考終了）」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
       ],
@@ -7726,6 +7739,25 @@ const CandidateModal: React.FC<{
                             />
                          </div>
                        )}
+                       {(app.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(app) && (
+                         <div className="form-group">
+                            <label htmlFor={`offerAmount-${app.id}`}>オファー金額 (円)</label>
+                            <input
+                              id={`offerAmount-${app.id}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              placeholder="例: 6000000"
+                              value={app.offerAmount ? Math.round(app.offerAmount * 10000) : ''}
+                              onChange={e => {
+                                const yen = e.target.value === '' ? undefined : Number(e.target.value);
+                                handleApplicationSchedulingPatch(index, { offerAmount: yen === undefined ? undefined : yen / 10000 });
+                              }}
+                              aria-label={`オファー金額 ${index + 1}`}
+                            />
+                            <p className="form-helper-text">この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。</p>
+                         </div>
+                       )}
                        <div className="form-group">
                           <label htmlFor={`offerConfidence-${app.id}`}>内定確度</label>
                           <select
@@ -7972,6 +8004,25 @@ const ApplicationModal: React.FC<{
                                 value={application.feeRate ?? ''}
                                 onChange={handleChange}
                             />
+                        </div>
+                    )}
+                    {(application.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(application) && (
+                        <div className="form-group">
+                            <label htmlFor="offerAmount">オファー金額 (円)</label>
+                            <input
+                                type="number"
+                                id="offerAmount"
+                                name="offerAmount"
+                                min="0"
+                                step="1"
+                                placeholder="例: 6000000"
+                                value={application.offerAmount ? Math.round(application.offerAmount * 10000) : ''}
+                                onChange={(e) => {
+                                    const yen = e.target.value === '' ? undefined : Number(e.target.value);
+                                    setApplication(prev => ({ ...prev, offerAmount: yen === undefined ? undefined : yen / 10000 }));
+                                }}
+                            />
+                            <p className="form-helper-text">この企業から実際に提示された金額を円単位で入力すると、想定粗利の計算に想定年収より優先して使われます。</p>
                         </div>
                     )}
                     <div className="form-group">
@@ -8319,13 +8370,16 @@ interface StageGrossProfit {
 
 /**
  * Expected gross profit for one application: revenue is the client referral fee. For the default
- * feeType ('rate'), that's the candidate's expected annual salary × the position's own fee rate
- * — different positions for the same candidate can negotiate different rates. For 'fixed', the
- * company instead charges a flat amount regardless of the candidate's salary, so revenue is just
- * that amount directly. Either way, the media's fee rate is a cut OF THAT REVENUE (not of the
- * candidate's salary directly) — i.e. 粗利 = 紹介料 − 紹介料×媒体手数料率. Returns null when the
- * data needed for the selected feeType hasn't been entered yet, so callers can tell "zero profit"
- * apart from "not enough data".
+ * feeType ('rate'), that's an annual salary figure × the position's own fee rate — different
+ * positions for the same candidate can negotiate different rates. The salary figure prefers this
+ * application's own confirmed offerAmount (set once applicationHasReceivedOffer is true) over the
+ * candidate's shared expectedAnnualSalary estimate, so a candidate holding simultaneous offers
+ * from several companies keeps each company's actual confirmed amount separate rather than all
+ * of them collapsing onto the one estimate. For 'fixed', the company instead charges a flat
+ * amount regardless of the candidate's salary, so revenue is just that amount directly. Either
+ * way, the media's fee rate is a cut OF THAT REVENUE (not of the candidate's salary directly) —
+ * i.e. 粗利 = 紹介料 − 紹介料×媒体手数料率. Returns null when the data needed for the selected
+ * feeType hasn't been entered yet, so callers can tell "zero profit" apart from "not enough data".
  */
 function computeApplicationGrossProfit(
     candidate: Candidate,
@@ -8337,8 +8391,9 @@ function computeApplicationGrossProfit(
         if (application.fixedFeeAmount === undefined || application.fixedFeeAmount === null) return null;
         revenue = application.fixedFeeAmount;
     } else {
-        if (!candidate.expectedAnnualSalary || application.feeRate === undefined || application.feeRate === null) return null;
-        revenue = candidate.expectedAnnualSalary * (application.feeRate / 100);
+        const annualSalary = application.offerAmount ?? candidate.expectedAnnualSalary;
+        if (!annualSalary || application.feeRate === undefined || application.feeRate === null) return null;
+        revenue = annualSalary * (application.feeRate / 100);
     }
     const mediaFeeRate = mediaFeeRateById.get(candidate.source) || 0;
     const cost = revenue * (mediaFeeRate / 100);
@@ -9530,7 +9585,8 @@ const buildStageTooltip = (app: CompanyApplication, editable: boolean): string =
   const trackLine = app.stageHistory && app.stageHistory.length > 0
     ? `\n選考トラック: ${app.stageHistory.map(h => `${h.stage}(${h.date ? new Date(h.date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前'})`).join(' → ')}`
     : '';
-  const base = `${app.companyName}: ${app.stage}${scheduleLine}${additionalLine}${trackLine}`;
+  const offerAmountLine = app.offerAmount ? `\nオファー金額: ${formatSalaryAsYen(app.offerAmount)}` : '';
+  const base = `${app.companyName}: ${app.stage}${scheduleLine}${additionalLine}${trackLine}${offerAmountLine}`;
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
 };
 
@@ -11024,6 +11080,16 @@ const PipelineCandidateCard: React.FC<{
                                             </>
                                         )}
                                     </div>
+                                    {(app.feeType || 'rate') === 'rate' && applicationHasReceivedOffer(app) && (
+                                        <div className="detail-card-item">
+                                            <span>オファー金額:</span>
+                                            {candidateIsOwn ? (
+                                                <InlineSalaryField value={app.offerAmount} onCommit={(v) => commitApplicationField(app.id, { offerAmount: v })} placeholder="例: 6000000" ariaLabel="オファー金額" />
+                                            ) : (
+                                                <span>{formatSalaryAsYen(app.offerAmount) || '未設定'}</span>
+                                            )}
+                                        </div>
+                                    )}
                                     <div className="detail-card-item">
                                         <span>内定確度 / 入社確度:</span>
                                         {candidateIsOwn ? (
