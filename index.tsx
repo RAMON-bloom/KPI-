@@ -10995,7 +10995,8 @@ const PipelineCandidateCard: React.FC<{
                                         aria-label={isMemoExpanded ? 'このメモを折りたたむ' : 'このメモを展開する'}
                                         aria-expanded={isMemoExpanded}
                                     >
-                                        {isMemoExpanded ? '▾' : '▸'}
+                                        <span className={`toggle-icon ${isMemoExpanded ? 'open' : ''}`}>▾</span>
+                                        <span>{isMemoExpanded ? '折りたたむ' : '展開'}</span>
                                     </button>
                                     {candidateIsOwn ? (
                                         <InlineTextField
