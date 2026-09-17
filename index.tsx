@@ -400,13 +400,16 @@ const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '
 // を手動で入力しなくても「登録した時点でその日時が登録される」形になる（必要なら手動修正も可能）。
 const STAGES_WITHOUT_SCHEDULING = new Set<PipelineStage>(['打診', '書類選考']);
 
-// この選考（CompanyApplication）単体が内定（またはその先の内定承諾）まで進んでいるかどうか。
-// 「オファー金額」入力欄の表示判定、および想定粗利の計算で候補者共通の想定年収より優先して
-// 使うかどうかの判定に使う——同じ候補者が複数社から同時にオファーを受けている場合、各社の
-// 確定額はそれぞれ別々のはずなので、選考ごとに個別判定する必要がある。
+// この選考（CompanyApplication）単体が内定（またはその先の内定承諾、内定承諾後辞退）まで
+// 進んでいるかどうか。「オファー金額」入力欄の表示判定、および想定粗利の計算で候補者共通の
+// 想定年収より優先して使うかどうかの判定に使う——同じ候補者が複数社から同時にオファーを
+// 受けている場合、各社の確定額はそれぞれ別々のはずなので、選考ごとに個別判定する必要がある。
+// 内定承諾後辞退はFORWARD_PIPELINE_STAGES（前進フローの一本道）には含まれない終了ステージだが、
+// 内定自体は出ていた選考なので、一度入力したオファー金額が辞退後も引き続き見えるように含める。
 const applicationHasReceivedOffer = (app: Pick<CompanyApplication, 'stage'>): boolean =>
-  FORWARD_PIPELINE_STAGES.includes(app.stage) &&
-  FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('内定');
+  app.stage === '内定承諾後辞退' ||
+  (FORWARD_PIPELINE_STAGES.includes(app.stage) &&
+   FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('内定'));
 
 // 選考企業から内定（またはその先の内定承諾）が出ているかどうか。想定年収の入力単位を、内定が
 // 出るまでは万円単位、内定が出た後は実際の円単位（1円単位）に切り替える判定に使う — 内定が出る
