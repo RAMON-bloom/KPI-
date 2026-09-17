@@ -10180,6 +10180,7 @@ const PipelineCandidateCard: React.FC<{
         phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
         email: basicInfo.email?.trim() || c.email,
       });
+      setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
     } catch (error) {
       console.error("Error generating interview summary:", error);
       alert('AIによる面談要約の生成中にエラーが発生しました。');
@@ -10271,6 +10272,7 @@ const PipelineCandidateCard: React.FC<{
         phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
         email: basicInfo.email?.trim() || c.email,
       });
+      setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
     } catch (error) {
       console.error('Error summarizing interview log:', error);
       alert('面談ログの要約生成中にエラーが発生しました。');
@@ -10376,10 +10378,24 @@ const PipelineCandidateCard: React.FC<{
     commitMemos(displayMemos.map(m => (m.id === id ? { ...m, ...patch, updatedAt: new Date().toISOString() } : m)));
   };
   const addMemo = () => {
-    commitMemos([...displayMemos, { id: `memo_${Date.now()}`, title: '', content: '', updatedAt: new Date().toISOString() }]);
+    const newMemo: MemoEntry = { id: `memo_${Date.now()}`, title: '', content: '', updatedAt: new Date().toISOString() };
+    commitMemos([...displayMemos, newMemo]);
+    setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
   };
   const removeMemo = (id: string) => {
     commitMemos(displayMemos.filter(m => m.id !== id));
+  };
+
+  // 面談ログ・メモの各項目の開閉状態 — 件数が増えるとカードが縦に長くなりすぎるため、
+  // 初期状態は折りたたみ、クリックで個別に展開できるようにする。新規追加分（手動追加・
+  // 音声/議事録からの自動生成）はその場で内容を確認できるよう追加時に自動展開する。
+  const [expandedMemoIds, setExpandedMemoIds] = useState<Set<string>>(new Set());
+  const toggleMemoExpanded = (id: string) => {
+    setExpandedMemoIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   return (
@@ -10967,9 +10983,20 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item summary-item memo-list-section">
                     <span className="info-label">面談ログ・メモ</span>
                     <div className="memo-list">
-                        {sortMemosChronologically(displayMemos).map(memo => (
-                            <div key={memo.id} className="memo-entry">
+                        {sortMemosChronologically(displayMemos).map(memo => {
+                            const isMemoExpanded = expandedMemoIds.has(memo.id);
+                            return (
+                            <div key={memo.id} className={`memo-entry ${isMemoExpanded ? '' : 'memo-entry-collapsed'}`}>
                                 <div className="memo-entry-header">
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleMemoExpanded(memo.id)}
+                                        className="memo-collapse-toggle"
+                                        aria-label={isMemoExpanded ? 'このメモを折りたたむ' : 'このメモを展開する'}
+                                        aria-expanded={isMemoExpanded}
+                                    >
+                                        {isMemoExpanded ? '▾' : '▸'}
+                                    </button>
                                     {candidateIsOwn ? (
                                         <InlineTextField
                                             value={memo.title}
@@ -10979,7 +11006,7 @@ const PipelineCandidateCard: React.FC<{
                                             className="memo-title-input"
                                         />
                                     ) : (
-                                        <strong>{memo.title || '（無題のメモ）'}</strong>
+                                        <strong onClick={() => toggleMemoExpanded(memo.id)} className="memo-title-clickable">{memo.title || '（無題のメモ）'}</strong>
                                     )}
                                     {memo.updatedAt && <span className="memo-updated-at">最終更新: {formatMemoTimestamp(memo.updatedAt)}</span>}
                                     <MemoExpandButton
@@ -10993,13 +11020,16 @@ const PipelineCandidateCard: React.FC<{
                                         <button type="button" onClick={() => removeMemo(memo.id)} className="remove-file-button" aria-label="このメモを削除">&times;</button>
                                     )}
                                 </div>
-                                {candidateIsOwn ? (
-                                    <InlineTextField multiline rows={6} value={memo.content} onCommit={(v) => updateMemo(memo.id, { content: v })} placeholder="メモ内容" ariaLabel="メモ内容" className="memo-content-text" />
-                                ) : (
-                                    <p className="info-value summary-text">{memo.content || 'メモはありません。'}</p>
+                                {isMemoExpanded && (
+                                    candidateIsOwn ? (
+                                        <InlineTextField multiline rows={6} value={memo.content} onCommit={(v) => updateMemo(memo.id, { content: v })} placeholder="メモ内容" ariaLabel="メモ内容" className="memo-content-text" />
+                                    ) : (
+                                        <p className="info-value summary-text">{memo.content || 'メモはありません。'}</p>
+                                    )
                                 )}
                             </div>
-                        ))}
+                            );
+                        })}
                         {displayMemos.length === 0 && !candidateIsOwn && <p className="no-data-message">メモはありません。</p>}
                         {candidateIsOwn && (
                             <button type="button" onClick={addMemo} className="secondary-action-button">+ メモを追加</button>

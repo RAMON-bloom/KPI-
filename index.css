@@ -3160,6 +3160,29 @@ p.memo-content-text {
 .memo-entry-header strong {
   flex-grow: 1;
 }
+.memo-entry-collapsed {
+  padding-bottom: 0.6rem;
+}
+.memo-entry-collapsed .memo-entry-header {
+  margin-bottom: 0;
+}
+.memo-collapse-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted-color);
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.15rem 0.2rem;
+  flex-shrink: 0;
+}
+.memo-collapse-toggle:hover,
+.memo-collapse-toggle:focus-visible {
+  color: var(--primary-color);
+}
+.memo-title-clickable {
+  cursor: pointer;
+}
 .memo-updated-at {
   color: var(--text-muted-color);
   font-size: 0.75rem;
