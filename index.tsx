@@ -400,16 +400,6 @@ const EXIT_PIPELINE_STAGES: PipelineStage[] = ['お見送り', '選考辞退', '
 // を手動で入力しなくても「登録した時点でその日時が登録される」形になる（必要なら手動修正も可能）。
 const STAGES_WITHOUT_SCHEDULING = new Set<PipelineStage>(['打診', '書類選考']);
 
-// 選考日程タイムラインの「→ 次へ進める」クイックボタン用 — 通常の選考はほぼ必ずこの順で
-// 前進するため、13択のプルダウンを毎回開かなくても1クリックで次のフェーズへ進められるように
-// する。stageがFORWARD_PIPELINE_STAGESの最後（内定承諾）、またはそこに含まれない（お見送り
-// 等の終了フェーズ）場合はundefined（＝ボタンを出さない）。
-const getNextForwardStage = (stage: PipelineStage): PipelineStage | undefined => {
-  const idx = FORWARD_PIPELINE_STAGES.indexOf(stage);
-  if (idx === -1 || idx === FORWARD_PIPELINE_STAGES.length - 1) return undefined;
-  return FORWARD_PIPELINE_STAGES[idx + 1];
-};
-
 // 選考企業から内定（またはその先の内定承諾）が出ているかどうか。想定年収の入力単位を、内定が
 // 出るまでは万円単位、内定が出た後は実際の円単位（1円単位）に切り替える判定に使う — 内定が出る
 // と提示年収の金額が確定し、円単位まで正確に把握できることが多いため。
@@ -4926,6 +4916,13 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-09-17',
+    items: [
+      '選考日程タイムラインの「→ 次へ」ボタンを廃止した。進捗状況はプルダウンから選ぶ形に一本化し、各フェーズのトラック（実施日時）を意識して記録しやすくした',
+      '「＋ 先の日程を追加」ボタンの文言を「＋ 選考を追加」に変更し、分かりやすくした',
+    ],
+  },
   {
     date: '2026-09-16',
     items: [
@@ -9537,26 +9534,6 @@ const buildStageTooltip = (app: CompanyApplication, editable: boolean): string =
   return editable ? `${base}\n（クリックして選考情報を編集）` : base;
 };
 
-// 「→ 次へ進める」クイックボタン — 現在のフェーズの隣に置き、13択のプルダウンを開かなくても
-// 1クリックで次のフェーズへ進められるようにする（PastStagePillの打診ケース・CurrentStagePill
-// 共通）。次のフェーズが無い（内定承諾、またはお見送り等の終了フェーズ）場合は何も描画しない。
-const AdvanceStageButton: React.FC<{
-  stage: PipelineStage;
-  onChangeStage: (stage: PipelineStage) => void;
-}> = ({ stage, onChangeStage }) => {
-  const next = getNextForwardStage(stage);
-  if (!next) return null;
-  return (
-    <button
-      type="button"
-      className="stage-track-advance"
-      onClick={() => onChangeStage(next)}
-      aria-label={`次のフェーズ（${next}）へ進める`}
-      title={`${next}へ進める`}
-    >→ 次へ（{next}）</button>
-  );
-};
-
 // 選考トラックの1ステップ（既に通過済みのフェーズ）— 実際にその選考が行われた日付を表示する。
 // 日付部分はクリックすると直接編集できる（stageHistoryの各エントリは元々、ステージ変更時に
 // 保存日を仮置きして後から実際の選考予定日で補正する「推測」だったが、ここから直接正しい日付
@@ -9588,7 +9565,6 @@ const PastStagePill: React.FC<{
           >
             {PIPELINE_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
-          <AdvanceStageButton stage={stage} onChangeStage={onChangeStage} />
         </>
       ) : (
         <span className="stage-track-stage">{stage}</span>
@@ -9635,7 +9611,6 @@ const CurrentStagePill: React.FC<{
     ) : (
       <span className="stage-track-stage">{app.stage}</span>
     )}
-    {editable && <AdvanceStageButton stage={app.stage} onChangeStage={onChangeStage} />}
     {editable ? (
       <div className="stage-track-current-schedule">
         <SchedulingStatusToggle
@@ -9839,9 +9814,9 @@ const SelectionTimeline: React.FC<{
               const defaultStage = upcomingStages.find(s => !usedStages.has(s)) || upcomingStages[0];
               onCommitAdditionalDates([...additional, { id: `addl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, stage: defaultStage, date: '' }]);
             }}
-            aria-label="先に確定した選考日程を追加"
+            aria-label="選考を追加"
             title="企業が前もって確定させてきた、次以降の選考フェーズの日程を追加します"
-          >＋ 先の日程を追加</button>
+          >＋ 選考を追加</button>
         </>
       )}
     </div>
