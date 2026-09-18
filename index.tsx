@@ -12925,7 +12925,9 @@ const TeamChatReportPanel: React.FC<{
   // 参照）。
   monthlyTarget: { repliesTarget?: number; interviewsTarget?: number };
   onSetMonthlyTarget: (field: 'repliesTarget' | 'interviewsTarget', value: number | undefined) => void;
-  // チーム管理と同じ権限保持者（isTeamsEditable）だけが目標値を編集できる。それ以外は現在値の
+  // TEAMS_ADMIN_EMAIL本人（isTeamsAdmin）だけが目標値を編集できる——事業部として一つだけ持つ
+  // 値であり、他の複数の編集者が触れる状態だと、それぞれの編集者のタブが持つ古いstateで
+  // 意図せず巻き戻ってしまうリスクが上がるため、設定者を1人に絞っている。それ以外は現在値の
   // 閲覧のみ。
   canEditTargets: boolean;
 }> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey, monthlyTarget, onSetMonthlyTarget, canEditTargets }) => {
@@ -13127,6 +13129,9 @@ const TeamChatReportPanel: React.FC<{
         </div>
         <div style={{ flex: '1 1 260px', maxWidth: '320px' }}>
           <span className="team-chat-report-panel-title" style={{ display: 'block', marginBottom: '0.5rem' }}>🎯 事業部の月間目標</span>
+          {!canEditTargets && (
+            <p className="no-data-message" style={{ margin: '0 0 0.5rem' }}>事業部の目標は管理者のみ編集できます。</p>
+          )}
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '1rem' }}>
             {([['repliesTarget', '返信数'], ['interviewsTarget', '面談数']] as const).map(([field, label]) => (
               <label key={field} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -14172,6 +14177,11 @@ const App: React.FC = () => {
   // finished even once — without this, "no teams yet" and "teams config still loading" would be
   // indistinguishable, and the effect could incorrectly revoke real grants on first paint.
   const [teamsConfigLoaded, setTeamsConfigLoaded] = useState(false);
+  // チーム共有設定（事業部の月間目標を含む）の読み込みがDrive権限不足（DrivePermissionError）
+  // で失敗したかどうか。`drive`フルスコープが追加される前にログインしたまま一度も再許可して
+  // いないアカウントは、この読み込みが常に403で失敗し続け、事業部の月間目標などが実際には
+  // 設定済みでも「未設定」として見えてしまう。ヘッダーの案内バーから再許可を促す。
+  const [driveReauthNeeded, setDriveReauthNeeded] = useState(false);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
   // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
   // write directly into a specific teammate's own Drive file.
@@ -14745,6 +14755,9 @@ const App: React.FC = () => {
   // related UI. Firing once per sign-in (deps are just identity/init, not view/modal state)
   // also sidesteps the earlier redundant-refetch race this effect used to have to guard against
   // with a memoized "needsTeams" boolean.
+  // 再許可（reauthorizeWithConsent）後にこの読み込みをやり直すためだけのカウンタ。値そのもの
+  // に意味はなく、インクリメントするとeffectが再実行される。
+  const [teamsConfigReloadNonce, setTeamsConfigReloadNonce] = useState(0);
   useEffect(() => {
     if (!currentIdentity || !isInitialized) return;
     let cancelled = false;
@@ -14761,6 +14774,7 @@ const App: React.FC = () => {
         setReportChatWebhookUrl(result.data?.reportChatWebhookUrl);
         setReportChatThreadKey(result.data?.reportChatThreadKey);
         setReportMonthlyTarget(result.data?.reportMonthlyTarget || {});
+        setDriveReauthNeeded(false);
         if (!hasAppliedDefaultDivisionRef.current) {
           hasAppliedDefaultDivisionRef.current = true;
           const ownDepartment = result.data?.memberDepartments?.[currentIdentity.email];
@@ -14768,12 +14782,25 @@ const App: React.FC = () => {
         }
       } catch (error) {
         console.error('Failed to load teams config from Drive', error);
+        // `drive`フルスコープがこのアカウントにまだ許可されておらず、チーム共有設定（事業部の
+        // 月間目標を含む）が読めない。サイレントなトークン更新では直らないので、ヘッダーから
+        // 明示的な再許可を促す。
+        if (!cancelled && error instanceof DrivePermissionError) setDriveReauthNeeded(true);
       } finally {
         if (!cancelled) setTeamsConfigLoaded(true);
       }
     })();
     return () => { cancelled = true; };
-  }, [currentIdentity, isInitialized]);
+  }, [currentIdentity, isInitialized, teamsConfigReloadNonce]);
+
+  const handleReauthorizeDriveAccess = async () => {
+    try {
+      await reauthorizeWithConsent();
+      setTeamsConfigReloadNonce(n => n + 1);
+    } catch (error) {
+      console.error('Failed to reauthorize Drive access', error);
+    }
+  };
 
   // Only TEAMS_ADMIN_EMAIL and whoever they've explicitly granted access to (via TeamsModal's
   // permission section) can create/edit teams — file ownership no longer determines this, since
@@ -15225,44 +15252,73 @@ const App: React.FC = () => {
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  // 末尾3つ（Google Chat通知のWebhook URL・スレッドキー・事業部の月間目標）はデフォルトで
-  // 現在値を引き継ぐ — 既存の呼び出し元（チーム作成・部署設定など）はこれらに一切関知しない
-  // ので、渡さなければそのまま維持される。それぞれを変更するハンドラだけが明示的に新しい値を
-  // 渡す。
+  // 末尾3つ（Google Chat通知のWebhook URL・スレッドキー・事業部の月間目標）は「このタブが
+  // 意図して変更する場合だけ」{ value } でラップして渡す（値そのものがundefinedを取りうる
+  // フィールドなので、単なる省略＝デフォルト引数だと「変更なし」と「undefinedに変更したい」を
+  // 区別できない）。渡さなかった項目は、書き込み直前にDriveから読み直した最新値をそのまま
+  // 使う——このタブがサインイン時に読み込んだまま古くなっているかもしれない値で、他の編集者が
+  // 直前に保存したこれらの項目を上書き・巻き戻してしまわないようにするため（例: 誰かが目標を
+  // 設定した直後に、別の古いタブからメンバー追加だけを保存すると、無関係のはずの目標が
+  // 巻き戻ってしまっていた不具合の対策）。
   const persistTeamsConfig = (
     updatedTeams: Team[],
     updatedAuthorizedEditors: string[],
     updatedDepartments: Record<string, Department>,
     updatedMiddleEmails: string[],
-    updatedReportChatWebhookUrl: string | undefined = reportChatWebhookUrl,
-    updatedReportChatThreadKey: string | undefined = reportChatThreadKey,
-    updatedReportMonthlyTarget: { repliesTarget?: number; interviewsTarget?: number } = reportMonthlyTarget
+    reportChatWebhookUrlPatch?: { value: string | undefined },
+    reportChatThreadKeyPatch?: { value: string | undefined },
+    reportMonthlyTargetPatch?: { value: { repliesTarget?: number; interviewsTarget?: number } }
   ) => {
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
     setMemberDepartments(updatedDepartments);
     setMiddleEmails(updatedMiddleEmails);
-    setReportChatWebhookUrl(updatedReportChatWebhookUrl);
-    setReportChatThreadKey(updatedReportChatThreadKey);
-    setReportMonthlyTarget(updatedReportMonthlyTarget);
+    // 明示的に変更を意図したフィールドだけ即座にローカル反映する（他は次のDrive読み直しまで
+    // 現状表示のまま——このタブ自身がその真値を知らないので、下手に触らない）。
+    if (reportChatWebhookUrlPatch) setReportChatWebhookUrl(reportChatWebhookUrlPatch.value);
+    if (reportChatThreadKeyPatch) setReportChatThreadKey(reportChatThreadKeyPatch.value);
+    if (reportMonthlyTargetPatch) setReportMonthlyTarget(reportMonthlyTargetPatch.value);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
+        let latestReportFields = { reportChatWebhookUrl, reportChatThreadKey, reportMonthlyTarget };
+        if (!reportChatWebhookUrlPatch || !reportChatThreadKeyPatch || !reportMonthlyTargetPatch) {
+          try {
+            const latest = await loadTeamsConfig<TeamsConfig>();
+            if (latest.data) {
+              latestReportFields = {
+                reportChatWebhookUrl: latest.data.reportChatWebhookUrl,
+                reportChatThreadKey: latest.data.reportChatThreadKey,
+                reportMonthlyTarget: latest.data.reportMonthlyTarget || {},
+              };
+            }
+          } catch (error) {
+            console.error('Failed to refresh report settings before saving teams config', error);
+          }
+        }
+        const finalReportChatWebhookUrl = reportChatWebhookUrlPatch ? reportChatWebhookUrlPatch.value : latestReportFields.reportChatWebhookUrl;
+        const finalReportChatThreadKey = reportChatThreadKeyPatch ? reportChatThreadKeyPatch.value : latestReportFields.reportChatThreadKey;
+        const finalReportMonthlyTarget = reportMonthlyTargetPatch ? reportMonthlyTargetPatch.value : latestReportFields.reportMonthlyTarget;
         const payload: TeamsConfig = {
           schemaVersion: 1,
           teams: updatedTeams,
           authorizedEditorEmails: updatedAuthorizedEditors,
           memberDepartments: updatedDepartments,
           middleEmails: updatedMiddleEmails,
-          reportChatWebhookUrl: updatedReportChatWebhookUrl,
-          reportChatThreadKey: updatedReportChatThreadKey,
-          reportMonthlyTarget: updatedReportMonthlyTarget,
+          reportChatWebhookUrl: finalReportChatWebhookUrl,
+          reportChatThreadKey: finalReportChatThreadKey,
+          reportMonthlyTarget: finalReportMonthlyTarget,
         };
         const newFileId = await saveTeamsConfig(teamsDriveFileIdRef.current, payload, email);
         teamsDriveFileIdRef.current = newFileId;
         setTeamsDriveFileId(newFileId);
         setTeamsOwnerEmail(prev => prev || email);
+        // このタブが触っていないフィールドについては、直前に読み直した最新値をローカル表示にも
+        // 反映しておく（他の編集者の変更をこのタブでも見えるようにする）。
+        if (!reportChatWebhookUrlPatch) setReportChatWebhookUrl(finalReportChatWebhookUrl);
+        if (!reportChatThreadKeyPatch) setReportChatThreadKey(finalReportChatThreadKey);
+        if (!reportMonthlyTargetPatch) setReportMonthlyTarget(finalReportMonthlyTarget);
       } catch (error) {
         console.error('Failed to save teams config', error);
         alert('チーム設定の保存に失敗しました。');
@@ -15403,16 +15459,29 @@ const App: React.FC = () => {
   // 空文字を渡すと未設定（undefined）に戻す。
   const handleSetReportChatWebhookUrl = (url: string) => {
     const trimmed = url.trim();
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, trimmed || undefined, reportChatThreadKey);
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, { value: trimmed || undefined });
   };
 
   // 実績レポートの「月間ピッチ」用、事業部として一元設定する月間目標（返信数・面談数）を更新
   // する（TeamChatReportPanel右側の入力欄から呼ばれる）。この同じ値が全メンバー共通の「個人の
   // 月目標」としてそのまま適用される。value=undefinedでその項目を未設定に戻す。個人の目標設定
-  // （kpiTargets）とは独立した、事業部側の一元管理用の値。
-  const handleSetReportMonthlyTarget = (field: 'repliesTarget' | 'interviewsTarget', value: number | undefined) => {
-    const updated = { ...reportMonthlyTarget, [field]: value };
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, reportChatThreadKey, updated);
+  // （kpiTargets）とは独立した、事業部側の一元管理用の値。TEAMS_ADMIN_EMAILのみが呼べる
+  // （canEditTargets参照）——事業部として一つだけ持つ値なので、設定者を1人に絞って他の編集者の
+  // 保存に巻き込まれないようにしている。
+  const handleSetReportMonthlyTarget = async (field: 'repliesTarget' | 'interviewsTarget', value: number | undefined) => {
+    // このタブのreportMonthlyTargetが（他の場所からの変更で）古くなっている可能性があるため、
+    // マージ元をDriveから読み直してから該当フィールドだけ書き換える——そうしないと、もう片方の
+    // フィールドをこのタブが知らない間に更新した直後にここで保存すると、その変更を巻き戻して
+    // しまう。
+    let base = reportMonthlyTarget;
+    try {
+      const latest = await loadTeamsConfig<TeamsConfig>();
+      if (latest.data) base = latest.data.reportMonthlyTarget || {};
+    } catch (error) {
+      console.error('Failed to refresh monthly target before saving', error);
+    }
+    const updated = { ...base, [field]: value };
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, undefined, undefined, { value: updated });
   };
 
   // スペース内に返信数・面談数報告用のスレッドを作成する（既にある場合は作り直す＝以降の
@@ -15425,7 +15494,7 @@ const App: React.FC = () => {
     if (!reportChatWebhookUrl) throw new Error('先にWebhook URLを設定してください。');
     const newThreadKey = `report-thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await sendChatWebhookMessage(reportChatWebhookUrl, openingText, newThreadKey);
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, reportChatWebhookUrl, newThreadKey);
+    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, undefined, { value: newThreadKey });
   };
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
@@ -17258,6 +17327,17 @@ const App: React.FC = () => {
           </ol>
         </div>
       )}
+      {driveReauthNeeded && (
+        <div className="sync-error-banner">
+          <strong>⚠️ Googleアカウントの権限が不足しています。</strong>
+          <p style={{ margin: '0.5rem 0 0' }}>
+            チームの共有設定（事業部の月間目標などを含む）が読み込めていません。下のボタンから権限を許可し直してください。
+          </p>
+          <button type="button" onClick={handleReauthorizeDriveAccess} className="chat-report-send-button" style={{ marginTop: '0.5rem' }}>
+            権限を許可し直す
+          </button>
+        </div>
+      )}
       <header className="app-main-header">
         <h1 className="app-title">KPI管理くん</h1>
         <div className="division-switcher" role="group" aria-label="事業部切り替え">
@@ -18064,7 +18144,7 @@ const App: React.FC = () => {
                 reportChatThreadKey={reportChatThreadKey}
                 monthlyTarget={reportMonthlyTarget}
                 onSetMonthlyTarget={handleSetReportMonthlyTarget}
-                canEditTargets={isTeamsEditable}
+                canEditTargets={isTeamsAdmin}
               />
             )}
             {!selectedTeamId ? (
