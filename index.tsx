@@ -17,7 +17,7 @@ import {
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, addTeammateCandidatesBulk, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup } from './services/dataSync';
-import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile } from './services/googleDrive';
+import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
@@ -12936,6 +12936,12 @@ const TeamChatReportPanel: React.FC<{
   // 「目標未設定」のまま送られてしまう不具合があったため、送信のたびに取り直すようにした。
   const [refreshedMonthlyTarget, setRefreshedMonthlyTarget] = useState<{ repliesTarget?: number; interviewsTarget?: number } | null>(null);
   const [isPreparingPeriod, setIsPreparingPeriod] = useState(false);
+  // Driveの権限不足（drive full scopeが未許可のまま=古いログインが残っている等）で目標の
+  // 読み直しが403で失敗したケース専用のフラグ。この場合、目標が未設定なのか単に読めていない
+  // だけなのか区別がつかないため、正しい保証のない内容を誤って送信できないようプレビュー自体
+  // を止めて再許可を促す。
+  const [targetRefreshPermissionError, setTargetRefreshPermissionError] = useState(false);
+  const [isReauthorizing, setIsReauthorizing] = useState(false);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
   // 「期間を指定」ボタンを押したときに開くポップアップ専用の入力欄。上部の「表示・出力期間」
@@ -12972,24 +12978,44 @@ const TeamChatReportPanel: React.FC<{
   const effectiveWebhookUrl = reportChatWebhookUrl;
   const effectiveThreadKey = reportChatThreadKey;
 
-  // 対象期間を確定する直前に必ずDriveから事業部の月間目標を読み直してからプレビューを開く
-  // （失敗した場合はprops頼みで機能自体は止めない）。
+  // 対象期間を確定する直前に必ずDriveから事業部の月間目標を読み直してからプレビューを開く。
+  // 権限不足（DrivePermissionError）の場合だけは「未設定」と「読めていないだけ」の区別が
+  // つかないため、誤った内容を確認なく送れてしまわないようプレビュー自体を開かず再許可を促す。
+  // それ以外の失敗（一時的なネットワークエラー等）は従来通りprops頼みで機能自体は止めない。
   const preparePeriod = async (period: { label: string; start: Date; end: Date }) => {
     setIsPreparingPeriod(true);
+    setTargetRefreshPermissionError(false);
     try {
       const result = await loadTeamsConfig<TeamsConfig>();
       setRefreshedMonthlyTarget(result.data?.reportMonthlyTarget || {});
     } catch (error) {
       console.error('Failed to refresh monthly target before building chat report', error);
+      if (error instanceof DrivePermissionError) {
+        setIsPreparingPeriod(false);
+        setTargetRefreshPermissionError(true);
+        return;
+      }
     } finally {
       setIsPreparingPeriod(false);
     }
     setPendingPeriod(period);
   };
 
+  const handleReauthorizeForReport = async () => {
+    setIsReauthorizing(true);
+    try {
+      await reauthorizeWithConsent();
+    } catch (error) {
+      console.error('Failed to reauthorize for chat report', error);
+    } finally {
+      setIsReauthorizing(false);
+    }
+  };
+
   const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
     setSendStatus('idle');
     setSendError(null);
+    setTargetRefreshPermissionError(false);
     if (type === 'yesterday') {
       const d = new Date();
       d.setDate(d.getDate() - 1);
@@ -13071,6 +13097,18 @@ const TeamChatReportPanel: React.FC<{
                 <button type="button" onClick={() => handlePickPeriod('custom')} disabled={isPreparingPeriod} className="chat-report-period-button">期間を指定</button>
                 {isPreparingPeriod && <span className="no-data-message" style={{ margin: 0 }}>最新の目標を確認中...</span>}
               </div>
+              {targetRefreshPermissionError && (
+                <div className="chat-report-preview">
+                  <p className="no-data-message" style={{ margin: 0 }}>
+                    Googleアカウントの権限不足のため、事業部の月間目標を最新の状態で確認できませんでした。目標が実際は設定済みでも「目標未設定」として送信されてしまう恐れがあるため、レポートの作成を中止しました。下のボタンから権限を許可し直してから、もう一度お試しください。
+                  </p>
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <button type="button" onClick={handleReauthorizeForReport} disabled={isReauthorizing} className="chat-report-send-button">
+                      {isReauthorizing ? '許可中...' : '権限を許可し直す'}
+                    </button>
+                  </div>
+                </div>
+              )}
               {pendingPeriod && (
                 <div className="chat-report-preview">
                   <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'inherit' }}>{messageText}</pre>

@@ -18,6 +18,17 @@ export interface DriveFileRef {
   ownerEmail?: string;
 }
 
+/**
+ * Thrown when a domain-wide Drive search (corpora=domain, used to find shared config files —
+ * teams-config, media-config — that the caller doesn't own) comes back 403. This happens for
+ * accounts whose access token predates the `drive` (full) scope this domain search requires and
+ * who haven't been through the interactive consent screen since — a silent token refresh keeps
+ * reusing their old, narrower grant forever, so this never self-heals without re-consent. Kept
+ * distinct from a generic failure so callers can prompt for reauthorization instead of silently
+ * treating "couldn't find the shared file" as "no file exists yet".
+ */
+export class DrivePermissionError extends Error {}
+
 async function authorizedFetch(url: string, init: RequestInit = {}, retried = false): Promise<Response> {
   let session = getCurrentSession();
   // The access token is dropped locally the instant it expires (getCurrentSession returns null
@@ -365,7 +376,10 @@ async function findSharedConfigFile(name: string, requiredOwnerEmail?: string): 
     if (file) return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
   }
   const domainRes = await authorizedFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${fields}&spaces=drive&corpora=domain`);
-  if (!domainRes.ok) throw new Error('設定ファイルの検索に失敗しました。');
+  if (!domainRes.ok) {
+    if (domainRes.status === 403) throw new DrivePermissionError('この操作にはGoogleアカウントの権限の再許可が必要です。');
+    throw new Error('設定ファイルの検索に失敗しました。');
+  }
   const file = (await domainRes.json()).files?.[0];
   if (!file) return null;
   return { id: file.id, name: file.name, modifiedTime: file.modifiedTime, ownerEmail: file.owners?.[0]?.emailAddress };
