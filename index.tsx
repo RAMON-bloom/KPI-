@@ -12930,6 +12930,12 @@ const TeamChatReportPanel: React.FC<{
   canEditTargets: boolean;
 }> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey, monthlyTarget, onSetMonthlyTarget, canEditTargets }) => {
   const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
+  // 期間ボタンを押した時点でDriveから取り直した最新の事業部月間目標（プレビュー・送信内容の
+  // 集計にはこちらを使う）。開きっぱなしの古いタブでは`monthlyTarget`（sign-in時に1回だけ
+  // 読み込んだprops）が更新されないままになり、Drive上は最新の目標が保存済みでも通知本文だけ
+  // 「目標未設定」のまま送られてしまう不具合があったため、送信のたびに取り直すようにした。
+  const [refreshedMonthlyTarget, setRefreshedMonthlyTarget] = useState<{ repliesTarget?: number; interviewsTarget?: number } | null>(null);
+  const [isPreparingPeriod, setIsPreparingPeriod] = useState(false);
   const [sendStatus, setSendStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
   // 「期間を指定」ボタンを押したときに開くポップアップ専用の入力欄。上部の「表示・出力期間」
@@ -12966,6 +12972,21 @@ const TeamChatReportPanel: React.FC<{
   const effectiveWebhookUrl = reportChatWebhookUrl;
   const effectiveThreadKey = reportChatThreadKey;
 
+  // 対象期間を確定する直前に必ずDriveから事業部の月間目標を読み直してからプレビューを開く
+  // （失敗した場合はprops頼みで機能自体は止めない）。
+  const preparePeriod = async (period: { label: string; start: Date; end: Date }) => {
+    setIsPreparingPeriod(true);
+    try {
+      const result = await loadTeamsConfig<TeamsConfig>();
+      setRefreshedMonthlyTarget(result.data?.reportMonthlyTarget || {});
+    } catch (error) {
+      console.error('Failed to refresh monthly target before building chat report', error);
+    } finally {
+      setIsPreparingPeriod(false);
+    }
+    setPendingPeriod(period);
+  };
+
   const handlePickPeriod = (type: 'yesterday' | 'week' | 'month' | 'custom') => {
     setSendStatus('idle');
     setSendError(null);
@@ -12975,18 +12996,18 @@ const TeamChatReportPanel: React.FC<{
       d.setHours(0, 0, 0, 0);
       const end = new Date(d);
       end.setHours(23, 59, 59, 999);
-      setPendingPeriod({ label: '前日', start: d, end });
+      void preparePeriod({ label: '前日', start: d, end });
     } else if (type === 'week') {
       const start = getStartOfWeek(new Date(), weekStartsOn);
       const end = new Date();
       end.setHours(23, 59, 59, 999);
-      setPendingPeriod({ label: '今週', start, end });
+      void preparePeriod({ label: '今週', start, end });
     } else if (type === 'month') {
       const now = new Date();
       const start = new Date(now.getFullYear(), now.getMonth(), 1);
       const end = new Date(now);
       end.setHours(23, 59, 59, 999);
-      setPendingPeriod({ label: '今月', start, end });
+      void preparePeriod({ label: '今月', start, end });
     } else {
       setIsCustomPeriodPopupOpen(true);
     }
@@ -12997,7 +13018,7 @@ const TeamChatReportPanel: React.FC<{
       alert('開始日と終了日を指定してください。');
       return;
     }
-    setPendingPeriod({
+    void preparePeriod({
       label: '指定期間',
       start: new Date(customStartInput + 'T00:00:00'),
       end: new Date(customEndInput + 'T23:59:59'),
@@ -13005,8 +13026,10 @@ const TeamChatReportPanel: React.FC<{
     setIsCustomPeriodPopupOpen(false);
   };
 
+  // 期間確定時に読み直しが成功していればそちらを、失敗時はprops（sign-in時点の値）を使う。
+  const effectiveMonthlyTarget = refreshedMonthlyTarget ?? monthlyTarget;
   const members = pendingPeriod
-    ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end, monthlyTarget)
+    ? computeTeamReplyInterviewBreakdown(memberEmails, allUsersData, allMedia, pendingPeriod.start, pendingPeriod.end, effectiveMonthlyTarget)
     : null;
   const messageText = pendingPeriod && members
     ? buildTeamChatReportText(team.name, pendingPeriod.label, pendingPeriod.start, pendingPeriod.end, members)
@@ -13023,6 +13046,7 @@ const TeamChatReportPanel: React.FC<{
       await sendChatWebhookMessage(effectiveWebhookUrl, messageText, effectiveThreadKey);
       setSendStatus('sent');
       setPendingPeriod(null);
+      setRefreshedMonthlyTarget(null);
     } catch (err: any) {
       setSendStatus('error');
       setSendError(err?.message || '送信に失敗しました。');
@@ -13040,11 +13064,12 @@ const TeamChatReportPanel: React.FC<{
             </p>
           ) : (
             <>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <button type="button" onClick={() => handlePickPeriod('yesterday')} className="chat-report-period-button">前日</button>
-                <button type="button" onClick={() => handlePickPeriod('week')} className="chat-report-period-button">今週</button>
-                <button type="button" onClick={() => handlePickPeriod('month')} className="chat-report-period-button">今月</button>
-                <button type="button" onClick={() => handlePickPeriod('custom')} className="chat-report-period-button">期間を指定</button>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+                <button type="button" onClick={() => handlePickPeriod('yesterday')} disabled={isPreparingPeriod} className="chat-report-period-button">前日</button>
+                <button type="button" onClick={() => handlePickPeriod('week')} disabled={isPreparingPeriod} className="chat-report-period-button">今週</button>
+                <button type="button" onClick={() => handlePickPeriod('month')} disabled={isPreparingPeriod} className="chat-report-period-button">今月</button>
+                <button type="button" onClick={() => handlePickPeriod('custom')} disabled={isPreparingPeriod} className="chat-report-period-button">期間を指定</button>
+                {isPreparingPeriod && <span className="no-data-message" style={{ margin: 0 }}>最新の目標を確認中...</span>}
               </div>
               {pendingPeriod && (
                 <div className="chat-report-preview">
@@ -13053,7 +13078,7 @@ const TeamChatReportPanel: React.FC<{
                     <button type="button" onClick={handleSend} disabled={sendStatus === 'sending'} className="chat-report-send-button">
                       {sendStatus === 'sending' ? '送信中...' : 'この内容で送信する'}
                     </button>
-                    <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); }} className="cancel-button">キャンセル</button>
+                    <button type="button" onClick={() => { setPendingPeriod(null); setSendStatus('idle'); setRefreshedMonthlyTarget(null); }} className="cancel-button">キャンセル</button>
                   </div>
                 </div>
               )}
