@@ -4948,6 +4948,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '候補者パイプラインの「チーム」タブに「BP会 会議用レポート」を追加した。会議資料の「＜数字＞」（サマリ・確度加重後の総売上/総粗利・「〇月〇週に決める人」の一覧）に記入する内容を、チームの選考中の案件から集計し、そのまま貼れるテキストとして出力できます。売上は想定紹介料、粗利は媒体手数料を引いた想定粗利をもとに算出します',
       '会議用の「決定見込み時期（月・週）」と「確度（S=決定済/A/B/C/D=見込み外）」は、メンバーが自分のパイプラインに入力している意思決定時期・確度とは別に、この画面で案件ごとに付け直せます（メンバーの入力や候補者データは変更されません。設定はレポートを作る本人のアカウントにだけ保存されます）。A/B/Cの歩留まり（既定70%/40%/20%）と当月の目標本数も設定でき、内定承諾済みの案件は自動でS（決定済）になります',
+      '新規候補者の登録フォームで、現職年収を必須項目にした（万円単位）。会議用レポートなどの売上・粗利の算定に使うためです。既に登録済みの候補者の編集には影響しません',
     ],
   },
   {
@@ -7347,6 +7348,14 @@ const CandidateModal: React.FC<{
             alert('候補者名は必須です。');
             return;
         }
+        // 新規登録時のみ現職年収を必須にする（BP会 会議用レポートの売上・粗利の算定に使うため）。
+        // 編集時は対象外——現職年収が未入力のまま登録された既存の候補者も、他の項目を編集できる
+        // ようにするため。
+        if (!initialData && !(candidate.currentSalary > 0)) {
+            alert('現職年収は必須です（万円単位で入力してください）。');
+            document.getElementById('currentSalary')?.focus();
+            return;
+        }
 
         let candidateToSave = candidate;
         // 重複判定は新規登録時のみ（編集時は対象外）。氏名＋現職企業が一致する候補者を他ユーザーが
@@ -7558,8 +7567,8 @@ const CandidateModal: React.FC<{
                     <input type="text" id="education" name="education" value={candidate.education || ''} onChange={handleChange} placeholder="例: 東京大学" />
                 </div>
                 <div className="form-group">
-                    <label htmlFor="currentSalary">現職年収 (万円)</label>
-                    <input type="number" id="currentSalary" name="currentSalary" step="any" value={candidate.currentSalary || ''} onChange={handleChange} placeholder="例: 500" />
+                    <label htmlFor="currentSalary">現職年収 (万円){!initialData && ' *'}</label>
+                    <input type="number" id="currentSalary" name="currentSalary" step="any" min={0} required={!initialData} value={candidate.currentSalary || ''} onChange={handleChange} placeholder="例: 500" />
                 </div>
                 <div className="form-group">
                     <label htmlFor="salary">希望年収 (万円)</label>
