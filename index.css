@@ -541,7 +541,8 @@ section {
    滑らかさを保つため5000pxのまま）。*/
 #all-users-progress-content.open,
 #all-users-gross-profit-content.open,
-#all-users-member-weekly-summary-content.open {
+#all-users-member-weekly-summary-content.open,
+#meeting-forecast-content.open {
   max-height: 200000px;
 }
 
@@ -3565,4 +3566,51 @@ p.memo-content-text {
       flex-direction: column;
       align-items: stretch;
     }
+}
+
+/* --- BP会 会議用レポート（パイプライン「チーム」タブ） --- */
+.meeting-forecast-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  margin-left: 0.75rem;
+}
+.meeting-forecast-inline-field input[type="number"] {
+  width: 4.5rem;
+}
+.meeting-forecast-select {
+  min-width: 9.5rem;
+  max-width: 15rem;
+  font-size: 0.85rem;
+}
+.meeting-forecast-table td {
+  vertical-align: middle;
+}
+.meeting-forecast-member-input {
+  font-size: 0.8rem;
+  color: var(--text-muted-color);
+  white-space: nowrap;
+}
+/* 対象月外・時期未入力の選考（「選考中のすべて」表示時）は、資料の対象外だと一目で分かるよう薄くする。 */
+.meeting-forecast-row-out {
+  opacity: 0.55;
+}
+.meeting-forecast-warning {
+  font-style: normal;
+  color: #b45309;
+  margin-top: 0.5rem;
+}
+.meeting-forecast-text {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background-color: var(--card-bg-color);
+  resize: vertical;
+  white-space: pre;
 }

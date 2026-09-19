@@ -23,6 +23,12 @@ import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, Scout
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildCandidateDraftsFromGrid, extractDistinctColumnValues, CANDIDATE_IMPORT_FIELD_CATALOG, CandidateImportFieldKey, BuildCandidateDraftsResult } from './services/pipelineSpreadsheetImport';
+import {
+  MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
+  getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
+  resolveMeetingRow, isRowInMonth, summarizeMeetingRows, findMultiApplicationCandidateKeys, buildMeetingForecastText,
+  type MeetingConfidence, type MeetingForecastSettings, type MeetingForecastRowInput, type MeetingTiming,
+} from './services/meetingForecast';
 
 ChartJS.register(
   CategoryScale,
@@ -1108,6 +1114,13 @@ interface UserData {
   //   「まだこの機能で一度も確定判定を行っていない」——初回のみ過去全期間をさかのぼって
   //   種をまく。
   scoutAchievementLog?: { weekly: string[]; monthly: string[]; lastEvaluatedWeekKey?: string; lastEvaluatedMonthKey?: string };
+  // 候補者パイプライン「チーム」タブの「BP会 会議用レポート」で使う、会議用の決定見込み時期・
+  // 確度の上書き値と歩留まり設定（services/meetingForecast.ts参照）。メンバー本人が自分の
+  // パイプラインに入力している意思決定時期・確度とは別物で、候補者データ（Candidate/
+  // CompanyApplication）自体には一切書き込まない——会議用の見立てはメンバー入力と食い違って
+  // よいため。チーム設定（TeamsConfig）は管理者しか書けないので、レポートを作る人本人の
+  // UserDataに保存する（他のリーダーの見立ては共有されない）。
+  meetingForecast?: MeetingForecastSettings;
 }
 
 // バグ報告・改善要望の種別とステータス。STAGE_COLOR_MAPと同じ考え方で、白文字と組み合わせて
@@ -4931,6 +4944,13 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-19',
+    items: [
+      '候補者パイプラインの「チーム」タブに「BP会 会議用レポート」を追加した。会議資料の「＜数字＞」（サマリ・確度加重後の総売上/総粗利・「〇月〇週に決める人」の一覧）に記入する内容を、チームの選考中の案件から集計し、そのまま貼れるテキストとして出力できます。売上は想定紹介料、粗利は媒体手数料を引いた想定粗利をもとに算出します',
+      '会議用の「決定見込み時期（月・週）」と「確度（S=決定済/A/B/C/D=見込み外）」は、メンバーが自分のパイプラインに入力している意思決定時期・確度とは別に、この画面で案件ごとに付け直せます（メンバーの入力や候補者データは変更されません。設定はレポートを作る本人のアカウントにだけ保存されます）。A/B/Cの歩留まり（既定70%/40%/20%）と当月の目標本数も設定でき、内定承諾済みの案件は自動でS（決定済）になります',
+    ],
+  },
+  {
     date: '2026-09-17',
     items: [
       '選考日程タイムラインの「→ 次へ」ボタンを廃止した。進捗状況はプルダウンから選ぶ形に一本化し、各フェーズのトラック（実施日時）を意識して記録しやすくした',
@@ -5337,6 +5357,7 @@ const HELP_CONTENT: Record<'member' | 'manager', { title: string; items: string[
         '選考予定日時を入れるとパイプラインカレンダーに表示され、選考トラックでこれまでの経緯（いつどのフェーズに進んだか）を確認できます。',
         '企業が前もって確定させてきた「先の日程」には、日時ごと現在のステータスへ昇格させる「✓」ボタンがあります。実際にそのフェーズまで進んだらクリックするだけで、破線の未到達表示から色塗りの現在のステータス表示に切り替わります。',
         '見送りたくない候補者は「非表示（選考終了）」、将来また声をかけたい候補者は「掘り起しリストに追加」で一旦保留にできます。',
+        '「チーム」タブの「BP会 会議用レポート」では、会議資料に記入する売上予測・粗利予測（確度加重後を含む）と「〇月〇週に決める人」の一覧をテキストで出力できます。決定見込み時期と確度（S/A/B/C/D）は案件ごとに会議用の値を設定でき、メンバー本人の入力には影響しません。',
       ],
     },
     {
@@ -8788,6 +8809,422 @@ const GrossProfitSummary: React.FC<{
 };
 
 
+// BP会 会議用レポートの1行（＝1つの選考）分の元データ。メンバー本人の入力（意思決定時期・
+// 内定確度/入社確度）は参考表示用のラベルとして持つだけで、会議用の見立ては別途上書きする。
+interface MeetingForecastSourceItem {
+    input: MeetingForecastRowInput;
+    stage: PipelineStage;
+    memberDecisionLabel: string;
+    memberConfidenceLabel: string;
+}
+
+/**
+ * チームの候補者一覧から、会議資料の「決める人」の候補になりうる選考を1選考1行で取り出す。
+ * 対象は「まだ追っている選考」（お見送り・選考辞退・内定承諾後辞退は除く。非表示の選考も除く）と、
+ * 非表示（掘り起し等）に移した後でも内定承諾まで至っている選考（成約は資料の「決定済」に載せる
+ * ため。pickBestApplicationPerCandidateと同じ考え方）。同じ求職者が複数社を受けている場合も、
+ * 二重計上するかどうかは会議用の確度の付け方に委ねるためベスト1社への絞り込みはしない。
+ */
+function buildMeetingForecastSourceItems(
+    candidates: Candidate[],
+    allMedia: MediaEntry[],
+    currentUserEmail: string,
+    weekStartsOn: 0 | 6
+): MeetingForecastSourceItem[] {
+    const mediaFeeRateById = new Map(allMedia.map(m => [m.id, m.feeRate || 0]));
+    const items: MeetingForecastSourceItem[] = [];
+    candidates.forEach(candidate => {
+        const ownerEmail = candidate.ownerEmail || currentUserEmail;
+        candidate.applications
+            .filter(app => !app.isHidden && !EXIT_PIPELINE_STAGES.includes(app.stage))
+            .filter(app => !candidate.isHidden || app.stage === '内定承諾')
+            .forEach(app => {
+                let memberTiming: MeetingTiming | null = null;
+                let memberDecisionLabel = '未入力';
+                if (app.expectedDecisionDate) {
+                    memberTiming = getWeekOfMonth(app.expectedDecisionDate, weekStartsOn);
+                    const [, m, d] = app.expectedDecisionDate.split('-').map(Number);
+                    memberDecisionLabel = `${m}/${d}`;
+                } else if (candidate.expectedDecisionMonth) {
+                    memberTiming = { month: candidate.expectedDecisionMonth, week: null };
+                    memberDecisionLabel = formatMonthLabel(candidate.expectedDecisionMonth);
+                }
+                const amounts = computeApplicationGrossProfit(candidate, app, mediaFeeRateById);
+                items.push({
+                    input: {
+                        key: buildMeetingRowKey(ownerEmail, candidate.id, app.id),
+                        candidateKey: `${ownerEmail}::${candidate.id}`,
+                        candidateName: candidate.name,
+                        companyName: app.companyName,
+                        caLabel: candidate.ownerLabel || ownerEmail,
+                        memberTiming,
+                        isAccepted: app.stage === '内定承諾',
+                        revenue: amounts ? amounts.revenue : null,
+                        profit: amounts ? amounts.profit : null,
+                    },
+                    stage: app.stage,
+                    memberDecisionLabel,
+                    memberConfidenceLabel: `内定${app.offerConfidence || '-'}／入社${app.acceptanceConfidence || '-'}`,
+                });
+            });
+    });
+    return items;
+}
+
+const MEETING_TIMING_INHERIT_VALUE = '';
+
+/**
+ * 候補者パイプライン「チーム」タブの「BP会 会議用レポート」。会議資料（Googleドキュメント）の
+ * 「＜数字＞」ブロック（サマリ・確度加重後の総売上/総粗利・週ごとの「決める人」一覧）を、
+ * メンバーが入力している意思決定時期・確度とは別に、この画面で付け直した決定見込み時期
+ * （月＋週）と確度（S/A/B/C/D）から作ってテキストとして取り出す。会議用の見立ては候補者データには
+ * 書き込まず、UserData.meetingForecast（レポートを作る本人のDriveデータ）にだけ保存する。
+ */
+const MeetingForecastSection: React.FC<{
+    candidates: Candidate[];
+    allMedia: MediaEntry[];
+    teamId: string;
+    teamName: string;
+    currentUserEmail: string;
+    weekStartsOn: 0 | 6;
+    settings: MeetingForecastSettings | undefined;
+    onUpdateSettings: (updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => void;
+}> = ({ candidates, allMedia, teamId, teamName, currentUserEmail, weekStartsOn, settings, onUpdateSettings }) => {
+    const [monthOffset, setMonthOffset] = useState(0);
+    const [showAllApplications, setShowAllApplications] = useState(false);
+    const [surnameOnly, setSurnameOnly] = useState(true);
+    const [includeAmounts, setIncludeAmounts] = useState(true);
+    const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const textAreaRef = useRef<HTMLTextAreaElement>(null);
+
+    const month = useMemo(() => {
+        const now = new Date();
+        const d = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }, [monthOffset]);
+    const monthTitle = `${month.split('-')[0]}年${formatMonthLabel(month)}`;
+    const weekCount = useMemo(() => getWeekCountOfMonth(month, weekStartsOn), [month, weekStartsOn]);
+
+    const rates = useMemo(() => resolveMeetingRates(settings?.rates), [settings?.rates]);
+    const sourceItems = useMemo(
+        () => buildMeetingForecastSourceItems(candidates, allMedia, currentUserEmail, weekStartsOn),
+        [candidates, allMedia, currentUserEmail, weekStartsOn]
+    );
+    const allRows = useMemo(
+        () => sourceItems.map(item => ({
+            item,
+            row: resolveMeetingRow(item.input, settings?.overrides?.[item.input.key], rates),
+        })),
+        [sourceItems, settings?.overrides, rates]
+    );
+    const monthRows = useMemo(() => allRows.filter(r => isRowInMonth(r.row, month)), [allRows, month]);
+    const summary = useMemo(() => summarizeMeetingRows(monthRows.map(r => r.row)), [monthRows]);
+    const multiApplicationCandidateKeys = useMemo(() => findMultiApplicationCandidateKeys(monthRows.map(r => r.row)), [monthRows]);
+    const multiApplicationNames = useMemo(() => {
+        const names = new Set<string>();
+        monthRows.forEach(r => { if (multiApplicationCandidateKeys.has(r.row.candidateKey)) names.add(r.row.candidateName); });
+        return Array.from(names);
+    }, [monthRows, multiApplicationCandidateKeys]);
+
+    // 表示順: 対象月の行を週の早い順（週未定は最後）→ 確度の高い順、その後に対象月外の行。
+    const displayedRows = useMemo(() => {
+        const rank = (r: { row: { timing: MeetingTiming | null; confidence: MeetingConfidence | null; candidateName: string } }) => [
+            r.row.timing?.week ?? 99,
+            r.row.confidence ? MEETING_CONFIDENCE_GRADES.indexOf(r.row.confidence) : 99,
+        ];
+        const compare = (a: typeof allRows[number], b: typeof allRows[number]) => {
+            const [wa, ca] = rank(a);
+            const [wb, cb] = rank(b);
+            return wa - wb || ca - cb || a.row.candidateName.localeCompare(b.row.candidateName, 'ja');
+        };
+        const inMonth = [...monthRows].sort(compare);
+        if (!showAllApplications) return inMonth;
+        const others = allRows.filter(r => !isRowInMonth(r.row, month)).sort(compare);
+        return [...inMonth, ...others];
+    }, [allRows, monthRows, month, showAllApplications]);
+
+    const targetKey = buildMeetingTargetKey(teamId, month);
+    const targetCount = settings?.targetCounts?.[targetKey];
+
+    const reportText = useMemo(() => buildMeetingForecastText(monthRows.map(r => r.row), {
+        month,
+        rates,
+        targetCount: targetCount ?? null,
+        surnameOnly,
+        includeAmounts,
+    }), [monthRows, month, rates, targetCount, surnameOnly, includeAmounts]);
+
+    // 上書き値の更新。値が全部空になったエントリはそのまま消して、保存データが膨らまないようにする。
+    const updateOverride = (key: string, patch: { decisionMonth?: string | null; decisionWeek?: number | null; confidence?: MeetingConfidence | null }) => {
+        onUpdateSettings(prev => {
+            const overrides = { ...(prev.overrides || {}) };
+            const merged: Record<string, unknown> = { ...(overrides[key] || {}), ...patch };
+            Object.keys(merged).forEach(k => { if (merged[k] === null || merged[k] === undefined) delete merged[k]; });
+            if (Object.keys(merged).length === 0) delete overrides[key]; else overrides[key] = merged;
+            return { ...prev, overrides };
+        });
+    };
+    const handleTimingChange = (key: string, value: string) => {
+        if (value === MEETING_TIMING_INHERIT_VALUE) {
+            updateOverride(key, { decisionMonth: null, decisionWeek: null });
+        } else if (value === MEETING_MONTH_NONE) {
+            updateOverride(key, { decisionMonth: MEETING_MONTH_NONE, decisionWeek: null });
+        } else {
+            const [m, w] = value.split(':');
+            updateOverride(key, { decisionMonth: m, decisionWeek: Number(w) || null });
+        }
+    };
+    const handleTargetCountChange = (raw: string) => {
+        onUpdateSettings(prev => {
+            const targetCounts = { ...(prev.targetCounts || {}) };
+            const n = Number(raw);
+            if (raw === '' || !Number.isFinite(n) || n < 0) delete targetCounts[targetKey]; else targetCounts[targetKey] = Math.floor(n);
+            return { ...prev, targetCounts };
+        });
+    };
+    const handleRateChange = (grade: 'A' | 'B' | 'C', raw: string) => {
+        onUpdateSettings(prev => {
+            const nextRates = { ...(prev.rates || {}) };
+            const n = Number(raw);
+            if (raw === '' || !Number.isFinite(n)) delete nextRates[grade]; else nextRates[grade] = Math.min(100, Math.max(0, n));
+            return { ...prev, rates: nextRates };
+        });
+    };
+
+    const handleCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(reportText);
+            setCopyState('copied');
+        } catch {
+            // クリップボードAPIが使えない環境向けのフォールバック（テキストエリアを選択してコピー）。
+            try {
+                textAreaRef.current?.select();
+                setCopyState(document.execCommand('copy') ? 'copied' : 'failed');
+            } catch {
+                setCopyState('failed');
+            }
+        }
+        setTimeout(() => setCopyState('idle'), 2500);
+    };
+
+    const timingOptionsFor = (row: typeof allRows[number]['row']) => {
+        const options: { value: string; label: string }[] = [
+            {
+                value: MEETING_TIMING_INHERIT_VALUE,
+                label: `メンバー入力に従う（${row.memberTiming ? formatTimingLabel(row.memberTiming) : '未入力'}）`,
+            },
+        ];
+        for (let w = 1; w <= weekCount; w++) {
+            options.push({ value: `${month}:${w}`, label: `${w}週（${getWeekRangeLabel(month, w, weekStartsOn)}）` });
+        }
+        options.push({ value: `${month}:0`, label: `${formatMonthLabel(month)}中（週未定）` });
+        options.push({ value: MEETING_MONTH_NONE, label: 'どの月の資料にも載せない（保留）' });
+        return options;
+    };
+    const currentTimingValue = (row: typeof allRows[number]['row']): string => {
+        if (!row.isTimingOverridden) return MEETING_TIMING_INHERIT_VALUE;
+        return row.timing ? `${row.timing.month}:${row.timing.week || 0}` : MEETING_MONTH_NONE;
+    };
+
+    return (
+        <div className="meeting-forecast-section">
+            <p className="gross-profit-note">
+                会議資料（BP会）の「＜数字＞」に記入する内容を作ります。決定見込み時期と確度は、メンバーが自分のパイプラインに入力している値とは別に、ここで会議用に付け直せます
+                （メンバーの入力や候補者データは変更されません。設定はあなたのアカウントにだけ保存されます）。
+            </p>
+
+            <div className="custom-period-export-bar">
+                <button type="button" onClick={() => setMonthOffset(o => o - 1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                <strong>{teamName}／{monthTitle}</strong>
+                <button type="button" onClick={() => setMonthOffset(o => o + 1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+                {monthOffset !== 0 && (
+                    <button type="button" onClick={() => setMonthOffset(0)} className="secondary-action-button">今月に戻す</button>
+                )}
+                <label className="meeting-forecast-inline-field">
+                    当月の目標本数
+                    <input
+                        type="number"
+                        min={0}
+                        value={targetCount ?? ''}
+                        onChange={(e) => handleTargetCountChange(e.target.value)}
+                        placeholder="任意"
+                        aria-label="当月の目標本数"
+                    />
+                    本
+                </label>
+            </div>
+
+            <div className="custom-period-export-bar">
+                <span>確度の歩留まり（S=100%固定・D=見込み外）:</span>
+                {(['A', 'B', 'C'] as const).map(grade => (
+                    <label key={grade} className="meeting-forecast-inline-field">
+                        {grade}
+                        <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={settings?.rates?.[grade] ?? rates[grade]}
+                            onChange={(e) => handleRateChange(grade, e.target.value)}
+                            aria-label={`確度${grade}の歩留まり(%)`}
+                        />
+                        %
+                    </label>
+                ))}
+            </div>
+
+            <div className="gross-profit-total-card">
+                <div className="gross-profit-total-item">
+                    <span>売上予測（確度加重前）</span>
+                    <strong>{formatManYen(summary.totalRevenue)}</strong>
+                </div>
+                <div className="gross-profit-total-item">
+                    <span>粗利予測（確度加重前）</span>
+                    <strong>{formatManYen(summary.totalProfit)}</strong>
+                </div>
+                <div className="gross-profit-total-item highlight">
+                    <span>総売上（確度加重後）</span>
+                    <strong>{formatManYen(summary.weightedRevenue)}</strong>
+                </div>
+                <div className="gross-profit-total-item highlight">
+                    <span>総粗利（確度加重後）</span>
+                    <strong>{formatManYen(summary.weightedProfit)}</strong>
+                </div>
+                <div className="gross-profit-total-item">
+                    <span>決定済／残見込み</span>
+                    <strong>{summary.decidedCount}本／{summary.pendingCount}本</strong>
+                </div>
+            </div>
+            {summary.unratedCount > 0 && (
+                <p className="gross-profit-note meeting-forecast-warning">
+                    ※ 確度が未設定の{summary.unratedCount}件は、本数・金額の集計に含まれていません（下の表の「確度」を設定してください）。
+                </p>
+            )}
+            {summary.unestimableCount > 0 && (
+                <p className="gross-profit-note meeting-forecast-warning">
+                    ※ 想定年収・料率（または固定報酬）が未入力で売上・粗利を算出できない{summary.unestimableCount}件は、金額の合計に含まれていません。
+                </p>
+            )}
+            {multiApplicationNames.length > 0 && (
+                <p className="gross-profit-note meeting-forecast-warning">
+                    ※ 同じ求職者の複数の選考が載っています（{multiApplicationNames.join('、')}）。実際に決まるのは1社のため、決まらない側は「どの月の資料にも載せない」か確度Dにしてください（そのまま集計すると二重計上になります）。
+                </p>
+            )}
+
+            <div className="pipeline-sort-controls" style={{ margin: '1rem 0 0.5rem' }}>
+                <span>表示する選考:</span>
+                <button type="button" className={!showAllApplications ? 'active' : ''} onClick={() => setShowAllApplications(false)}>
+                    {formatMonthLabel(month)}に決める人のみ（{monthRows.length}件）
+                </button>
+                <button type="button" className={showAllApplications ? 'active' : ''} onClick={() => setShowAllApplications(true)}>
+                    選考中のすべて（{allRows.length}件）
+                </button>
+            </div>
+            {showAllApplications && (
+                <p className="gross-profit-note">
+                    対象月外・時期未入力の選考も表示しています。「決定見込み時期（会議用）」を{formatMonthLabel(month)}の週に設定すると、その選考が資料の対象に加わります。
+                </p>
+            )}
+
+            {displayedRows.length === 0 ? (
+                <p className="no-data-message">
+                    {formatMonthLabel(month)}に決める見込みの選考がありません。「選考中のすべて」から、対象にする選考の決定見込み時期を設定してください。
+                </p>
+            ) : (
+                <div className="all-users-table-container">
+                    <table className="weekly-summary-table meeting-forecast-table">
+                        <thead>
+                            <tr>
+                                <th>求職者</th>
+                                <th>決定先</th>
+                                <th>CA</th>
+                                <th>選考状況</th>
+                                <th>メンバー入力</th>
+                                <th>決定見込み時期（会議用）</th>
+                                <th>確度（会議用）</th>
+                                <th>売上</th>
+                                <th>粗利</th>
+                                <th>加重後売上</th>
+                                <th>加重後粗利</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {displayedRows.map(({ item, row }) => {
+                                const inMonth = isRowInMonth(row, month);
+                                const timingOptions = timingOptionsFor(row);
+                                const timingValue = currentTimingValue(row);
+                                const hasTimingOption = timingOptions.some(o => o.value === timingValue);
+                                return (
+                                    <tr key={row.key} className={inMonth ? '' : 'meeting-forecast-row-out'}>
+                                        <td>{row.candidateName}{multiApplicationCandidateKeys.has(row.candidateKey) && inMonth && <span title="同じ求職者の別の選考も対象に載っています"> ⚠</span>}</td>
+                                        <td>{row.companyName}</td>
+                                        <td>{row.caLabel}</td>
+                                        <td><span className="status-badge" style={getStageBadgeStyle(item.stage)}>{item.stage}</span></td>
+                                        <td className="meeting-forecast-member-input">意思決定 {item.memberDecisionLabel}<br />{item.memberConfidenceLabel}</td>
+                                        <td>
+                                            <select
+                                                className="meeting-forecast-select"
+                                                value={timingValue}
+                                                onChange={(e) => handleTimingChange(row.key, e.target.value)}
+                                                aria-label={`${row.candidateName} ${row.companyName} の決定見込み時期（会議用）`}
+                                            >
+                                                {timingOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                                {!hasTimingOption && <option value={timingValue}>{row.timing ? formatTimingLabel(row.timing) : ''}</option>}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select
+                                                className="meeting-forecast-select"
+                                                value={row.isConfidenceOverridden ? row.confidence ?? '' : ''}
+                                                onChange={(e) => updateOverride(row.key, { confidence: (e.target.value || null) as MeetingConfidence | null })}
+                                                aria-label={`${row.candidateName} ${row.companyName} の確度（会議用）`}
+                                            >
+                                                <option value="">{row.isAccepted ? '自動（内定承諾→S）' : '未設定'}</option>
+                                                {MEETING_CONFIDENCE_GRADES.map(grade => (
+                                                    <option key={grade} value={grade}>
+                                                        {grade}（{grade === 'S' ? '決定済' : grade === 'D' ? '見込み外' : `${rates[grade]}%`}）
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </td>
+                                        <td>{row.revenue !== null ? formatManYen(row.revenue) : <small>未算出</small>}</td>
+                                        <td>{row.profit !== null ? formatManYen(row.profit) : <small>未算出</small>}</td>
+                                        <td>{row.weightedRevenue !== null ? formatManYen(row.weightedRevenue) : '-'}</td>
+                                        <td>{row.weightedProfit !== null ? formatManYen(row.weightedProfit) : '-'}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>会議資料に貼るテキスト</h3>
+            <div className="pipeline-sort-controls" style={{ marginBottom: '0.5rem' }}>
+                <label className="meeting-forecast-inline-field">
+                    <input type="checkbox" checked={surnameOnly} onChange={(e) => setSurnameOnly(e.target.checked)} />
+                    求職者名・CAを苗字のみにする
+                </label>
+                <label className="meeting-forecast-inline-field">
+                    <input type="checkbox" checked={includeAmounts} onChange={(e) => setIncludeAmounts(e.target.checked)} />
+                    各行に売上・粗利を併記する
+                </label>
+                <button type="button" onClick={handleCopy} className="secondary-action-button">
+                    {copyState === 'copied' ? 'コピーしました' : copyState === 'failed' ? 'コピーできませんでした（下の枠から手動でコピーしてください）' : 'テキストをコピー'}
+                </button>
+            </div>
+            <textarea
+                ref={textAreaRef}
+                className="meeting-forecast-text"
+                value={reportText}
+                readOnly
+                rows={Math.min(30, reportText.split('\n').length + 1)}
+                aria-label="会議資料に貼るテキスト"
+            />
+        </div>
+    );
+};
+
+
 type PipelineCalendarEvent =
     // additionalEntry is set when this event represents one of application.additionalScheduledDates
     // (a company-confirmed date for a stage still AHEAD of the application's current one) rather
@@ -11272,12 +11709,17 @@ const CandidatePipelineView: React.FC<{
     defaultStageFilters?: Partial<Record<'personal' | 'all_users' | 'team' | 'user', PipelineStage[]>>;
     onSaveDefaultStageFilters: (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => void;
     weekStartsOn: 0 | 6;
+    // 「チーム」タブの「BP会 会議用レポート」で使う、会議用の決定見込み時期・確度の上書き値と
+    // その更新関数（UserData.meetingForecast）。
+    meetingForecast: MeetingForecastSettings | undefined;
+    onUpdateMeetingForecast: (updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters, weekStartsOn,
+    meetingForecast, onUpdateMeetingForecast,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
@@ -11434,6 +11876,7 @@ const CandidatePipelineView: React.FC<{
     const [isCalendarVisible, setIsCalendarVisible] = useState(true);
     const [isCompanyPipelineVisible, setIsCompanyPipelineVisible] = useState(false);
     const [isGrossProfitVisible, setIsGrossProfitVisible] = useState(false);
+    const [isMeetingForecastVisible, setIsMeetingForecastVisible] = useState(false);
     const [calendarViewDate, setCalendarViewDate] = useState(new Date());
     const [showHiddenApps, setShowHiddenApps] = useState(false);
     
@@ -11953,6 +12396,36 @@ const CandidatePipelineView: React.FC<{
                     <GrossProfitSummary candidates={candidates} allMedia={allMedia} memberBreakdown={teamGrossProfitMemberGroups} />
                 </div>
             </div>
+
+            {scope === 'team' && selectedTeamId && (
+                <div className="source-effectiveness-section">
+                    <h3
+                        id="meeting-forecast-title"
+                        className="section-title collapsible-header"
+                        onClick={() => setIsMeetingForecastVisible(prev => !prev)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsMeetingForecastVisible(prev => !prev); }}}
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={isMeetingForecastVisible}
+                        aria-controls="meeting-forecast-content"
+                    >
+                        <span>BP会 会議用レポート</span>
+                        <span className={`toggle-icon ${isMeetingForecastVisible ? 'open' : ''}`}>▼</span>
+                    </h3>
+                    <div id="meeting-forecast-content" className={`collapsible-content ${isMeetingForecastVisible ? 'open' : ''}`}>
+                        <MeetingForecastSection
+                            candidates={candidates}
+                            allMedia={allMedia}
+                            teamId={selectedTeamId}
+                            teamName={teams.find(t => t.id === selectedTeamId)?.name || ''}
+                            currentUserEmail={currentUserEmail}
+                            weekStartsOn={weekStartsOn}
+                            settings={meetingForecast}
+                            onUpdateSettings={onUpdateMeetingForecast}
+                        />
+                    </div>
+                </div>
+            )}
 
             <div className="source-effectiveness-section">
                 <h3
@@ -14450,6 +14923,13 @@ const App: React.FC = () => {
     } : prev));
   };
 
+  // 候補者パイプライン「チーム」タブの「BP会 会議用レポート」の上書き値・歩留まり・目標本数を、
+  // このユーザー自身のデータとして更新する。連続操作でも取りこぼさないよう、更新関数を受け取って
+  // setCurrentUserDataの関数形式の中で適用する。
+  const handleUpdateMeetingForecast = useCallback((updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => {
+    setCurrentUserData(prev => (prev ? { ...prev, meetingForecast: updater(prev.meetingForecast || {}) } : prev));
+  }, []);
+
   // 個人実績タブの「月別パフォーマンストレンド」で、現在チェックしている項目をこのユーザーの
   // デフォルトとして保存する（上のhandleSavePipelineStageFilterDefaultsと同じ「今の状態を
   // そのままデフォルトとして保存」パターン）。
@@ -14546,6 +15026,8 @@ const App: React.FC = () => {
     // 同じ理由: スカウト達成の累計ログも許可リストに無いと、記録した直後は効いていても
     // 再読み込みのたびに消えてしまい「目標を変えても累計は変わらない」が実現できない。
     scoutAchievementLog: d.scoutAchievementLog,
+    // 同じ理由: 会議用レポートの上書き値も許可リストに無いと再読み込みのたびに消える。
+    meetingForecast: d.meetingForecast,
   }), [currentIdentity]);
 
   // Load the signed-in user's data. Drive is the source of truth, but if we have a local
@@ -18238,6 +18720,8 @@ const App: React.FC = () => {
                 defaultStageFilters={currentUserData?.pipelineStageFilterDefaults}
                 onSaveDefaultStageFilters={handleSavePipelineStageFilterDefaults}
                 weekStartsOn={weekStartsOn}
+                meetingForecast={currentUserData?.meetingForecast}
+                onUpdateMeetingForecast={handleUpdateMeetingForecast}
             />
           </>
         )}
