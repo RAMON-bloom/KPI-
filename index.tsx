@@ -25,8 +25,8 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
-  resolveMeetingRow, isRowInMonth, summarizeMeetingRows, findMultiApplicationCandidateKeys, buildMeetingForecastText,
-  type MeetingConfidence, type MeetingForecastSettings, type MeetingForecastRowInput, type MeetingTiming,
+  resolveMeetingRows, buildMeetingCandidateKey, isRowInMonth, summarizeMeetingRows, buildMeetingForecastText,
+  type MeetingConfidence, type MeetingForecastSettings, type MeetingForecastRowInput, type MeetingFeeSetting, type MeetingTiming,
 } from './services/meetingForecast';
 
 ChartJS.register(
@@ -4248,6 +4248,9 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       '候補者パイプラインの「チーム」タブに「BP会 会議用レポート」を追加した。会議資料の「＜数字＞」（サマリ・確度加重後の総売上/総粗利・「〇月〇週に決める人」の一覧）に記入する内容を、チームの選考中の案件から集計し、そのまま貼れるテキストとして出力できます。売上は想定紹介料、粗利は媒体手数料を引いた想定粗利をもとに算出します',
       '会議用の「決定見込み時期（月・週）」と「確度（S=決定済/A/B/C/D=見込み外）」は、メンバーが自分のパイプラインに入力している意思決定時期・確度とは別に、この画面で案件ごとに付け直せます（メンバーの入力や候補者データは変更されません。設定はレポートを作る本人のアカウントにだけ保存されます）。A/B/Cの歩留まり（既定70%/40%/20%）と当月の目標本数も設定でき、内定承諾済みの案件は自動でS（決定済）になります',
+      'BP会 会議用レポートの売上の算定を「年収×fee」に変更した。年収は想定年収（未入力なら現年収）、feeは求職者の最も確度の高い選考企業のfeeが既定で、表の「確度」と「売上」の間の「年収（万円）」「fee（%）」の列から求職者ごとに手入力で変更できる（「既定に戻す」で元に戻せます）。内定オファー金額は使いません',
+      '複数社を同時に受けている求職者は、BP会 会議用レポートの「決定先」で資料に載せる1社を選べるようにした（既定は最も確度の高い企業）。選んだ1社だけが集計・テキストの対象になるため、二重計上されません',
+      'BP会 会議用レポートの表を、各項目が折り返さず1行で読めるように整理した（列の統合、文字サイズ・余白の調整、横スクロール時も求職者名を左端に固定）',
       '新規候補者の登録フォームで、現職年収を必須項目にした（万円単位）。会議用レポートなどの売上・粗利の算定に使うためです。既に登録済みの候補者の編集には影響しません',
       '候補者パイプラインの「スプレッドシートから候補者パイプラインを取り込む」機能を廃止した。候補者は「+ 新規候補者を追加」から1件ずつ登録してください（すでに取り込み済みの候補者はそのまま残ります）',
     ],
@@ -8130,6 +8133,9 @@ interface MeetingForecastSourceItem {
 
 /**
  * チームの候補者一覧から、会議資料の「決める人」の候補になりうる選考を1選考1行で取り出す。
+ * 売上の算定に使う年収は想定年収（未入力なら現年収）で、内定オファー金額は使わない（BP会では
+ * 想定年収ベースで見立てるため）。feeは各選考企業の設定を渡し、どの企業のfeeを既定にするかは
+ * resolveMeetingRows側で「求職者の最も確度の高い選考企業」として決める。
  * 対象は「まだ追っている選考」（お見送り・選考辞退・内定承諾後辞退は除く。非表示の選考も除く）と、
  * 非表示（掘り起し等）に移した後でも内定承諾まで至っている選考（成約は資料の「決定済」に載せる
  * ため。pickBestApplicationPerCandidateと同じ考え方）。同じ求職者が複数社を受けている場合も、
@@ -8145,6 +8151,8 @@ function buildMeetingForecastSourceItems(
     const items: MeetingForecastSourceItem[] = [];
     candidates.forEach(candidate => {
         const ownerEmail = candidate.ownerEmail || currentUserEmail;
+        const hasExpectedSalary = !!candidate.expectedAnnualSalary && candidate.expectedAnnualSalary > 0;
+        const hasCurrentSalary = !!candidate.currentSalary && candidate.currentSalary > 0;
         candidate.applications
             .filter(app => !app.isHidden && !EXIT_PIPELINE_STAGES.includes(app.stage))
             .filter(app => !candidate.isHidden || app.stage === '内定承諾')
@@ -8159,22 +8167,32 @@ function buildMeetingForecastSourceItems(
                     memberTiming = { month: candidate.expectedDecisionMonth, week: null };
                     memberDecisionLabel = formatMonthLabel(candidate.expectedDecisionMonth);
                 }
-                const amounts = computeApplicationGrossProfit(candidate, app, mediaFeeRateById);
+                let appFee: MeetingFeeSetting | null = null;
+                if (app.feeType === 'fixed') {
+                    if (app.fixedFeeAmount !== undefined && app.fixedFeeAmount !== null) appFee = { kind: 'fixed', amount: app.fixedFeeAmount };
+                } else if (app.feeRate !== undefined && app.feeRate !== null) {
+                    appFee = { kind: 'rate', rate: app.feeRate };
+                }
                 items.push({
                     input: {
                         key: buildMeetingRowKey(ownerEmail, candidate.id, app.id),
-                        candidateKey: `${ownerEmail}::${candidate.id}`,
+                        candidateKey: buildMeetingCandidateKey(ownerEmail, candidate.id),
                         candidateName: candidate.name,
                         companyName: app.companyName,
                         caLabel: candidate.ownerLabel || ownerEmail,
                         memberTiming,
                         isAccepted: app.stage === '内定承諾',
-                        revenue: amounts ? amounts.revenue : null,
-                        profit: amounts ? amounts.profit : null,
+                        defaultSalary: hasExpectedSalary ? candidate.expectedAnnualSalary! : hasCurrentSalary ? candidate.currentSalary : null,
+                        salarySource: hasExpectedSalary ? 'expected' : hasCurrentSalary ? 'current' : null,
+                        appFee,
+                        memberConfidenceScore: confidenceScore(app),
+                        mediaFeeRate: mediaFeeRateById.get(candidate.source) || 0,
                     },
                     stage: app.stage,
                     memberDecisionLabel,
-                    memberConfidenceLabel: `内定${app.offerConfidence || '-'}／入社${app.acceptanceConfidence || '-'}`,
+                    memberConfidenceLabel: (app.offerConfidence || app.acceptanceConfidence)
+                        ? `内定${app.offerConfidence || '-'}／入社${app.acceptanceConfidence || '-'}`
+                        : '',
                 });
             });
     });
@@ -8220,21 +8238,13 @@ const MeetingForecastSection: React.FC<{
         () => buildMeetingForecastSourceItems(candidates, allMedia, currentUserEmail, weekStartsOn),
         [candidates, allMedia, currentUserEmail, weekStartsOn]
     );
-    const allRows = useMemo(
-        () => sourceItems.map(item => ({
-            item,
-            row: resolveMeetingRow(item.input, settings?.overrides?.[item.input.key], rates),
-        })),
-        [sourceItems, settings?.overrides, rates]
-    );
-    const monthRows = useMemo(() => allRows.filter(r => isRowInMonth(r.row, month)), [allRows, month]);
+    const allRows = useMemo(() => {
+        const resolved = resolveMeetingRows(sourceItems.map(item => item.input), settings, rates);
+        return sourceItems.map((item, index) => ({ item, row: resolved[index] }));
+    }, [sourceItems, settings, rates]);
+    // 資料の対象は「その月に決める見込みで、かつ複数社を受けている求職者なら載せる1社に選ばれた行」。
+    const monthRows = useMemo(() => allRows.filter(r => r.row.isSelected && isRowInMonth(r.row, month)), [allRows, month]);
     const summary = useMemo(() => summarizeMeetingRows(monthRows.map(r => r.row)), [monthRows]);
-    const multiApplicationCandidateKeys = useMemo(() => findMultiApplicationCandidateKeys(monthRows.map(r => r.row)), [monthRows]);
-    const multiApplicationNames = useMemo(() => {
-        const names = new Set<string>();
-        monthRows.forEach(r => { if (multiApplicationCandidateKeys.has(r.row.candidateKey)) names.add(r.row.candidateName); });
-        return Array.from(names);
-    }, [monthRows, multiApplicationCandidateKeys]);
 
     // 表示順: 対象月の行を週の早い順（週未定は最後）→ 確度の高い順、その後に対象月外の行。
     const displayedRows = useMemo(() => {
@@ -8249,7 +8259,7 @@ const MeetingForecastSection: React.FC<{
         };
         const inMonth = [...monthRows].sort(compare);
         if (!showAllApplications) return inMonth;
-        const others = allRows.filter(r => !isRowInMonth(r.row, month)).sort(compare);
+        const others = allRows.filter(r => !(r.row.isSelected && isRowInMonth(r.row, month))).sort(compare);
         return [...inMonth, ...others];
     }, [allRows, monthRows, month, showAllApplications]);
 
@@ -8272,6 +8282,30 @@ const MeetingForecastSection: React.FC<{
             Object.keys(merged).forEach(k => { if (merged[k] === null || merged[k] === undefined) delete merged[k]; });
             if (Object.keys(merged).length === 0) delete overrides[key]; else overrides[key] = merged;
             return { ...prev, overrides };
+        });
+    };
+    // 複数社を同時に受けている求職者について、資料に載せる1社を選ぶ（rowKey空=自動選択に戻す）。
+    const selectCandidateCompany = (candidateKey: string, rowKey: string) => {
+        onUpdateSettings(prev => {
+            const candidateOverrides = { ...(prev.candidateOverrides || {}) };
+            const merged: { salary?: number; feeRate?: number; selectedRowKey?: string } = { ...(candidateOverrides[candidateKey] || {}) };
+            if (rowKey === '') delete merged.selectedRowKey; else merged.selectedRowKey = rowKey;
+            if (Object.keys(merged).length === 0) delete candidateOverrides[candidateKey]; else candidateOverrides[candidateKey] = merged;
+            return { ...prev, candidateOverrides };
+        });
+    };
+    // 年収・feeの手入力。求職者単位で保存する（同じ求職者の他の選考行にも同じ値が適用される）。
+    // 空欄で確定すると上書きを解除して既定値（想定年収→現年収／最も確度の高い選考企業のfee）に戻す。
+    const updateCandidateOverride = (candidateKey: string, field: 'salary' | 'feeRate', raw: string) => {
+        const trimmed = raw.trim();
+        const n = Number(trimmed);
+        if (trimmed !== '' && (!Number.isFinite(n) || n < 0)) return;
+        onUpdateSettings(prev => {
+            const candidateOverrides = { ...(prev.candidateOverrides || {}) };
+            const merged: { salary?: number; feeRate?: number; selectedRowKey?: string } = { ...(candidateOverrides[candidateKey] || {}) };
+            if (trimmed === '') delete merged[field]; else merged[field] = n;
+            if (Object.keys(merged).length === 0) delete candidateOverrides[candidateKey]; else candidateOverrides[candidateKey] = merged;
+            return { ...prev, candidateOverrides };
         });
     };
     const handleTimingChange = (key: string, value: string) => {
@@ -8321,14 +8355,14 @@ const MeetingForecastSection: React.FC<{
         const options: { value: string; label: string }[] = [
             {
                 value: MEETING_TIMING_INHERIT_VALUE,
-                label: `メンバー入力に従う（${row.memberTiming ? formatTimingLabel(row.memberTiming) : '未入力'}）`,
+                label: `メンバー入力（${row.memberTiming ? formatTimingLabel(row.memberTiming) : '未入力'}）`,
             },
         ];
         for (let w = 1; w <= weekCount; w++) {
             options.push({ value: `${month}:${w}`, label: `${w}週（${getWeekRangeLabel(month, w, weekStartsOn)}）` });
         }
         options.push({ value: `${month}:0`, label: `${formatMonthLabel(month)}中（週未定）` });
-        options.push({ value: MEETING_MONTH_NONE, label: 'どの月の資料にも載せない（保留）' });
+        options.push({ value: MEETING_MONTH_NONE, label: '資料に載せない（保留）' });
         return options;
     };
     const currentTimingValue = (row: typeof allRows[number]['row']): string => {
@@ -8339,7 +8373,7 @@ const MeetingForecastSection: React.FC<{
     return (
         <div className="meeting-forecast-section">
             <p className="gross-profit-note">
-                会議資料（BP会）の「＜数字＞」に記入する内容を作ります。決定見込み時期と確度は、メンバーが自分のパイプラインに入力している値とは別に、ここで会議用に付け直せます
+                会議資料（BP会）の「＜数字＞」に記入する内容を作ります。複数社を同時に受けている求職者は、資料に載せる1社を「決定先」で選びます（既定は最も確度の高い企業）。売上は「年収（想定年収、未入力なら現年収）×fee（載せる1社のfee）」で算定します。決定見込み時期・確度・年収・feeは、メンバーが自分のパイプラインに入力している値とは別に、ここで会議用に付け直せます
                 （メンバーの入力や候補者データは変更されません。設定はあなたのアカウントにだけ保存されます）。
             </p>
 
@@ -8411,12 +8445,7 @@ const MeetingForecastSection: React.FC<{
             )}
             {summary.unestimableCount > 0 && (
                 <p className="gross-profit-note meeting-forecast-warning">
-                    ※ 想定年収・料率（または固定報酬）が未入力で売上・粗利を算出できない{summary.unestimableCount}件は、金額の合計に含まれていません。
-                </p>
-            )}
-            {multiApplicationNames.length > 0 && (
-                <p className="gross-profit-note meeting-forecast-warning">
-                    ※ 同じ求職者の複数の選考が載っています（{multiApplicationNames.join('、')}）。実際に決まるのは1社のため、決まらない側は「どの月の資料にも載せない」か確度Dにしてください（そのまま集計すると二重計上になります）。
+                    ※ 年収（想定年収・現年収とも未入力）またはfeeが未入力で売上・粗利を算出できない{summary.unestimableCount}件は、金額の合計に含まれていません。
                 </p>
             )}
 
@@ -8431,7 +8460,7 @@ const MeetingForecastSection: React.FC<{
             </div>
             {showAllApplications && (
                 <p className="gross-profit-note">
-                    対象月外・時期未入力の選考も表示しています。「決定見込み時期（会議用）」を{formatMonthLabel(month)}の週に設定すると、その選考が資料の対象に加わります。
+                    対象月外・時期未入力の選考、および複数社を受けている求職者の資料に載せない企業も表示しています。「決定見込み時期（会議用）」を{formatMonthLabel(month)}の週に設定すると、その選考が資料の対象に加わります。
                 </p>
             )}
 
@@ -8448,28 +8477,56 @@ const MeetingForecastSection: React.FC<{
                                 <th>決定先</th>
                                 <th>CA</th>
                                 <th>選考状況</th>
-                                <th>メンバー入力</th>
                                 <th>決定見込み時期（会議用）</th>
                                 <th>確度（会議用）</th>
-                                <th>売上</th>
-                                <th>粗利</th>
-                                <th>加重後売上</th>
-                                <th>加重後粗利</th>
+                                <th>年収（万円）</th>
+                                <th>fee（%）</th>
+                                <th className="meeting-forecast-num">売上 ／ 粗利</th>
+                                <th className="meeting-forecast-num">加重後 売上 ／ 粗利</th>
                             </tr>
                         </thead>
                         <tbody>
                             {displayedRows.map(({ item, row }) => {
-                                const inMonth = isRowInMonth(row, month);
+                                const inMonth = row.isSelected && isRowInMonth(row, month);
+                                const companiesOfCandidate = row.candidateRowCount > 1
+                                    ? allRows.filter(r => r.row.candidateKey === row.candidateKey)
+                                    : [];
                                 const timingOptions = timingOptionsFor(row);
                                 const timingValue = currentTimingValue(row);
                                 const hasTimingOption = timingOptions.some(o => o.value === timingValue);
                                 return (
                                     <tr key={row.key} className={inMonth ? '' : 'meeting-forecast-row-out'}>
-                                        <td>{row.candidateName}{multiApplicationCandidateKeys.has(row.candidateKey) && inMonth && <span title="同じ求職者の別の選考も対象に載っています"> ⚠</span>}</td>
-                                        <td>{row.companyName}</td>
-                                        <td>{row.caLabel}</td>
+                                        <td><span className="meeting-forecast-ellipsis" title={row.candidateName}>{row.candidateName}</span></td>
+                                        <td>
+                                            {companiesOfCandidate.length === 0 ? <span className="meeting-forecast-ellipsis" title={row.companyName}>{row.companyName}</span> : row.isSelected ? (
+                                                <>
+                                                    <select
+                                                        className="meeting-forecast-select meeting-forecast-select-company"
+                                                        value={row.key}
+                                                        onChange={(e) => selectCandidateCompany(row.candidateKey, e.target.value)}
+                                                        aria-label={`${row.candidateName} の資料に載せる決定先`}
+                                                    >
+                                                        {companiesOfCandidate.map(c => (
+                                                            <option key={c.row.key} value={c.row.key}>{c.row.companyName}（{c.item.stage}）</option>
+                                                        ))}
+                                                    </select>
+                                                    <div className="meeting-forecast-cell-hint">
+                                                        {row.candidateRowCount}社から選択{row.isSelectionOverridden
+                                                            ? <> ／ 手動 <button type="button" className="meeting-forecast-reset" onClick={() => selectCandidateCompany(row.candidateKey, '')}>自動に戻す</button></>
+                                                            : ' ／ 確度が最も高い企業'}
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="meeting-forecast-ellipsis" title={row.companyName}>{row.companyName}</span>
+                                                    <div className="meeting-forecast-cell-hint">
+                                                        資料には載せない <button type="button" className="meeting-forecast-reset" onClick={() => selectCandidateCompany(row.candidateKey, row.key)}>この企業を選択</button>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </td>
+                                        <td><span className="meeting-forecast-ellipsis" title={row.caLabel}>{row.caLabel}</span></td>
                                         <td><span className="status-badge" style={getStageBadgeStyle(item.stage)}>{item.stage}</span></td>
-                                        <td className="meeting-forecast-member-input">意思決定 {item.memberDecisionLabel}<br />{item.memberConfidenceLabel}</td>
                                         <td>
                                             <select
                                                 className="meeting-forecast-select"
@@ -8480,10 +8537,11 @@ const MeetingForecastSection: React.FC<{
                                                 {timingOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                                                 {!hasTimingOption && <option value={timingValue}>{row.timing ? formatTimingLabel(row.timing) : ''}</option>}
                                             </select>
+                                            <div className="meeting-forecast-cell-hint">メンバー: {item.memberDecisionLabel}{item.memberConfidenceLabel && `・${item.memberConfidenceLabel}`}</div>
                                         </td>
                                         <td>
                                             <select
-                                                className="meeting-forecast-select"
+                                                className="meeting-forecast-select meeting-forecast-select-narrow"
                                                 value={row.isConfidenceOverridden ? row.confidence ?? '' : ''}
                                                 onChange={(e) => updateOverride(row.key, { confidence: (e.target.value || null) as MeetingConfidence | null })}
                                                 aria-label={`${row.candidateName} ${row.companyName} の確度（会議用）`}
@@ -8496,10 +8554,48 @@ const MeetingForecastSection: React.FC<{
                                                 ))}
                                             </select>
                                         </td>
-                                        <td>{row.revenue !== null ? formatManYen(row.revenue) : <small>未算出</small>}</td>
-                                        <td>{row.profit !== null ? formatManYen(row.profit) : <small>未算出</small>}</td>
-                                        <td>{row.weightedRevenue !== null ? formatManYen(row.weightedRevenue) : '-'}</td>
-                                        <td>{row.weightedProfit !== null ? formatManYen(row.weightedProfit) : '-'}</td>
+                                        <td>
+                                            <input
+                                                key={`${row.candidateKey}-salary-${row.salary ?? ''}-${row.isSalaryOverridden}`}
+                                                type="number"
+                                                min={0}
+                                                step="any"
+                                                className="meeting-forecast-number-input"
+                                                defaultValue={row.salary ?? ''}
+                                                placeholder="未入力"
+                                                onBlur={(e) => { if (e.target.value !== String(row.salary ?? '')) updateCandidateOverride(row.candidateKey, 'salary', e.target.value); }}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                                                aria-label={`${row.candidateName} の年収（万円）`}
+                                            />
+                                            <div className="meeting-forecast-cell-hint">
+                                                {row.isSalaryOverridden
+                                                    ? <>手入力 <button type="button" className="meeting-forecast-reset" onClick={() => updateCandidateOverride(row.candidateKey, 'salary', '')}>既定に戻す</button></>
+                                                    : row.salarySource === 'expected' ? '想定年収' : row.salarySource === 'current' ? '現年収' : '年収未入力'}
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <input
+                                                key={`${row.candidateKey}-fee-${row.feeRate ?? ''}-${row.isFeeOverridden}`}
+                                                type="number"
+                                                min={0}
+                                                step="any"
+                                                className="meeting-forecast-number-input"
+                                                defaultValue={row.feeRate ?? ''}
+                                                placeholder={row.feeFixedAmount !== null ? '固定' : '未入力'}
+                                                onBlur={(e) => { if (e.target.value !== String(row.feeRate ?? '')) updateCandidateOverride(row.candidateKey, 'feeRate', e.target.value); }}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                                                aria-label={`${row.candidateName} のfee（%）`}
+                                            />
+                                            <div className="meeting-forecast-cell-hint">
+                                                {row.isFeeOverridden
+                                                    ? <>手入力 <button type="button" className="meeting-forecast-reset" onClick={() => updateCandidateOverride(row.candidateKey, 'feeRate', '')}>既定に戻す</button></>
+                                                    : row.feeFixedAmount !== null ? `固定報酬 ${formatManYen(row.feeFixedAmount)}`
+                                                    : row.feeRate !== null ? `${row.feeSourceCompany}のfee`
+                                                    : '未入力'}
+                                            </div>
+                                        </td>
+                                        <td className="meeting-forecast-num">{row.revenue !== null && row.profit !== null ? `${formatManYen(row.revenue)} ／ ${formatManYen(row.profit)}` : <small>未算出</small>}</td>
+                                        <td className="meeting-forecast-num">{row.weightedRevenue !== null && row.weightedProfit !== null ? `${formatManYen(row.weightedRevenue)} ／ ${formatManYen(row.weightedProfit)}` : '-'}</td>
                                     </tr>
                                 );
                             })}

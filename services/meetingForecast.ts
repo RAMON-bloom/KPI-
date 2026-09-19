@@ -47,7 +47,15 @@ export interface MeetingForecastSettings {
   rates?: Partial<Record<MeetingConfidence, number>>;
   // 「当月の目標本数」。キーは `${teamId}:${yyyy-MM}`。
   targetCounts?: Record<string, number>;
+  // 売上の算定に使う年収（万円）とfee（%）の手入力による上書き、および複数社を同時に受けている
+  // 求職者の「資料に載せる1社」（selectedRowKey＝選んだ選考行のkey）。求職者単位（キーは
+  // buildMeetingCandidateKey）——同じ求職者の複数の選考行には同じ値が適用される。未設定の項目は
+  // 既定値（年収=想定年収→現年収、載せる1社=最も確度の高い選考企業、fee=載せる1社のfee）を使う。
+  candidateOverrides?: Record<string, { salary?: number; feeRate?: number; selectedRowKey?: string }>;
 }
+
+export const buildMeetingCandidateKey = (ownerEmail: string, candidateId: string): string =>
+  `${ownerEmail.trim().toLowerCase()}::${candidateId}`;
 
 export const buildMeetingRowKey = (ownerEmail: string, candidateId: string, applicationId: string): string =>
   `${ownerEmail.trim().toLowerCase()}::${candidateId}::${applicationId}`;
@@ -119,9 +127,13 @@ export const formatTimingLabel = (timing: MeetingTiming): string =>
 
 // --- 行の解決 ---------------------------------------------------------------------------------
 
+/** ある選考企業に設定されている報酬条件（パイプライン側の入力）。 */
+export type MeetingFeeSetting = { kind: 'rate'; rate: number } | { kind: 'fixed'; amount: number };
+
 export interface MeetingForecastRowInput {
   key: string;
-  // 同じ求職者の複数選考が同時に載っていないか（二重計上）の判定用。
+  // 同じ求職者の複数選考をまとめる（資料に載せる1社の選択）・年収/feeの上書きを共有するための
+  // 求職者単位のキー（buildMeetingCandidateKey）。
   candidateKey: string;
   candidateName: string;
   companyName: string;
@@ -130,9 +142,16 @@ export interface MeetingForecastRowInput {
   memberTiming: MeetingTiming | null;
   // この選考が内定承諾まで進んでいるか（決定済 = 確度Sの既定値）。
   isAccepted: boolean;
-  // 想定紹介料・想定粗利（万円）。算出に必要な入力が足りない場合はnull。
-  revenue: number | null;
-  profit: number | null;
+  // 年収（万円）の既定値: 想定年収が入っていればそれ、無ければ現年収、どちらも無ければnull。
+  defaultSalary: number | null;
+  salarySource: 'expected' | 'current' | null;
+  // この選考企業自身のfee設定（料率または固定報酬）。未入力ならnull。
+  appFee: MeetingFeeSetting | null;
+  // メンバー入力側の確度スコア（小さいほど確度が高い）。fee既定値の「最も確度の高い選考企業」を
+  // 選ぶ際、会議用の確度が同じ・未設定の選考同士の優劣を付けるために使う。
+  memberConfidenceScore: number;
+  // 経由媒体の手数料率（%）。粗利 = 売上 − 売上×媒体手数料率。
+  mediaFeeRate: number;
 }
 
 export interface MeetingForecastRow extends MeetingForecastRowInput {
@@ -140,34 +159,118 @@ export interface MeetingForecastRow extends MeetingForecastRowInput {
   isTimingOverridden: boolean;
   confidence: MeetingConfidence | null;
   isConfidenceOverridden: boolean;
+  // 適用された年収（万円）と、手入力によるものか。
+  salary: number | null;
+  isSalaryOverridden: boolean;
+  // 適用されたfee。料率（%）が有効な場合はfeeRate、固定報酬の場合はfeeFixedAmount（万円）。
+  feeRate: number | null;
+  feeFixedAmount: number | null;
+  isFeeOverridden: boolean;
+  // 求職者の選考が複数ある場合に、資料に載せる1社として選ばれている行かどうか（1社のみの求職者は
+  // 常にtrue）。選ばれていない行は集計・テキストの対象外。
+  isSelected: boolean;
+  // この求職者の（資料の対象になりうる）選考行の数。2以上なら複数社を同時に受けている。
+  candidateRowCount: number;
+  // 載せる1社が手動で選ばれたものか（falseなら最も確度の高い選考企業の自動選択）。
+  isSelectionOverridden: boolean;
+  // fee既定値の元になった、資料に載せる1社の社名。
+  feeSourceCompany: string | null;
+  revenue: number | null;
+  profit: number | null;
   weightedRevenue: number | null;
   weightedProfit: number | null;
 }
 
-export function resolveMeetingRow(
-  input: MeetingForecastRowInput,
-  override: MeetingForecastOverride | undefined,
+const CONFIDENCE_RANK_FOR_PICK: Record<MeetingConfidence, number> = { S: 0, A: 1, B: 2, C: 3, D: 4 };
+
+/**
+ * 求職者ごとに資料に載せる1社を決め（手動で選んでいればそれ、なければ「最も確度の高い選考
+ * 企業」）、その報酬条件をfeeの既定値にして、各行の年収・fee・売上・粗利・確度加重後の金額を
+ * 解決する。複数社を同時に受けている求職者は、選ばれた1社の行だけが集計・テキストの対象
+ * （isSelected）になり、二重計上されない。最も確度が高い選考は、会議用の確度
+ * （S→D、未設定は最下位）→メンバー入力側の確度スコア→入力順で決める。売上は
+ * 年収×fee（fixed報酬の場合は固定額）で、粗利は媒体手数料を引いた額。想定年収・現年収・fee
+ * のいずれかが無く算定できない場合、売上・粗利はnull。
+ */
+export function resolveMeetingRows(
+  inputs: MeetingForecastRowInput[],
+  settings: MeetingForecastSettings | undefined,
   rates: Record<MeetingConfidence, number>
-): MeetingForecastRow {
-  let timing = input.memberTiming;
-  let isTimingOverridden = false;
-  if (override?.decisionMonth) {
-    isTimingOverridden = true;
-    timing = override.decisionMonth === MEETING_MONTH_NONE
-      ? null
-      : { month: override.decisionMonth, week: override.decisionWeek || null };
-  }
-  const confidence: MeetingConfidence | null = override?.confidence ?? (input.isAccepted ? 'S' : null);
-  const rate = confidence ? rates[confidence] : null;
-  return {
-    ...input,
-    timing,
-    isTimingOverridden,
-    confidence,
-    isConfidenceOverridden: !!override?.confidence,
-    weightedRevenue: rate !== null && input.revenue !== null ? input.revenue * rate / 100 : null,
-    weightedProfit: rate !== null && input.profit !== null ? input.profit * rate / 100 : null,
-  };
+): MeetingForecastRow[] {
+  const partial = inputs.map(input => {
+    const override = settings?.overrides?.[input.key];
+    let timing = input.memberTiming;
+    let isTimingOverridden = false;
+    if (override?.decisionMonth) {
+      isTimingOverridden = true;
+      timing = override.decisionMonth === MEETING_MONTH_NONE
+        ? null
+        : { month: override.decisionMonth, week: override.decisionWeek || null };
+    }
+    const confidence: MeetingConfidence | null = override?.confidence ?? (input.isAccepted ? 'S' : null);
+    return { input, timing, isTimingOverridden, confidence, isConfidenceOverridden: !!override?.confidence };
+  });
+
+  const bestByCandidate = new Map<string, typeof partial[number]>();
+  partial.forEach(row => {
+    const current = bestByCandidate.get(row.input.candidateKey);
+    if (!current) { bestByCandidate.set(row.input.candidateKey, row); return; }
+    const rank = (r: typeof row) => [r.confidence ? CONFIDENCE_RANK_FOR_PICK[r.confidence] : 99, r.input.memberConfidenceScore];
+    const [a1, a2] = rank(row);
+    const [b1, b2] = rank(current);
+    if (a1 < b1 || (a1 === b1 && a2 < b2)) bestByCandidate.set(row.input.candidateKey, row);
+  });
+
+  const rowCountByCandidate = new Map<string, number>();
+  partial.forEach(row => rowCountByCandidate.set(row.input.candidateKey, (rowCountByCandidate.get(row.input.candidateKey) || 0) + 1));
+
+  return partial.map(row => {
+    const { input, timing, isTimingOverridden, confidence, isConfidenceOverridden } = row;
+    const candidateOverride = settings?.candidateOverrides?.[input.candidateKey];
+    const auto = bestByCandidate.get(input.candidateKey)!;
+    // 手動で選ばれた行が今も対象に残っていなければ（選考が終了した等）自動選択に戻す。
+    const manual = candidateOverride?.selectedRowKey
+      ? partial.find(r => r.input.candidateKey === input.candidateKey && r.input.key === candidateOverride.selectedRowKey)
+      : undefined;
+    const best = manual ?? auto;
+
+    const isSalaryOverridden = candidateOverride?.salary !== undefined;
+    const salary = isSalaryOverridden ? candidateOverride!.salary! : input.defaultSalary;
+
+    const isFeeOverridden = candidateOverride?.feeRate !== undefined;
+    const fee: MeetingFeeSetting | null = isFeeOverridden
+      ? { kind: 'rate', rate: candidateOverride!.feeRate! }
+      : best.input.appFee;
+    const feeRate = fee?.kind === 'rate' ? fee.rate : null;
+    const feeFixedAmount = fee?.kind === 'fixed' ? fee.amount : null;
+
+    let revenue: number | null = null;
+    if (fee?.kind === 'fixed') revenue = fee.amount;
+    else if (fee?.kind === 'rate' && salary !== null) revenue = salary * fee.rate / 100;
+    const profit = revenue !== null ? revenue - revenue * input.mediaFeeRate / 100 : null;
+
+    const rate = confidence ? rates[confidence] : null;
+    return {
+      ...input,
+      timing,
+      isTimingOverridden,
+      confidence,
+      isConfidenceOverridden,
+      salary,
+      isSalaryOverridden,
+      feeRate,
+      feeFixedAmount,
+      isFeeOverridden,
+      isSelected: best.input.key === input.key,
+      candidateRowCount: rowCountByCandidate.get(input.candidateKey) || 1,
+      isSelectionOverridden: !!manual,
+      feeSourceCompany: fee && !isFeeOverridden ? best.input.companyName : null,
+      revenue,
+      profit,
+      weightedRevenue: rate !== null && revenue !== null ? revenue * rate / 100 : null,
+      weightedProfit: rate !== null && profit !== null ? profit * rate / 100 : null,
+    };
+  });
 }
 
 export interface MeetingForecastSummary {
@@ -219,13 +322,6 @@ export function summarizeMeetingRows(rows: MeetingForecastRow[]): MeetingForecas
     summary.weightedProfit += row.weightedProfit ?? 0;
   });
   return summary;
-}
-
-/** 同じ求職者の複数の選考が、対象行に重複して載っているものの候補者キー一覧（二重計上の注意喚起用）。 */
-export function findMultiApplicationCandidateKeys(rows: MeetingForecastRow[]): Set<string> {
-  const counts = new Map<string, number>();
-  rows.forEach(row => counts.set(row.candidateKey, (counts.get(row.candidateKey) || 0) + 1));
-  return new Set(Array.from(counts.entries()).filter(([, n]) => n > 1).map(([key]) => key));
 }
 
 // --- テキスト生成 -----------------------------------------------------------------------------
@@ -292,8 +388,11 @@ export function buildMeetingForecastText(rows: MeetingForecastRow[], options: Me
       const ca = surnameOnly ? toSurname(row.caLabel) : row.caLabel;
       let line = `　・${name}様／確度：${row.confidence ?? '未設定'}（決定先：${row.companyName || '未入力'}／CA：${ca}）`;
       if (includeAmounts) {
+        const basis = row.feeRate !== null && row.salary !== null
+          ? `（${formatManYen(row.salary)}×${row.feeRate}%）`
+          : row.feeFixedAmount !== null ? '（固定報酬）' : '';
         line += row.revenue !== null && row.profit !== null
-          ? `／売上：${formatManYen(row.revenue)}／粗利：${formatManYen(row.profit)}`
+          ? `／売上：${formatManYen(row.revenue)}${basis}／粗利：${formatManYen(row.profit)}`
           : '／売上・粗利：未算出';
       }
       lines.push(line);

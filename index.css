@@ -3569,30 +3569,123 @@ p.memo-content-text {
 }
 
 /* --- BP会 会議用レポート（パイプライン「チーム」タブ） --- */
+/* 操作バー（月移動・目標本数・歩留まり）は左寄せ・1行にそろえ、項目ごとの余白を詰める。 */
+.meeting-forecast-section .custom-period-export-bar {
+  justify-content: flex-start;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+}
 .meeting-forecast-inline-field {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  font-size: 0.9rem;
-  margin-left: 0.75rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
 }
 .meeting-forecast-inline-field input[type="number"] {
   width: 4.5rem;
-}
-.meeting-forecast-select {
-  min-width: 9.5rem;
-  max-width: 15rem;
   font-size: 0.85rem;
 }
-.meeting-forecast-table td {
-  vertical-align: middle;
+/* 合計カードは5項目が横並びで収まるよう、数字を一回り小さくする。 */
+.meeting-forecast-section .gross-profit-total-card {
+  gap: 0.75rem 2rem;
+  padding: 0.75rem 1.25rem;
 }
-.meeting-forecast-member-input {
+.meeting-forecast-section .gross-profit-total-item span {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.meeting-forecast-section .gross-profit-total-item strong {
+  font-size: 1.2rem;
+  white-space: nowrap;
+}
+
+/* 表: 全セルを1行に固定（折り返さない）し、はみ出す分は横スクロール。文字・余白を小さめにして
+   13列が収まりやすくし、左端の求職者名は横スクロール中も見えるよう固定する。 */
+.meeting-forecast-table {
+  width: 100%;
   font-size: 0.8rem;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.meeting-forecast-table th,
+.meeting-forecast-table td {
+  padding: 0.4rem 0.6rem;
+  white-space: nowrap;
+  vertical-align: middle;
+  text-align: left;
+}
+.meeting-forecast-table th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted-color);
+}
+.meeting-forecast-table .meeting-forecast-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.meeting-forecast-table th:first-child,
+.meeting-forecast-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background-color: #fff;
+  box-shadow: 1px 0 0 var(--border-color);
+}
+.meeting-forecast-table thead th:first-child {
+  background-color: #f8f9fa;
+}
+.meeting-forecast-table tbody tr:hover td:first-child {
+  background-color: #f1f3f5;
+}
+.meeting-forecast-table .status-badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.meeting-forecast-ellipsis {
+  display: inline-block;
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.meeting-forecast-select {
+  width: 10.5rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+}
+.meeting-forecast-select-company {
+  width: 10rem;
+}
+.meeting-forecast-select-narrow {
+  width: 9.5rem;
+}
+.meeting-forecast-number-input {
+  width: 5rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.8rem;
+  text-align: right;
+}
+.meeting-forecast-cell-hint {
+  margin-top: 0.1rem;
+  font-size: 0.7rem;
+  line-height: 1.3;
   color: var(--text-muted-color);
   white-space: nowrap;
 }
-/* 対象月外・時期未入力の選考（「選考中のすべて」表示時）は、資料の対象外だと一目で分かるよう薄くする。 */
+.meeting-forecast-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.7rem;
+  color: var(--primary-color);
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* 対象月外・時期未入力・資料に載せない企業（「選考中のすべて」表示時）は、資料の対象外だと一目で
+   分かるよう薄くする。 */
 .meeting-forecast-row-out {
   opacity: 0.55;
 }
@@ -3605,7 +3698,7 @@ p.memo-content-text {
   width: 100%;
   box-sizing: border-box;
   font-family: inherit;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   line-height: 1.6;
   padding: 0.75rem 1rem;
   border: 1px solid var(--border-color);
