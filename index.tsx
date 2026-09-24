@@ -823,6 +823,9 @@ interface Candidate {
   // 自社（エージェント）側の初回面談状況 — 企業ごとのPIPELINE_STAGES（打診・書類選考…）とは
   // 独立した、候補者単位のフラグ。未設定は「未面談」として扱う。
   agentInterviewStatus?: '未面談' | '面談済み';
+  // BIZアンケートを候補者に送付済みかどうか。agentInterviewStatusと同じく候補者単位のフラグで、
+  // カードの「BIZアンケート未送付/送付済み」ボタンで切り替える。未設定は「未送付」として扱う。
+  bizSurveySent?: boolean;
   scoutReplyDate?: string; // yyyy-mm-dd
   firstInterviewDate?: string; // yyyy-mm-dd — 自社側の初回面談日（agentInterviewStatusと連動）
   // 新規登録の瞬間に、氏名＋現職企業が一致する候補者を既に他ユーザーが登録済みだった場合のスナップ
@@ -4243,6 +4246,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-09-24',
+    items: [
+      '候補者カードの「未面談／面談済み」ボタンの右に、「BIZアンケート未送付／送付済み」ボタンを追加した。クリックで切り替えられ、候補者一覧の「自社面談状況」の絞り込みにも「BIZアンケート送付済み」ボタンを追加した（面談状況の絞り込みと組み合わせて使えます）。CSV出力にも「BIZアンケート」列を追加した',
+    ],
+  },
   {
     date: '2026-09-19',
     items: [
@@ -10287,6 +10296,20 @@ const PipelineCandidateCard: React.FC<{
                   {c.agentInterviewStatus || '未面談'}
               </span>
           )}
+          {candidateIsOwn ? (
+              <button
+                  type="button"
+                  onClick={() => onSave({ ...c, bizSurveySent: !c.bizSurveySent })}
+                  className={`agent-interview-status-badge ${c.bizSurveySent ? 'interviewed' : 'not-interviewed'}`}
+                  title="BIZアンケートを送付済みかどうか（クリックで切り替え）"
+              >
+                  {c.bizSurveySent ? 'BIZアンケート送付済み' : 'BIZアンケート未送付'}
+              </button>
+          ) : (
+              <span className={`agent-interview-status-badge ${c.bizSurveySent ? 'interviewed' : 'not-interviewed'}`}>
+                  {c.bizSurveySent ? 'BIZアンケート送付済み' : 'BIZアンケート未送付'}
+              </span>
+          )}
           {candidateIsOwn && (
               <div className="candidate-card-actions">
                   {visibilityFilter === 'revival' ? (
@@ -11188,6 +11211,8 @@ const CandidatePipelineView: React.FC<{
     // 自社（エージェント）側の初回面談状況での絞り込み — 企業ごとのPIPELINE_STAGES用の
     // selectedStageFiltersとは独立した、別軸のフィルター。
     const [agentInterviewStatusFilter, setAgentInterviewStatusFilter] = useState<'all' | '未面談' | '面談済み'>('all');
+    // 「BIZアンケート送付済み」だけに絞り込む（自社面談状況の絞り込みとは独立で、両方を同時に効かせられる）。
+    const [bizSurveySentOnly, setBizSurveySentOnly] = useState(false);
     // 選考フェーズで絞り込みドロップダウン（<details>）の開閉状態 — 素のHTML <details> は
     // ドロップダウン外クリックでは閉じないため、開閉を自前で管理し、documentのクリックを監視して
     // 外側クリックで閉じられるようにする（下のuseEffect参照）。
@@ -11416,7 +11441,7 @@ const CandidatePipelineView: React.FC<{
         const headers = [
             '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
             '集客媒体', '年齢', '職種', '電話番号', 'メールアドレス', '他社状況', '入社希望時期',
-            '自社面談状況', 'スカウト返信日', '初回面談日', '他エージェント使用状況', '登録日', '概要',
+            '自社面談状況', 'BIZアンケート', 'スカウト返信日', '初回面談日', '他エージェント使用状況', '登録日', '概要',
             '応募企業名', '進捗状況', '次アクション', '意思決定時期', '内定確度', '入社確度',
             '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
@@ -11449,6 +11474,7 @@ const CandidatePipelineView: React.FC<{
                 escapeCSV(candidate.otherCompanyStatus),
                 escapeCSV(candidate.desiredJoinTiming),
                 escapeCSV(candidate.agentInterviewStatus || '未面談'),
+                candidate.bizSurveySent ? '送付済み' : '未送付',
                 escapeCSV(candidate.scoutReplyDate),
                 escapeCSV(candidate.firstInterviewDate),
                 candidate.usingOtherAgents ? 'あり' : 'なし',
@@ -11578,6 +11604,7 @@ const CandidatePipelineView: React.FC<{
             );
             const matchesAgentInterviewStatus = agentInterviewStatusFilter === 'all'
                 || (c.agentInterviewStatus || '未面談') === agentInterviewStatusFilter;
+            const matchesBizSurvey = !bizSurveySentOnly || !!c.bizSurveySent;
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
             const matchesDecisionTiming = !decisionMonthFilter || (() => {
@@ -11586,9 +11613,9 @@ const CandidatePipelineView: React.FC<{
                 if (!nearest) return false;
                 return isDateInMonth(nearest, decisionMonthFilter);
             })();
-            return matchesSearch && matchesVisibility && matchesStage && matchesAgentInterviewStatus && matchesMember && matchesDecisionTiming;
+            return matchesSearch && matchesVisibility && matchesStage && matchesAgentInterviewStatus && matchesBizSurvey && matchesMember && matchesDecisionTiming;
         });
-    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, agentInterviewStatusFilter, scope, selectedMemberFilters, decisionMonthFilter]);
+    }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, agentInterviewStatusFilter, bizSurveySentOnly, scope, selectedMemberFilters, decisionMonthFilter]);
 
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
@@ -12042,6 +12069,9 @@ const CandidatePipelineView: React.FC<{
                     </button>
                     <button onClick={() => setAgentInterviewStatusFilter('面談済み')} className={agentInterviewStatusFilter === '面談済み' ? 'active' : ''}>
                       面談済み
+                    </button>
+                    <button onClick={() => setBizSurveySentOnly(prev => !prev)} className={bizSurveySentOnly ? 'active' : ''} aria-pressed={bizSurveySentOnly}>
+                      BIZアンケート送付済み
                     </button>
                   </div>
                   <div className="pipeline-sort-controls">
