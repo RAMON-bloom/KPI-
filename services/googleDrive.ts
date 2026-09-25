@@ -386,7 +386,15 @@ async function findSharedConfigFile(name: string, requiredOwnerEmail?: string): 
 }
 
 /** Finds the single shared teams-config file (created by whoever first set up teams), if it exists. */
-export async function findTeamsConfigFile(): Promise<DriveFileRef | null> {
+export async function findTeamsConfigFile(preferredOwnerEmail?: string): Promise<DriveFileRef | null> {
+  // 媒体設定（findMediaConfigFile）と同じく、管理者（正規の作成者）所有のファイルを最優先で探す。
+  // 所有者を限定しないと、過去の不具合で誰かが作ってしまった同名のコピーが先にヒットした人だけ
+  // 別のファイルを読み続け、管理者が設定した内容（事業部の月間目標など）が届かなくなる。管理者
+  // 所有のファイルが見つからない場合だけ、従来通り名前だけで探す（誰も読めなくなるのを避ける）。
+  if (preferredOwnerEmail) {
+    const preferred = await findSharedConfigFile(TEAMS_FILE_NAME, preferredOwnerEmail);
+    if (preferred) return preferred;
+  }
   return findSharedConfigFile(TEAMS_FILE_NAME);
 }
 

@@ -4250,6 +4250,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-09-25',
     items: [
       '【不具合修正】管理者が設定した「事業部の月間目標」が、アプリを開いたままの他のユーザーの画面に反映されない（「目標未設定」や古い値のまま表示される）不具合を修正。チーム別タブを開いた時・画面に戻った時・一定間隔（2分）で最新の目標を自動で読み直すようにした（これまではログインし直すまで更新されませんでした）',
+      '【不具合修正】チーム設定（事業部の月間目標を含む）を読み込む際に、管理者が所有する正規のファイルを最優先で探すようにした。過去の不具合で作られた同名のコピーが先にヒットした一部のユーザーだけが、管理者の設定とは別のファイルを読み続けてしまう問題への対処です。あわせて、チーム別タブの「事業部の月間目標」欄の下に、どのファイルを読み込んでいるか（管理者の設定か・最終更新日時）を小さく表示するようにした',
     ],
   },
   {
@@ -12845,7 +12846,12 @@ const TeamChatReportPanel: React.FC<{
   // 意図せず巻き戻ってしまうリスクが上がるため、設定者を1人に絞っている。それ以外は現在値の
   // 閲覧のみ。
   canEditTargets: boolean;
-}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey, monthlyTarget, onSetMonthlyTarget, canEditTargets }) => {
+  // 目標を含むチーム設定をどのDriveファイルから読み込んでいるか（所有者と最終更新日時）。他の人の
+  // 画面だけ目標が古い・未設定のままになる問題の切り分け用に、目標欄の下に小さく表示する。管理者
+  // 以外が所有するファイルを読んでいる場合は警告として表示する。
+  configSourceOwnerEmail: string | null;
+  configSourceModifiedTime: string | null;
+}> = ({ team, memberEmails, allUsersData, allMedia, weekStartsOn, reportChatWebhookUrl, reportChatThreadKey, monthlyTarget, onSetMonthlyTarget, canEditTargets, configSourceOwnerEmail, configSourceModifiedTime }) => {
   const [pendingPeriod, setPendingPeriod] = useState<{ label: string; start: Date; end: Date } | null>(null);
   // 期間ボタンを押した時点でDriveから取り直した最新の事業部月間目標（プレビュー・送信内容の
   // 集計にはこちらを使う）。開きっぱなしの古いタブでは`monthlyTarget`（sign-in時に1回だけ
@@ -12903,7 +12909,7 @@ const TeamChatReportPanel: React.FC<{
     setIsPreparingPeriod(true);
     setTargetRefreshPermissionError(false);
     try {
-      const result = await loadTeamsConfig<TeamsConfig>();
+      const result = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
       setRefreshedMonthlyTarget(result.data?.reportMonthlyTarget || {});
     } catch (error) {
       console.error('Failed to refresh monthly target before building chat report', error);
@@ -13080,6 +13086,16 @@ const TeamChatReportPanel: React.FC<{
               </label>
             ))}
           </div>
+          {configSourceOwnerEmail && (
+            <p
+              className="gross-profit-note"
+              style={{ margin: '0.5rem 0 0', fontSize: '0.75rem', fontStyle: 'normal', color: configSourceOwnerEmail === TEAMS_ADMIN_EMAIL ? undefined : '#b45309' }}
+              data-testid="monthly-target-source"
+            >
+              {configSourceOwnerEmail === TEAMS_ADMIN_EMAIL ? '読み込み元: 管理者の設定' : `※ 管理者以外（${configSourceOwnerEmail}）の設定ファイルを読み込んでいます`}
+              {configSourceModifiedTime && `（最終更新 ${new Date(configSourceModifiedTime).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}）`}
+            </p>
+          )}
         </div>
       </div>
       {isCustomPeriodPopupOpen && (
@@ -14077,6 +14093,9 @@ const App: React.FC = () => {
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamsDriveFileId, setTeamsDriveFileId] = useState<string | null>(null);
   const [teamsOwnerEmail, setTeamsOwnerEmail] = useState<string | null>(null);
+  // 読み込んだチーム設定ファイルの最終更新日時（実績レポートの目標欄に「どのファイルを読んで
+  // いるか」として表示する）。
+  const [teamsModifiedTime, setTeamsModifiedTime] = useState<string | null>(null);
   const [teamsAuthorizedEditors, setTeamsAuthorizedEditors] = useState<string[]>([]);
   const [memberDepartments, setMemberDepartments] = useState<Record<string, Department>>({});
   const [middleEmails, setMiddleEmails] = useState<string[]>([]);
@@ -14686,11 +14705,12 @@ const App: React.FC = () => {
     let cancelled = false;
     (async () => {
       try {
-        const result = await loadTeamsConfig<TeamsConfig>();
+        const result = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
         if (cancelled) return;
         setTeams(result.data?.teams || []);
         setTeamsDriveFileId(result.driveFileId);
         setTeamsOwnerEmail(result.ownerEmail);
+        setTeamsModifiedTime(result.modifiedTime ?? null);
         setTeamsAuthorizedEditors(result.data?.authorizedEditorEmails || []);
         setMemberDepartments(result.data?.memberDepartments || {});
         setMiddleEmails(result.data?.middleEmails || []);
@@ -14730,10 +14750,12 @@ const App: React.FC = () => {
     if (now - lastMonthlyTargetRefreshAtRef.current < 10000) return;
     lastMonthlyTargetRefreshAtRef.current = now;
     try {
-      const result = await loadTeamsConfig<TeamsConfig>();
+      const result = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
       // 読み込み中にこのタブの保存が始まっていたら、その入力を優先して今回の結果は捨てる。
       if (teamsWritesInFlightRef.current > 0 || !result.data) return;
       const next = result.data.reportMonthlyTarget || {};
+      setTeamsOwnerEmail(result.ownerEmail);
+      setTeamsModifiedTime(result.modifiedTime ?? null);
       setReportMonthlyTarget(prev =>
         prev.repliesTarget === next.repliesTarget && prev.interviewsTarget === next.interviewsTarget ? prev : next
       );
@@ -15252,7 +15274,7 @@ const App: React.FC = () => {
         let latestReportFields = { reportChatWebhookUrl, reportChatThreadKey, reportMonthlyTarget };
         if (!reportChatWebhookUrlPatch || !reportChatThreadKeyPatch || !reportMonthlyTargetPatch) {
           try {
-            const latest = await loadTeamsConfig<TeamsConfig>();
+            const latest = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
             if (latest.data) {
               latestReportFields = {
                 reportChatWebhookUrl: latest.data.reportChatWebhookUrl,
@@ -15444,7 +15466,7 @@ const App: React.FC = () => {
     // しまう。
     let base = reportMonthlyTarget;
     try {
-      const latest = await loadTeamsConfig<TeamsConfig>();
+      const latest = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
       if (latest.data) base = latest.data.reportMonthlyTarget || {};
     } catch (error) {
       console.error('Failed to refresh monthly target before saving', error);
@@ -18030,6 +18052,8 @@ const App: React.FC = () => {
                 monthlyTarget={reportMonthlyTarget}
                 onSetMonthlyTarget={handleSetReportMonthlyTarget}
                 canEditTargets={isTeamsAdmin}
+                configSourceOwnerEmail={teamsOwnerEmail}
+                configSourceModifiedTime={teamsModifiedTime}
               />
             )}
             {!selectedTeamId ? (

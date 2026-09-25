@@ -747,17 +747,19 @@ export interface TeamsConfigResult<T> {
   data: T | null;
   driveFileId: string | null;
   ownerEmail: string | null;
+  // 読み込んだDriveファイルの最終更新日時（ISO）。どのファイルを読んでいるかの確認用。
+  modifiedTime?: string | null;
 }
 
 /** Loads the single shared teams-config file, if one has been created yet. */
-export async function loadTeamsConfig<T = any>(): Promise<TeamsConfigResult<T>> {
-  const existing = await findTeamsConfigFile();
+export async function loadTeamsConfig<T = any>(preferredOwnerEmail?: string): Promise<TeamsConfigResult<T>> {
+  const existing = await findTeamsConfigFile(preferredOwnerEmail);
   if (!existing) return { data: null, driveFileId: null, ownerEmail: null };
   const content = await readFileContent<T>(existing.id);
   // Only succeeds when the loading user is the file's owner (drive.file scope); harmlessly
   // fails otherwise. Self-heals sharing if the owner's own client failed to set it up before.
   ensureDomainPermission(existing.id, 'writer').catch(() => {});
-  return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null };
+  return { data: content, driveFileId: existing.id, ownerEmail: existing.ownerEmail ?? null, modifiedTime: existing.modifiedTime ?? null };
 }
 
 /**
