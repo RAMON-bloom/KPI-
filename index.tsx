@@ -4247,6 +4247,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-25',
+    items: [
+      '【不具合修正】管理者が設定した「事業部の月間目標」が、アプリを開いたままの他のユーザーの画面に反映されない（「目標未設定」や古い値のまま表示される）不具合を修正。チーム別タブを開いた時・画面に戻った時・一定間隔（2分）で最新の目標を自動で読み直すようにした（これまではログインし直すまで更新されませんでした）',
+    ],
+  },
+  {
     date: '2026-09-24',
     items: [
       '候補者カードの「未面談／面談済み」ボタンの右に、「BIZアンケート未送付／送付済み」ボタンを追加した。クリックで切り替えられ、候補者一覧の「自社面談状況」の絞り込みにも「BIZアンケート送付済み」ボタンを追加した（面談状況の絞り込みと組み合わせて使えます）。CSV出力にも「BIZアンケート」列を追加した',
@@ -14710,6 +14716,45 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [currentIdentity, isInitialized, teamsConfigReloadNonce]);
 
+  // 事業部の月間目標（TeamsConfig.reportMonthlyTarget）をDriveから読み直して反映する。
+  // 以前はサインイン時に1回だけ読み込んでいたため、管理者が目標を設定・変更しても、既にアプリを
+  // 開いたままの他のユーザーの画面は再読み込み（再ログイン）するまで古い目標のまま——チーム別
+  // タブの実績レポートに「目標未設定」や古い値が表示され続けていた。チーム別タブを開いている間、
+  // 開いた時・画面に戻った時・一定間隔で読み直す。連続呼び出しは間引き、このタブ自身の保存が
+  // 未完了の間は（入力直後の値を古い内容で上書きしないよう）見送る。
+  const lastMonthlyTargetRefreshAtRef = useRef(0);
+  const refreshReportMonthlyTarget = useCallback(async () => {
+    if (!currentIdentity || !isInitialized) return;
+    if (teamsWritesInFlightRef.current > 0) return;
+    const now = Date.now();
+    if (now - lastMonthlyTargetRefreshAtRef.current < 10000) return;
+    lastMonthlyTargetRefreshAtRef.current = now;
+    try {
+      const result = await loadTeamsConfig<TeamsConfig>();
+      // 読み込み中にこのタブの保存が始まっていたら、その入力を優先して今回の結果は捨てる。
+      if (teamsWritesInFlightRef.current > 0 || !result.data) return;
+      const next = result.data.reportMonthlyTarget || {};
+      setReportMonthlyTarget(prev =>
+        prev.repliesTarget === next.repliesTarget && prev.interviewsTarget === next.interviewsTarget ? prev : next
+      );
+    } catch (error) {
+      console.warn('Failed to refresh division monthly target', error);
+    }
+  }, [currentIdentity, isInitialized]);
+  useEffect(() => {
+    if (view !== 'team_kpi') return;
+    void refreshReportMonthlyTarget();
+    const onVisible = () => { if (document.visibilityState === 'visible') void refreshReportMonthlyTarget(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    const intervalId = window.setInterval(() => { void refreshReportMonthlyTarget(); }, 2 * 60 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      window.clearInterval(intervalId);
+    };
+  }, [view, refreshReportMonthlyTarget]);
+
   const handleReauthorizeDriveAccess = async () => {
     try {
       await reauthorizeWithConsent();
@@ -15168,6 +15213,10 @@ const App: React.FC = () => {
   const teamsDriveFileIdRef = useRef<string | null>(teamsDriveFileId);
   useEffect(() => { teamsDriveFileIdRef.current = teamsDriveFileId; }, [teamsDriveFileId]);
   const teamsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // このタブ自身のチーム設定の保存（persistTeamsConfig）が未完了の件数。保存がDriveに届く前に
+  // 事業部の月間目標などを読み直すと、直前にこのタブで入力した新しい値が古い内容で上書きされて
+  // 見えてしまうため、保存中は読み直しを見送る（refreshReportMonthlyTarget参照）。
+  const teamsWritesInFlightRef = useRef(0);
 
   // 末尾3つ（Google Chat通知のWebhook URL・スレッドキー・事業部の月間目標）は「このタブが
   // 意図して変更する場合だけ」{ value } でラップして渡す（値そのものがundefinedを取りうる
@@ -15197,6 +15246,7 @@ const App: React.FC = () => {
     if (reportMonthlyTargetPatch) setReportMonthlyTarget(reportMonthlyTargetPatch.value);
     if (!currentIdentity) return;
     const email = currentIdentity.email;
+    teamsWritesInFlightRef.current++;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
         let latestReportFields = { reportChatWebhookUrl, reportChatThreadKey, reportMonthlyTarget };
@@ -15239,6 +15289,8 @@ const App: React.FC = () => {
       } catch (error) {
         console.error('Failed to save teams config', error);
         alert('チーム設定の保存に失敗しました。');
+      } finally {
+        teamsWritesInFlightRef.current--;
       }
     });
   };
