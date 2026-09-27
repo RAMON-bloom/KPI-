@@ -9684,7 +9684,16 @@ const SelectionTimeline: React.FC<{
   // stageHistoryが無い（この機能より前に作られた等）場合でも、少なくとも現在のフェーズの
   // ステップだけは表示できるよう、その場限りのフォールバックを組み立てる。
   const history = app.stageHistory && app.stageHistory.length > 0 ? app.stageHistory : [{ stage: app.stage }];
-  const pastEntries = history.slice(0, -1);
+  // 通常はhistoryの末尾エントリが「現在のフェーズ」（app.stage）と同じステージを指しており、
+  // それをCurrentStagePillが別途ライブ表示するため、ここでは末尾だけ除いて過去ステップとする。
+  // ただし「先の日程」をワンクリックで現在のステータスに昇格させるonPromoteは、保存
+  // （computeStageAdvanceUpdate）を待たずにapp.stageだけをその場で新しいフェーズに差し替える
+  // ため、保存前の一瞬はhistoryの末尾がまだ古いapp.stageのまま＝新しいapp.stageと一致しない
+  // 状態になる。この時に単純に末尾を除くと、直前まで「現在のフェーズ」だった段（＝1つ前の
+  // フェーズ）がpastEntriesにもCurrentStagePillにも属さず、トラックから消えて見えてしまう。
+  // 末尾が現在のapp.stageと一致する時だけ末尾を除く（＝一致しない間はhistoryを丸ごと過去
+  // ステップとして表示し、保存で辻褄が合うまでその段を表示し続ける）ことでこれを防ぐ。
+  const pastEntries = history[history.length - 1]?.stage === app.stage ? history.slice(0, -1) : history;
   const additional = app.additionalScheduledDates || [];
   const currentIdx = FORWARD_PIPELINE_STAGES.indexOf(app.stage);
   // 書類選考のような「日程調整の概念がない」フェーズは、まだ到達していない先の日程としても
