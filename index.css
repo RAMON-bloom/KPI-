@@ -936,10 +936,30 @@ section {
 }
 /* 現在のフェーズのステップ — 確定/調整中の切り替えと日時入力をそのままステップ内に収める。
    チェックボックスのラベル・入力欄は白背景の色付きピルの上に乗るため、既定の暗い文字色では
-   読みにくい——ここだけ白系に上書きする。 */
+   読みにくい——ここだけ白系に上書きする。
+   過去のステップ（.is-past）も同じ塗りつぶし背景のため、ステージ色だけでは「今どれが現在
+   なのか」が一目で分からないという指摘への対応として、ステージ色に関係なく常に目立つ
+   リング（box-shadow）を追加し、視覚的に浮き上がらせている。 */
 .stage-track-step.is-current {
   align-items: stretch;
   gap: 0.2rem;
+  box-shadow: 0 0 0 2px var(--primary-color), 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+/* 現在のステップにだけ付ける「現在」ラベル——過去・先のステップと違い、常にここだけ現在地
+   だと分かるようにする。 */
+.stage-track-current-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--badge-text, white);
+  opacity: 0.85;
+  line-height: 1.2;
+}
+/* 過去のステップ——現在のステップ（リング付き・「現在」ラベル付き）と対比するため、あえて
+   彩度そのままにやや控えめな見た目（半透明）にして「もう終わったフェーズ」だと分かるように
+   する。 */
+.stage-track-step.is-past {
+  opacity: 0.8;
 }
 .stage-track-current-schedule {
   display: flex;
@@ -999,6 +1019,13 @@ section {
 .stage-track-step.is-future .stage-track-stage {
   color: var(--badge-text-on-white, var(--badge-color, var(--secondary-color)));
 }
+/* 「調整中」（まだ日時が決まっていない）先の日程——確定済みの先の日程（ステージ色の破線のみ）
+   と見分けがつきにくいという指摘への対応。警告色の実線寄りの枠＋薄い塗りにして、確定済みと
+   明確に区別できるようにする。 */
+.stage-track-step.is-future.is-adjusting {
+  border: 1px dashed var(--warning-color);
+  background-color: rgba(255, 193, 7, 0.12);
+}
 .stage-track-stage-select {
   font-size: 0.75rem;
   font-weight: 600;
@@ -1009,6 +1036,17 @@ section {
      color: var(--badge-text, white)に従う）。先のステップ（.is-future）だけ背景が透明なので、
      下のルールで--badge-text-on-whiteに上書きする。 */
   color: inherit;
+  /* 見た目がただのラベルと同じで「クリックして進捗を変更できる」と気づきにくいという指摘へ
+     の対応——editable時は下線を出し、hover/focusで軽くハイライトしてクリック可能であることを
+     示す（stage-track-date.is-editableと同じ「クリックして編集」の作法に合わせている）。 */
+  cursor: pointer;
+  border-bottom: 1px dashed currentColor;
+  border-radius: 0.15rem;
+}
+.stage-track-stage-select:hover,
+.stage-track-stage-select:focus-visible {
+  background-color: rgba(255, 255, 255, 0.3);
+  outline: none;
 }
 .stage-track-step.is-future .stage-track-stage-select {
   color: var(--badge-text-on-white, var(--badge-color, var(--secondary-color)));

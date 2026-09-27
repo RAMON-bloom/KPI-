@@ -4247,6 +4247,13 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-09-27',
+    items: [
+      '【不具合修正】選考日程タイムラインで「先の日程」を✓ボタンで現在のステータスに昇格させた直後、保存前の画面上だけ直前のフェーズのトラックが一瞬消えて見えてしまう不具合を修正',
+      '選考日程タイムラインの見やすさを改善。①現在のフェーズのステップに「現在」ラベルと目立つ枠線を追加し、色塗りが同じ過去のステップと見分けやすくした。②過去のステップはやや控えめな見た目にして「もう終わったフェーズ」だと分かるようにした。③「先の日程」のうち、まだ日時が決まっていない「調整中」のものは、確定済みのものと違う色の枠・背景にして一目で区別できるようにした。④現在・先のフェーズのプルダウンに下線とホバー時のハイライトを付け、クリックして変更できることが分かりやすいようにした',
+    ],
+  },
+  {
     date: '2026-09-25',
     items: [
       '【不具合修正】管理者が設定した「事業部の月間目標」が、アプリを開いたままの他のユーザーの画面に反映されない（「目標未設定」や古い値のまま表示される）不具合を修正。チーム別タブを開いた時・画面に戻った時・一定間隔（2分）で最新の目標を自動で読み直すようにした（これまではログインし直すまで更新されませんでした）',
@@ -9482,8 +9489,13 @@ const PastStagePill: React.FC<{
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (isEditing) inputRef.current?.focus(); }, [isEditing]);
   const display = date ? new Date(date + 'T00:00:00').toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' }) : '記録開始前';
+  // onChangeStageが渡されているのは「現在のフェーズが打診・書類選考（確定/調整中の概念が
+  // なくCurrentStagePillを使えない）」場合だけ（呼び出し元のコメント参照）——見た目も過去の
+  // ステップではなく現在のステップ（is-current・「現在」ラベル）として扱う。
+  const isCurrent = !!onChangeStage;
   return (
-    <span className="stage-track-step" style={getStageBadgeStyle(stage)}>
+    <span className={`stage-track-step ${isCurrent ? 'is-current' : 'is-past'}`} style={getStageBadgeStyle(stage)}>
+      {isCurrent && <span className="stage-track-current-label">現在</span>}
       {editable && onChangeStage ? (
         <>
           <select
@@ -9528,6 +9540,9 @@ const CurrentStagePill: React.FC<{
   idPrefix: string;
 }> = ({ app, editable, onCommitSchedule, onChangeStage, idPrefix }) => (
   <span className="stage-track-step is-current" style={getStageBadgeStyle(app.stage)}>
+    {/* 「今どのフェーズが現在で、どこを変更すれば進捗が動くか」が見た目だけでは分かりにくい
+        という指摘への対応——過去・先のステップと違い、ここだけ明示的に「現在」ラベルを出す。 */}
+    <span className="stage-track-current-label">現在</span>
     {editable ? (
       <select
         className="stage-track-stage-select"
@@ -9597,7 +9612,13 @@ const FutureStagePill: React.FC<{
   onPromote: () => void;
   idPrefix: string;
 }> = ({ entry, options, editable, onChangeStage, onCommitPatch, onRemove, onPromote, idPrefix }) => (
-  <span className="stage-track-step is-future" style={getStageBadgeStyle(entry.stage)}>
+  // 「調整中」（まだ日時が決まっていない）の先の日程は、確定済みの先の日程（破線のみ）と
+  // 見分けがつきにくいという指摘への対応——is-adjustingを追加し、枠線をよりはっきりした
+  // 警告色・実線寄りにして「まだ決まっていない」ことを視覚的に強調する。
+  <span
+    className={`stage-track-step is-future ${(entry.schedulingStatus || 'confirmed') === 'adjusting' ? 'is-adjusting' : ''}`}
+    style={getStageBadgeStyle(entry.stage)}
+  >
     {editable ? (
       <select
         className="stage-track-stage-select"
