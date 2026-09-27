@@ -942,7 +942,18 @@ function computeStageAdvanceUpdate(
       }
     }
 
-    base = { ...base, stageHistory: [...priorHistory, { stage: app.stage, date: todayStr }] };
+    // SelectionTimelineのonPromote（先の日程を✓ボタンで即座に現在のステータスへ昇格させる
+    // 操作）は、保存を待たずにこの末尾エントリの追加を自分でも行っている——保存前の一瞬だけ
+    // トラック表示上その段が消えて見える不具合を防ぐため。ここで無条件に追加すると、その
+    // ケースで同じ遷移が二重に記録されてしまうため、末尾が既にapp.stageと一致する（＝この
+    // 遷移が既に記録済み）場合は追加しない。
+    const lastPriorEntry = priorHistory[priorHistory.length - 1];
+    base = {
+      ...base,
+      stageHistory: lastPriorEntry && lastPriorEntry.stage === app.stage
+        ? priorHistory
+        : [...priorHistory, { stage: app.stage, date: todayStr }],
+    };
 
     const keys = getStageAdvanceKpiKeys(prevApp.stage, app.stage).filter(k => k !== 'declined' && k !== 'withdrawn' && k !== 'acceptanceWithdrawn');
     if (keys.length === 0) {
@@ -4249,7 +4260,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-09-27',
     items: [
-      '【不具合修正】選考日程タイムラインで「先の日程」を✓ボタンで現在のステータスに昇格させた直後、保存前の画面上だけ直前のフェーズのトラックが一瞬消えて見えてしまう不具合を修正',
+      '【不具合修正】選考日程タイムラインで「先の日程」を✓ボタンで現在のステータスに昇格させた直後、保存前の画面上だけ直前のフェーズのトラックが一瞬消えて見えてしまう不具合を修正（昇格した瞬間に選考トラックのデータ自体も更新するようにし、保存を待たずに常に正しい状態になるようにした）',
       '選考日程タイムラインの見やすさを改善。①現在のフェーズのステップに「現在」ラベルと目立つ枠線を追加し、色塗りが同じ過去のステップと見分けやすくした。②過去のステップはやや控えめな見た目にして「もう終わったフェーズ」だと分かるようにした。③「先の日程」のうち、まだ日時が決まっていない「調整中」のものは、確定済みのものと違う色の枠・背景にして一目で区別できるようにした。④現在・先のフェーズのプルダウンに下線とホバー時のハイライトを付け、クリックして変更できることが分かりやすいようにした',
     ],
   },
@@ -9779,6 +9790,13 @@ const SelectionTimeline: React.FC<{
                 schedulingBallOwner: entry.schedulingBallOwner,
                 schedulingNote: entry.schedulingNote,
                 additionalScheduledDates: additional.filter(e => e.id !== entry.id),
+                // 保存（computeStageAdvanceUpdate）を待たずにここでstageHistoryも直接更新して
+                // おく——保存前の一瞬だけhistoryの末尾が古いapp.stageのままになる時間を作らず、
+                // 昇格した瞬間から常にデータそのものが正しい状態にするため（見た目だけの応急
+                // 対応であるSelectionTimelineのpastEntriesのフォールバックに頼らない）。同じ
+                // 遷移をcomputeStageAdvanceUpdateが保存時に重ねて処理しても、末尾が既に
+                // app.stageと一致していれば二重追加しないようになっている。
+                stageHistory: [...history, { stage: entry.stage, date: new Date().toLocaleDateString('sv-SE') }],
               })}
               idPrefix={`${idPrefix}-future-${entry.id}`}
             />
