@@ -15297,31 +15297,35 @@ const App: React.FC = () => {
   // 設定した直後に、別の古いタブからメンバー追加だけを保存すると、無関係のはずの目標が
   // 巻き戻ってしまっていた不具合の対策）。
   const persistTeamsConfig = (
-    updatedTeams: Team[],
-    updatedAuthorizedEditors: string[],
-    updatedDepartments: Record<string, Department>,
-    updatedMiddleEmails: string[],
+    teamsUpdater: (latest: Team[]) => Team[],
+    authorizedEditorsUpdater: (latest: string[]) => string[],
+    departmentsUpdater: (latest: Record<string, Department>) => Record<string, Department>,
+    middleEmailsUpdater: (latest: string[]) => string[],
     reportChatWebhookUrlPatch?: { value: string | undefined },
     reportChatThreadKeyPatch?: { value: string | undefined },
     reportMonthlyTargetPatch?: { value: { repliesTarget?: number; interviewsTarget?: number } }
   ) => {
     // teams/authorizedEditorEmails/memberDepartments/middleEmailsは、Driveから読み直さず
-    // このタブのローカルstateをそのまま「全データ」として書き込む（reportMonthlyTargetなどと
-    // 違い、パッチではなく丸ごと上書き）。読み込みが完了する前（teamsConfigLoaded===false）に
-    // 呼ばれると、まだ空のローカルstate（useStateの初期値）を「正規のデータ」として保存して
-    // しまい、共有ファイル上の他チーム・他メンバーの部署設定などを全消去してしまう——ヘッダーの
-    // 「自分の所属部署」セレクトはteamsConfigLoadedを待たずに操作できるため実際に発生した。
+    // このタブのローカルstateをそのまま「全データ」として書き込むと、読み込みが完了する前
+    // （teamsConfigLoaded===false）に呼ばれた場合はまだ空のローカルstate（useStateの初期値）を
+    // 「正規のデータ」として保存してしまい、共有ファイル上の他チーム・他メンバーの部署設定などを
+    // 全消去してしまう——ヘッダーの「自分の所属部署」セレクトはteamsConfigLoadedを待たずに操作
+    // できるため実際に発生した。それを防ぐガードに加え、呼び出し側からは完成した配列/オブジェクト
+    // ではなく「最新値に対する変換関数」を受け取り、保存直前に必ずDriveの最新値を読み直してから
+    // その変換を適用する——このタブが読み込んだ時点のローカルstateを土台にすると、別のタブ・
+    // 別の編集者がその後に加えた変更（チーム追加・所属部署・ミドル権限など）を意図せず巻き戻して
+    // しまうため（この4項目には元々この保護がなく、実際にチーム設定が全消去される事故が起きた）。
     if (!teamsConfigLoaded) {
       console.error('チーム設定の読み込み完了前に保存しようとしたため中断しました（データ消失防止）');
       alert('チーム設定を読み込み中です。少し待ってからもう一度お試しください。');
       return;
     }
-    setTeams(updatedTeams);
-    setTeamsAuthorizedEditors(updatedAuthorizedEditors);
-    setMemberDepartments(updatedDepartments);
-    setMiddleEmails(updatedMiddleEmails);
-    // 明示的に変更を意図したフィールドだけ即座にローカル反映する（他は次のDrive読み直しまで
-    // 現状表示のまま——このタブ自身がその真値を知らないので、下手に触らない）。
+    // このタブの表示は即座に更新する（体感速度優先の楽観的更新）。実際に保存される内容は、
+    // 下のキュー内でDriveの最新値に対して同じ変換を適用し直したものになる。
+    setTeams(prev => teamsUpdater(prev));
+    setTeamsAuthorizedEditors(prev => authorizedEditorsUpdater(prev));
+    setMemberDepartments(prev => departmentsUpdater(prev));
+    setMiddleEmails(prev => middleEmailsUpdater(prev));
     if (reportChatWebhookUrlPatch) setReportChatWebhookUrl(reportChatWebhookUrlPatch.value);
     if (reportChatThreadKeyPatch) setReportChatThreadKey(reportChatThreadKeyPatch.value);
     if (reportMonthlyTargetPatch) setReportMonthlyTarget(reportMonthlyTargetPatch.value);
@@ -15330,30 +15334,26 @@ const App: React.FC = () => {
     teamsWritesInFlightRef.current++;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
-        let latestReportFields = { reportChatWebhookUrl, reportChatThreadKey, reportMonthlyTarget };
-        if (!reportChatWebhookUrlPatch || !reportChatThreadKeyPatch || !reportMonthlyTargetPatch) {
-          try {
-            const latest = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
-            if (latest.data) {
-              latestReportFields = {
-                reportChatWebhookUrl: latest.data.reportChatWebhookUrl,
-                reportChatThreadKey: latest.data.reportChatThreadKey,
-                reportMonthlyTarget: latest.data.reportMonthlyTarget || {},
-              };
-            }
-          } catch (error) {
-            console.error('Failed to refresh report settings before saving teams config', error);
-          }
+        let latest: TeamsConfig | null = null;
+        try {
+          const result = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
+          latest = result.data;
+        } catch (error) {
+          console.error('Failed to refresh teams config before saving', error);
         }
-        const finalReportChatWebhookUrl = reportChatWebhookUrlPatch ? reportChatWebhookUrlPatch.value : latestReportFields.reportChatWebhookUrl;
-        const finalReportChatThreadKey = reportChatThreadKeyPatch ? reportChatThreadKeyPatch.value : latestReportFields.reportChatThreadKey;
-        const finalReportMonthlyTarget = reportMonthlyTargetPatch ? reportMonthlyTargetPatch.value : latestReportFields.reportMonthlyTarget;
+        const finalTeams = teamsUpdater(latest?.teams || []);
+        const finalAuthorizedEditors = authorizedEditorsUpdater(latest?.authorizedEditorEmails || []);
+        const finalDepartments = departmentsUpdater(latest?.memberDepartments || {});
+        const finalMiddleEmails = middleEmailsUpdater(latest?.middleEmails || []);
+        const finalReportChatWebhookUrl = reportChatWebhookUrlPatch ? reportChatWebhookUrlPatch.value : latest?.reportChatWebhookUrl;
+        const finalReportChatThreadKey = reportChatThreadKeyPatch ? reportChatThreadKeyPatch.value : latest?.reportChatThreadKey;
+        const finalReportMonthlyTarget = reportMonthlyTargetPatch ? reportMonthlyTargetPatch.value : (latest?.reportMonthlyTarget || {});
         const payload: TeamsConfig = {
           schemaVersion: 1,
-          teams: updatedTeams,
-          authorizedEditorEmails: updatedAuthorizedEditors,
-          memberDepartments: updatedDepartments,
-          middleEmails: updatedMiddleEmails,
+          teams: finalTeams,
+          authorizedEditorEmails: finalAuthorizedEditors,
+          memberDepartments: finalDepartments,
+          middleEmails: finalMiddleEmails,
           reportChatWebhookUrl: finalReportChatWebhookUrl,
           reportChatThreadKey: finalReportChatThreadKey,
           reportMonthlyTarget: finalReportMonthlyTarget,
@@ -15362,8 +15362,12 @@ const App: React.FC = () => {
         teamsDriveFileIdRef.current = newFileId;
         setTeamsDriveFileId(newFileId);
         setTeamsOwnerEmail(prev => prev || email);
-        // このタブが触っていないフィールドについては、直前に読み直した最新値をローカル表示にも
-        // 反映しておく（他の編集者の変更をこのタブでも見えるようにする）。
+        // このタブの表示を、実際に書き込んだ内容（＝最新のDrive状態にこの呼び出しの変更を
+        // 適用したもの）に合わせ直す。他の編集者の変更もここで初めてこのタブに反映される。
+        setTeams(finalTeams);
+        setTeamsAuthorizedEditors(finalAuthorizedEditors);
+        setMemberDepartments(finalDepartments);
+        setMiddleEmails(finalMiddleEmails);
         if (!reportChatWebhookUrlPatch) setReportChatWebhookUrl(finalReportChatWebhookUrl);
         if (!reportChatThreadKeyPatch) setReportChatThreadKey(finalReportChatThreadKey);
         if (!reportMonthlyTargetPatch) setReportMonthlyTarget(finalReportMonthlyTarget);
@@ -15376,28 +15380,33 @@ const App: React.FC = () => {
     });
   };
 
-  const persistTeams = (updatedTeams: Team[]) => persistTeamsConfig(updatedTeams, teamsAuthorizedEditors, memberDepartments, middleEmails);
+  const identity = <T,>(value: T): T => value;
+
+  const persistTeams = (teamsUpdater: (latest: Team[]) => Team[]) =>
+    persistTeamsConfig(teamsUpdater, identity, identity, identity);
 
   const handleGrantTeamsEditor = (email: string) => {
-    if (teamsAuthorizedEditors.includes(email)) return;
-    persistTeamsConfig(teams, [...teamsAuthorizedEditors, email], memberDepartments, middleEmails);
+    persistTeamsConfig(identity, latest => (latest.includes(email) ? latest : [...latest, email]), identity, identity);
   };
 
   const handleRevokeTeamsEditor = (email: string) => {
-    persistTeamsConfig(teams, teamsAuthorizedEditors.filter(e => e !== email), memberDepartments, middleEmails);
+    persistTeamsConfig(identity, latest => latest.filter(e => e !== email), identity, identity);
   };
 
   // Team editors (admin + authorized) can set anyone's department from チーム管理.
   const handleSetMemberDepartment = (email: string, department: Department | null) => {
-    const updated = { ...memberDepartments };
-    if (department) updated[email] = department; else delete updated[email];
-    persistTeamsConfig(teams, teamsAuthorizedEditors, updated, middleEmails);
+    persistTeamsConfig(identity, identity, latest => {
+      const updated = { ...latest };
+      if (department) updated[email] = department; else delete updated[email];
+      return updated;
+    }, identity);
   };
 
   // Team editors (admin + authorized) can assign/revoke the ミドル role from チーム管理.
   const handleToggleMiddle = (email: string, isMiddle: boolean) => {
-    const updated = isMiddle ? [...middleEmails, email] : middleEmails.filter(e => e !== email);
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, updated);
+    persistTeamsConfig(identity, identity, identity, latest =>
+      isMiddle ? (latest.includes(email) ? latest : [...latest, email]) : latest.filter(e => e !== email)
+    );
   };
 
   // Anyone signed in can set their OWN department, regardless of team-editor permission — this
@@ -15415,15 +15424,15 @@ const App: React.FC = () => {
       createdBy: currentIdentity?.email || '',
       createdAt: new Date().toISOString(),
     };
-    persistTeams([...teams, newTeam]);
+    persistTeams(latest => [...latest, newTeam]);
   };
 
   const handleRenameTeam = (teamId: string, name: string) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, name } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, name } : t)));
   };
 
   const handleDeleteTeam = (teamId: string) => {
-    persistTeams(teams.filter(t => t.id !== teamId));
+    persistTeams(latest => latest.filter(t => t.id !== teamId));
     if (selectedTeamId === teamId) setSelectedTeamId(null);
   };
 
@@ -15434,8 +15443,8 @@ const App: React.FC = () => {
   // (done by adding to the new team) can't leave them stranded in two teams at once with the
   // old team's media/settings still silently winning the lookup.
   const handleAddTeamMember = (teamId: string, email: string) => {
-    persistTeams(
-      teams.map(t => {
+    persistTeams(latest =>
+      latest.map(t => {
         if (t.id === teamId) {
           return t.memberEmails.includes(email) ? t : { ...t, memberEmails: [...t.memberEmails, email] };
         }
@@ -15445,33 +15454,40 @@ const App: React.FC = () => {
   };
 
   const handleRemoveTeamMember = (teamId: string, email: string) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t)));
   };
 
   const handleSetTeamMedia = (teamId: string, mediaIds: string[]) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, mediaIds } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, mediaIds } : t)));
   };
 
   const handleSetTeamScoutAwardMedia = (teamId: string, mediaIds: string[]) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, scoutAwardMediaIds: mediaIds } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, scoutAwardMediaIds: mediaIds } : t)));
   };
 
   const handleSetTeamReportMembers = (teamId: string, memberEmails: string[]) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, reportMemberEmails: memberEmails } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, reportMemberEmails: memberEmails } : t)));
   };
 
   // 週間サマリー・カレンダーの週の始まりのチーム既定値。value=undefinedで日曜（既定）に戻す。
   const handleSetTeamWeekStartDay = (teamId: string, value: 'saturday' | undefined) => {
-    persistTeams(teams.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
+    persistTeams(latest => latest.map(t => (t.id === teamId ? { ...t, weekStartDay: value } : t)));
   };
 
   // teams配列内の1チームについて、CHAT_WEBHOOK_FEATURES.idごとのGoogle Chat送信先
-  // （chatWebhooks[featureId]）を更新する共通ヘルパー。config=undefinedでその機能の設定を
-  // 削除する。
-  const updateTeamChatWebhook = (teamId: string, featureId: string, config: TeamChatWebhookConfig | undefined) => {
-    persistTeams(teams.map(t => {
+  // （chatWebhooks[featureId]）を更新する共通ヘルパー。computeConfigは「Drive上の最新状態での
+  // 既存設定」を受け取って新しい設定（undefinedならその機能の設定を削除）を返す——呼び出し側の
+  // ローカルstateではなく保存直前の最新値を基準にするため、既存のthreadKeyなどを誤って古い値で
+  // 上書きしない。
+  const updateTeamChatWebhook = (
+    teamId: string,
+    featureId: string,
+    computeConfig: (existingConfig: TeamChatWebhookConfig | undefined) => TeamChatWebhookConfig | undefined
+  ) => {
+    persistTeams(latest => latest.map(t => {
       if (t.id !== teamId) return t;
       const chatWebhooks = { ...(t.chatWebhooks || {}) };
+      const config = computeConfig(getTeamChatWebhookConfig(t, featureId));
       if (config) chatWebhooks[featureId] = config; else delete chatWebhooks[featureId];
       return { ...t, chatWebhooks };
     }));
@@ -15483,13 +15499,7 @@ const App: React.FC = () => {
   // スレッドID宛に送ってしまい壊れるため。
   const handleSetTeamChatWebhookUrl = (teamId: string, featureId: string, url: string) => {
     const trimmed = url.trim();
-    if (!trimmed) {
-      updateTeamChatWebhook(teamId, featureId, undefined);
-      return;
-    }
-    const existing = teams.find(t => t.id === teamId);
-    const existingThreadKey = existing ? getTeamChatWebhookConfig(existing, featureId)?.threadKey : undefined;
-    updateTeamChatWebhook(teamId, featureId, { url: trimmed, threadKey: existingThreadKey });
+    updateTeamChatWebhook(teamId, featureId, existing => (trimmed ? { url: trimmed, threadKey: existing?.threadKey } : undefined));
   };
 
   // このチーム専用スペースに、指定した機能（featureId）のスレッドを作成/作り直す
@@ -15502,14 +15512,14 @@ const App: React.FC = () => {
     if (!webhookUrl) throw new Error('先にこのチーム専用のWebhook URLを設定してください。');
     const newThreadKey = `team-${featureId}-${teamId}-${Date.now()}`;
     await sendChatWebhookMessage(webhookUrl, openingText, newThreadKey);
-    updateTeamChatWebhook(teamId, featureId, { url: webhookUrl, threadKey: newThreadKey });
+    updateTeamChatWebhook(teamId, featureId, () => ({ url: webhookUrl, threadKey: newThreadKey }));
   };
 
   // Google Chatへの実績通知の送信先Webhook URL（スペース全体で共有・チームごとではない）。
   // 空文字を渡すと未設定（undefined）に戻す。
   const handleSetReportChatWebhookUrl = (url: string) => {
     const trimmed = url.trim();
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, { value: trimmed || undefined });
+    persistTeamsConfig(identity, identity, identity, identity, { value: trimmed || undefined });
   };
 
   // 実績レポートの「月間ピッチ」用、事業部として一元設定する月間目標（返信数・面談数）を更新
@@ -15531,7 +15541,7 @@ const App: React.FC = () => {
       console.error('Failed to refresh monthly target before saving', error);
     }
     const updated = { ...base, [field]: value };
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, undefined, undefined, { value: updated });
+    persistTeamsConfig(identity, identity, identity, identity, undefined, undefined, { value: updated });
   };
 
   // スペース内に返信数・面談数報告用のスレッドを作成する（既にある場合は作り直す＝以降の
@@ -15544,7 +15554,7 @@ const App: React.FC = () => {
     if (!reportChatWebhookUrl) throw new Error('先にWebhook URLを設定してください。');
     const newThreadKey = `report-thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await sendChatWebhookMessage(reportChatWebhookUrl, openingText, newThreadKey);
-    persistTeamsConfig(teams, teamsAuthorizedEditors, memberDepartments, middleEmails, undefined, { value: newThreadKey });
+    persistTeamsConfig(identity, identity, identity, identity, undefined, { value: newThreadKey });
   };
 
   // Sync the current user's data to Google Drive (debounced) whenever it changes.
