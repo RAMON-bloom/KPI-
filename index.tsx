@@ -15305,6 +15305,17 @@ const App: React.FC = () => {
     reportChatThreadKeyPatch?: { value: string | undefined },
     reportMonthlyTargetPatch?: { value: { repliesTarget?: number; interviewsTarget?: number } }
   ) => {
+    // teams/authorizedEditorEmails/memberDepartments/middleEmailsは、Driveから読み直さず
+    // このタブのローカルstateをそのまま「全データ」として書き込む（reportMonthlyTargetなどと
+    // 違い、パッチではなく丸ごと上書き）。読み込みが完了する前（teamsConfigLoaded===false）に
+    // 呼ばれると、まだ空のローカルstate（useStateの初期値）を「正規のデータ」として保存して
+    // しまい、共有ファイル上の他チーム・他メンバーの部署設定などを全消去してしまう——ヘッダーの
+    // 「自分の所属部署」セレクトはteamsConfigLoadedを待たずに操作できるため実際に発生した。
+    if (!teamsConfigLoaded) {
+      console.error('チーム設定の読み込み完了前に保存しようとしたため中断しました（データ消失防止）');
+      alert('チーム設定を読み込み中です。少し待ってからもう一度お試しください。');
+      return;
+    }
     setTeams(updatedTeams);
     setTeamsAuthorizedEditors(updatedAuthorizedEditors);
     setMemberDepartments(updatedDepartments);
@@ -17359,7 +17370,8 @@ const App: React.FC = () => {
                 className="own-department-select"
                 value={memberDepartments[currentIdentity.email] || ''}
                 onChange={(e) => handleSetOwnDepartment((e.target.value || null) as Department | null)}
-                title="自分の所属部署"
+                disabled={!teamsConfigLoaded}
+                title={teamsConfigLoaded ? '自分の所属部署' : 'チーム設定を読み込み中...'}
               >
                 <option value="">所属未設定</option>
                 <option value="F+">Firm+</option>
