@@ -15446,7 +15446,16 @@ const App: React.FC = () => {
     persistTeams(latest =>
       latest.map(t => {
         if (t.id === teamId) {
-          return t.memberEmails.includes(email) ? t : { ...t, memberEmails: [...t.memberEmails, email] };
+          if (t.memberEmails.includes(email)) return t;
+          // reportMemberEmails（実績レポートに載せるメンバー）が絞り込み済みのチームでは、
+          // 新規メンバーを自動で含めないと、追加したのにレポートから黙って漏れてしまう。
+          return {
+            ...t,
+            memberEmails: [...t.memberEmails, email],
+            ...(t.reportMemberEmails && !t.reportMemberEmails.includes(email)
+              ? { reportMemberEmails: [...t.reportMemberEmails, email] }
+              : {}),
+          };
         }
         return t.memberEmails.includes(email) ? { ...t, memberEmails: t.memberEmails.filter(e => e !== email) } : t;
       })
