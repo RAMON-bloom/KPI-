@@ -43,17 +43,23 @@ function toDateISO(epochMs: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// Gmail answers 403 not only for a missing scope but also for per-user rate/concurrency limits
-// ("Too many concurrent requests for user", userRateLimitExceeded, ...). Those used to be
-// reported as a permission problem, so re-granting access could never fix them — they're now
-// retried with backoff, and only genuine auth/scope failures surface as GmailPermissionError.
+// Gmail answers 403 not only for a missing scope but also for rate limits — in practice mostly
+// "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'",
+// a per-MINUTE budget. Those used to be reported as a permission problem, then retried for only
+// ~15s in total, which can never outlast a one-minute window. Now every worker pauses together
+// (so retries don't keep burning the same budget) for long enough for the window to roll over.
 const RATE_LIMIT_REASONS = ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded', 'concurrentLimitExceeded', 'backendError'];
-const MAX_ATTEMPTS = 5;
+const RATE_LIMIT_DELAYS_MS = [15000, 30000, 60000, 60000, 60000];
 // Gmail caps simultaneous requests per user; staying well below it avoids tripping the limit.
 const GMAIL_CONCURRENCY = 4;
+let pausedUntil = 0;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitWhilePaused() {
+  while (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now());
 }
 
 // One shared silent refresh for all concurrent workers that hit a 401 at the same moment.
@@ -71,7 +77,9 @@ function refreshOnce(): Promise<unknown> {
 // silent refresh + retry before it's reported as a permission problem.
 async function gmailFetch(accessToken: string, path: string): Promise<any> {
   let refreshedAfter401 = false;
-  for (let attempt = 1; ; attempt++) {
+  let rateLimitHits = 0;
+  while (true) {
+    await waitWhilePaused();
     const token = getCurrentSession()?.accessToken ?? accessToken;
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -100,11 +108,14 @@ async function gmailFetch(accessToken: string, path: string): Promise<any> {
       || res.status >= 500
       || (res.status === 403 && (RATE_LIMIT_REASONS.includes(reason) || /too many|rate limit|quota/i.test(apiMessage)));
     if (isRateLimited) {
-      if (attempt < MAX_ATTEMPTS) {
-        await sleep(Math.min(8000, 500 * 2 ** (attempt - 1)) + Math.random() * 300);
+      if (rateLimitHits < RATE_LIMIT_DELAYS_MS.length) {
+        const retryAfterSec = Number(res.headers.get('Retry-After'));
+        const delay = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : RATE_LIMIT_DELAYS_MS[rateLimitHits];
+        rateLimitHits++;
+        pausedUntil = Math.max(pausedUntil, Date.now() + delay);
         continue;
       }
-      throw new Error('Gmailへのアクセスが混み合っています。少し時間をおいてから、もう一度お試しください。');
+      throw new Error('Gmailの利用上限（1分あたりの取得量）に達しました。数分おいてから、もう一度お試しください。');
     }
     if (res.status === 401 || res.status === 403) {
       throw new GmailPermissionError(`Gmailの読み取り権限が許可されていません。（${res.status}${reason ? ` ${reason}` : ''}）`);
@@ -191,11 +202,44 @@ function extractRdsCandidateName(bodyText: string): string | null {
   return name.length > 0 ? name : null;
 }
 
-async function fetchAndClassifyMessages(
-  accessToken: string,
-  q: string,
-  onProgress?: GmailScanProgress
-): Promise<{ matches: { dateISO: string; mediaId: string; messageId: string }[]; totalScanned: number }> {
+// Gmail messages never change once delivered, so what we derive from each one (date, subject,
+// RDS candidate name) is cached per mailbox in localStorage. Repeat runs then only fetch messages
+// they haven't seen — previously every click re-read ~30 days of RDS bodies in full, which alone
+// was enough to exhaust the per-minute quota.
+interface CachedMessage {
+  d: number; // internalDate (epoch ms)
+  s?: string; // Subject header (undefined = not fetched yet)
+  n?: string | null; // RDS candidate name (undefined = body not parsed yet)
+}
+const CACHE_KEY_PREFIX = 'kpiGmailMsgCache_v1:';
+const CACHE_MAX_ENTRIES = 5000;
+
+function cacheKey(): string {
+  return CACHE_KEY_PREFIX + (getCurrentSession()?.identity.email ?? 'unknown');
+}
+
+function loadMessageCache(): Record<string, CachedMessage> {
+  try {
+    return JSON.parse(localStorage.getItem(cacheKey()) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveMessageCache(cache: Record<string, CachedMessage>) {
+  try {
+    let ids = Object.keys(cache);
+    if (ids.length > CACHE_MAX_ENTRIES) {
+      ids = ids.sort((a, b) => cache[b].d - cache[a].d).slice(0, CACHE_MAX_ENTRIES);
+      cache = Object.fromEntries(ids.map((id) => [id, cache[id]]));
+    }
+    localStorage.setItem(cacheKey(), JSON.stringify(cache));
+  } catch {
+    // storage full/blocked — caching is only an optimization
+  }
+}
+
+async function listMessageIds(accessToken: string, q: string): Promise<{ id: string }[]> {
   let messages: { id: string }[] = [];
   let pageToken: string | undefined;
   do {
@@ -205,23 +249,40 @@ async function fetchAndClassifyMessages(
     messages = messages.concat(listRes.messages || []);
     pageToken = listRes.nextPageToken;
   } while (pageToken);
+  return messages;
+}
 
-  const details = await mapWithConcurrency(
+async function fetchAndClassifyMessages(
+  accessToken: string,
+  q: string,
+  onProgress?: GmailScanProgress
+): Promise<{ matches: { dateISO: string; mediaId: string; messageId: string }[]; totalScanned: number }> {
+  const messages = await listMessageIds(accessToken, q);
+  const cache = loadMessageCache();
+
+  const subjects = await mapWithConcurrency(
     messages,
     GMAIL_CONCURRENCY,
-    (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=metadata&metadataHeaders=Subject`),
+    async (msg) => {
+      const cached = cache[msg.id];
+      if (cached && cached.s !== undefined) return cached;
+      const detail = await gmailFetch(accessToken, `messages/${msg.id}?format=metadata&metadataHeaders=Subject`);
+      const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
+      const entry: CachedMessage = { ...cached, d: Number(detail.internalDate), s: subjectHeader?.value || '' };
+      cache[msg.id] = entry;
+      return entry;
+    },
     onProgress
   );
+  saveMessageCache(cache);
 
   // rds is deliberately excluded here — fetchRdsReplyMatches below handles it separately with
   // its own cross-day dedup logic instead of the plain per-message classification used here.
   const matches: { dateISO: string; mediaId: string; messageId: string }[] = [];
-  details.forEach((detail, i) => {
-    const subjectHeader = (detail.payload?.headers || []).find((h: any) => h.name === 'Subject');
-    const subject: string = subjectHeader?.value || '';
-    const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.mediaId !== 'rds' && m.test(subject));
+  subjects.forEach((entry, i) => {
+    const matched = MEDIA_SUBJECT_MATCHERS.find((m) => m.mediaId !== 'rds' && m.test(entry.s || ''));
     if (matched) {
-      matches.push({ dateISO: toDateISO(Number(detail.internalDate)), mediaId: matched.mediaId, messageId: messages[i].id });
+      matches.push({ dateISO: toDateISO(entry.d), mediaId: matched.mediaId, messageId: messages[i].id });
     }
   });
 
@@ -255,29 +316,34 @@ async function fetchRdsReplyMatches(
   scanStart.setDate(scanStart.getDate() - RDS_HISTORY_LOOKBACK_DAYS);
 
   const q = `after:${toGmailDate(scanStart)} before:${toGmailDate(rangeEndExclusive)} ${RDS_SUBJECT_QUERY}`;
-  let messages: { id: string }[] = [];
-  let pageToken: string | undefined;
-  do {
-    const params = new URLSearchParams({ q, maxResults: '100' });
-    if (pageToken) params.set('pageToken', pageToken);
-    const listRes = await gmailFetch(accessToken, `messages?${params.toString()}`);
-    messages = messages.concat(listRes.messages || []);
-    pageToken = listRes.nextPageToken;
-  } while (pageToken);
+  const messages = await listMessageIds(accessToken, q);
+  const cache = loadMessageCache();
 
-  const details = await mapWithConcurrency(
+  const parsed = await mapWithConcurrency(
     messages,
     GMAIL_CONCURRENCY,
-    (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=full`),
+    async (msg) => {
+      const cached = cache[msg.id];
+      if (cached && cached.n !== undefined) return cached;
+      const detail = await gmailFetch(accessToken, `messages/${msg.id}?format=full`);
+      const entry: CachedMessage = {
+        ...cached,
+        d: Number(detail.internalDate),
+        n: extractRdsCandidateName(extractMessageBody(detail.payload)),
+      };
+      cache[msg.id] = entry;
+      return entry;
+    },
     onProgress
   );
+  saveMessageCache(cache);
 
-  const entries = details
-    .map((detail, i) => ({
+  const entries = parsed
+    .map((entry, i) => ({
       messageId: messages[i].id,
-      internalDate: Number(detail.internalDate),
-      dateISO: toDateISO(Number(detail.internalDate)),
-      candidateName: extractRdsCandidateName(extractMessageBody(detail.payload)),
+      internalDate: entry.d,
+      dateISO: toDateISO(entry.d),
+      candidateName: entry.n ?? null,
     }))
     .sort((a, b) => a.internalDate - b.internalDate);
 
@@ -342,15 +408,7 @@ export async function fetchFullMessagesInRange(
   endExclusive.setDate(endExclusive.getDate() + 1);
   const q = `after:${toGmailDate(start)} before:${toGmailDate(endExclusive)}`;
 
-  let messages: { id: string }[] = [];
-  let pageToken: string | undefined;
-  do {
-    const params = new URLSearchParams({ q, maxResults: '100' });
-    if (pageToken) params.set('pageToken', pageToken);
-    const listRes = await gmailFetch(accessToken, `messages?${params.toString()}`);
-    messages = messages.concat(listRes.messages || []);
-    pageToken = listRes.nextPageToken;
-  } while (pageToken);
+  const messages = await listMessageIds(accessToken, q);
 
   const details = await mapWithConcurrency(
     messages,
