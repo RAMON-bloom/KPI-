@@ -41,17 +41,50 @@ function toDateISO(epochMs: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Gmail answers 403 not only for a missing scope but also for per-user rate/concurrency limits
+// ("Too many concurrent requests for user", userRateLimitExceeded, ...). Those used to be
+// reported as a permission problem, so re-granting access could never fix them — they're now
+// retried with backoff, and only genuine auth/scope failures surface as GmailPermissionError.
+const RATE_LIMIT_REASONS = ['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded', 'concurrentLimitExceeded', 'backendError'];
+const MAX_ATTEMPTS = 5;
+// Gmail caps simultaneous requests per user; staying well below it avoids tripping the limit.
+const GMAIL_CONCURRENCY = 4;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function gmailFetch(accessToken: string, path: string): Promise<any> {
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (res.status === 401 || res.status === 403) {
-    throw new GmailPermissionError('Gmailの読み取り権限が許可されていません。');
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (res.ok) return res.json();
+
+    let reason = '';
+    let apiMessage = '';
+    try {
+      const body = await res.json();
+      reason = body?.error?.errors?.[0]?.reason || body?.error?.status || '';
+      apiMessage = body?.error?.message || '';
+    } catch {
+      // non-JSON error body — classify by status alone
+    }
+    const isRateLimited = res.status === 429
+      || res.status >= 500
+      || (res.status === 403 && (RATE_LIMIT_REASONS.includes(reason) || /too many|rate limit|quota/i.test(apiMessage)));
+    if (isRateLimited) {
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(Math.min(8000, 500 * 2 ** (attempt - 1)) + Math.random() * 300);
+        continue;
+      }
+      throw new Error('Gmailへのアクセスが混み合っています。少し時間をおいてから、もう一度お試しください。');
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new GmailPermissionError(`Gmailの読み取り権限が許可されていません。（${res.status}${reason ? ` ${reason}` : ''}）`);
+    }
+    throw new Error(`Gmail APIエラー（${res.status}${apiMessage ? `: ${apiMessage}` : ''}）が発生しました。`);
   }
-  if (!res.ok) {
-    throw new Error(`Gmail APIエラー（${res.status}）が発生しました。`);
-  }
-  return res.json();
 }
 
 // Fetches message details with a small concurrency cap instead of one-at-a-time, so a
@@ -149,7 +182,7 @@ async function fetchAndClassifyMessages(
 
   const details = await mapWithConcurrency(
     messages,
-    8,
+    GMAIL_CONCURRENCY,
     (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=metadata&metadataHeaders=Subject`),
     onProgress
   );
@@ -208,7 +241,7 @@ async function fetchRdsReplyMatches(
 
   const details = await mapWithConcurrency(
     messages,
-    8,
+    GMAIL_CONCURRENCY,
     (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=full`),
     onProgress
   );
@@ -248,10 +281,10 @@ export async function fetchScoutReplyCounts(
   dayEnd.setDate(dayEnd.getDate() + 1);
   const q = `after:${toGmailDate(dayStart)} before:${toGmailDate(dayEnd)} subject:スカウト`;
 
-  const [general, rds] = await Promise.all([
-    fetchAndClassifyMessages(accessToken, q, onProgress),
-    fetchRdsReplyMatches(accessToken, dateISO, dateISO),
-  ]);
+  // Sequential, not Promise.all — running both at once doubled the concurrent request count
+  // and was a common way to hit Gmail's per-user concurrency limit.
+  const general = await fetchAndClassifyMessages(accessToken, q, onProgress);
+  const rds = await fetchRdsReplyMatches(accessToken, dateISO, dateISO);
   const matches = [...general.matches, ...rds.matches];
   const counts: Record<string, number> = {};
   matches.forEach((m) => { counts[m.mediaId] = (counts[m.mediaId] || 0) + 1; });
@@ -295,7 +328,7 @@ export async function fetchFullMessagesInRange(
 
   const details = await mapWithConcurrency(
     messages,
-    8,
+    GMAIL_CONCURRENCY,
     (msg) => gmailFetch(accessToken, `messages/${msg.id}?format=full`),
     onProgress
   );

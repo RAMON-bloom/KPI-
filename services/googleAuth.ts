@@ -8,7 +8,14 @@ interface StoredSession {
   accessToken: string;
   expiresAt: number; // epoch ms
   identity: GoogleIdentity;
+  // Space-separated scopes Google actually granted for this token (response.scope). Google's
+  // granular consent screen lets the user untick individual scopes (e.g. Gmail) while still
+  // completing sign-in, so the requested SCOPES aren't guaranteed. Missing on sessions stored
+  // before this field existed — treated as "unknown" rather than "not granted".
+  grantedScopes?: string;
 }
+
+export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 
 const SESSION_KEY = 'kpiGoogleSession';
 const LAST_EMAIL_KEY = 'kpiLastSignedInEmail';
@@ -24,7 +31,7 @@ const ALLOWED_DOMAIN = 'bloom-firm.com';
 // tasks: lets a user who opts in push their own パイプラインカレンダー entries to their own
 // Google Tasks list (see services/googleTasks.ts) — another real scope increase, same
 // re-consent story as the Gmail addition above (existing sessions need reauthorizeWithConsent).
-const SCOPES = 'openid email profile https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/tasks';
+const SCOPES = `openid email profile https://www.googleapis.com/auth/drive ${GMAIL_READONLY_SCOPE} https://www.googleapis.com/auth/tasks`;
 
 declare global {
   interface Window {
@@ -146,7 +153,7 @@ function requestToken(prompt: '' | 'consent', hint?: string): Promise<GoogleIden
           const identity = await fetchIdentity(response.access_token);
           assertAllowedDomain(identity);
           const expiresAt = Date.now() + ((response.expires_in ?? 3600) * 1000);
-          storeSession({ accessToken: response.access_token, expiresAt, identity });
+          storeSession({ accessToken: response.access_token, expiresAt, identity, grantedScopes: typeof response.scope === 'string' ? response.scope : undefined });
           setLastKnownEmail(identity.email);
           finish(() => resolve(identity));
         } catch (err) {
@@ -172,6 +179,16 @@ export function getCurrentSession(): { accessToken: string; identity: GoogleIden
   const session = getStoredSession();
   if (!session) return null;
   return { accessToken: session.accessToken, identity: session.identity };
+}
+
+/**
+ * Whether the current token was granted `scope`. Returns null when unknown (no session, or a
+ * session stored before granted scopes were recorded) so callers can fall back to just trying.
+ */
+export function hasGrantedScope(scope: string): boolean | null {
+  const session = getStoredSession();
+  if (!session || typeof session.grantedScopes !== 'string') return null;
+  return session.grantedScopes.split(/\s+/).includes(scope);
 }
 
 /**

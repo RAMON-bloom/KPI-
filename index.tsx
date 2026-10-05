@@ -15,10 +15,15 @@ import {
   Filler, // Import Filler for area charts
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
-import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, GoogleIdentity } from './services/googleAuth';
+import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, hasGrantedScope, GMAIL_READONLY_SCOPE, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
+
+// Googleの許可画面は項目ごとのチェックボックス形式のため、「続行」を押してもGmailにチェックが
+// 入っていないと権限は付与されない。再許可ボタンを押しても直らない主因だったので、明示的に案内する。
+const GMAIL_SCOPE_UNCHECKED_MESSAGE = 'Gmailの読み取り権限が付与されていません。「Gmailの権限を許可する」を押し、Googleの許可画面で「メールの閲覧」（Gmail）の項目にチェックを入れてから「続行」を押してください。';
+const GMAIL_PERMISSION_MESSAGE = 'Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。';
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
@@ -3178,6 +3183,12 @@ const DateEntryModal: React.FC<{
       setGmailNeedsReauth(false);
       return;
     }
+    if (hasGrantedScope(GMAIL_READONLY_SCOPE) === false) {
+      setGmailStatus('error');
+      setGmailMessage(GMAIL_SCOPE_UNCHECKED_MESSAGE);
+      setGmailNeedsReauth(true);
+      return;
+    }
     setGmailStatus('loading');
     setGmailMessage('');
     setGmailNeedsReauth(false);
@@ -3204,7 +3215,7 @@ const DateEntryModal: React.FC<{
     } catch (err) {
       setGmailStatus('error');
       if (err instanceof GmailPermissionError) {
-        setGmailMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setGmailMessage(GMAIL_PERMISSION_MESSAGE);
         setGmailNeedsReauth(true);
       } else {
         setGmailMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
@@ -3221,6 +3232,7 @@ const DateEntryModal: React.FC<{
     } catch (err) {
       setGmailStatus('error');
       setGmailMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+      setGmailNeedsReauth(true);
     }
   };
 
@@ -3311,6 +3323,12 @@ const BulkGmailReplyImportModal: React.FC<{
       setMessage('開始日は終了日より前の日付にしてください。');
       return;
     }
+    if (hasGrantedScope(GMAIL_READONLY_SCOPE) === false) {
+      setStatus('error');
+      setMessage(GMAIL_SCOPE_UNCHECKED_MESSAGE);
+      setNeedsReauth(true);
+      return;
+    }
     setStatus('loading');
     setMessage('');
     setNeedsReauth(false);
@@ -3322,7 +3340,7 @@ const BulkGmailReplyImportModal: React.FC<{
     } catch (err) {
       setStatus('error');
       if (err instanceof GmailPermissionError) {
-        setMessage('Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください。');
+        setMessage(GMAIL_PERMISSION_MESSAGE);
         setNeedsReauth(true);
       } else {
         setMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
@@ -3339,6 +3357,7 @@ const BulkGmailReplyImportModal: React.FC<{
     } catch (err) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'ログインに失敗しました。');
+      setNeedsReauth(true);
     }
   };
 
@@ -4257,6 +4276,13 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-10-05',
+    items: [
+      '【不具合修正】「Gmailから返信数を取得」で、権限は許可済みなのに「Gmailの読み取り権限が許可されていません」と表示され、「Gmailの権限を許可する」を押しても直らないことがある不具合を修正。実際にはGmail側の同時アクセス数の上限に一時的に引っかかっていたケースを権限エラーと誤って表示していたため、混み合っている場合は自動で少し待って再試行するようにし、同時アクセス数も抑えた',
+      'Googleの許可画面でGmailの項目にチェックを入れずに「続行」した場合、その旨と、チェックを入れて許可し直す手順を表示するようにした',
+    ],
+  },
   {
     date: '2026-09-27',
     items: [
