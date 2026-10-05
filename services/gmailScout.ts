@@ -301,7 +301,10 @@ const RDS_SUBJECT_QUERY = 'subject:リクルートダイレクトスカウト su
 // whose first-ever appearance predates the requested range. A body fetch failure or unrecognized
 // format leaves that message ungrouped (counted on its own) rather than risking merging two
 // different candidates together.
-const RDS_HISTORY_LOOKBACK_DAYS = 30;
+// Shortened from 30 to 10 days (2026-10-05, at the user's request) to cut the Gmail quota each
+// run consumes. Trade-off: a candidate whose previous RDS message is 11+ days old is counted as
+// a new reply again.
+const RDS_HISTORY_LOOKBACK_DAYS = 10;
 
 async function fetchRdsReplyMatches(
   accessToken: string,
