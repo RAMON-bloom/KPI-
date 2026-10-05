@@ -6,6 +6,8 @@
 // fetchRdsReplyMatches below, since its notification emails need cross-day dedup by candidate
 // name rather than the plain per-message classification used for the other media.
 
+import { getCurrentSession, refreshTokenSilently } from './googleAuth';
+
 export class GmailPermissionError extends Error {}
 
 export interface ScoutReplyFetchResult {
@@ -54,11 +56,35 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// One shared silent refresh for all concurrent workers that hit a 401 at the same moment.
+let refreshInFlight: Promise<unknown> | null = null;
+function refreshOnce(): Promise<unknown> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshTokenSilently().finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+// The token passed in is only the starting point: a multi-month scan can outlive the ~1h access
+// token, and the app's proactive refresh (or another tab's sign-out revoking the grant) can swap
+// it out mid-run. Each attempt therefore uses the latest stored token, and a 401 triggers one
+// silent refresh + retry before it's reported as a permission problem.
 async function gmailFetch(accessToken: string, path: string): Promise<any> {
+  let refreshedAfter401 = false;
   for (let attempt = 1; ; attempt++) {
+    const token = getCurrentSession()?.accessToken ?? accessToken;
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
+    if (res.status === 401 && !refreshedAfter401) {
+      refreshedAfter401 = true;
+      try {
+        await refreshOnce();
+        continue;
+      } catch {
+        // silent refresh failed — fall through and report the 401 below
+      }
+    }
     if (res.ok) return res.json();
 
     let reason = '';

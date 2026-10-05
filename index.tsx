@@ -23,7 +23,8 @@ import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionEr
 // Googleの許可画面は項目ごとのチェックボックス形式のため、「続行」を押してもGmailにチェックが
 // 入っていないと権限は付与されない。再許可ボタンを押しても直らない主因だったので、明示的に案内する。
 const GMAIL_SCOPE_UNCHECKED_MESSAGE = 'Gmailの読み取り権限が付与されていません。「Gmailの権限を許可する」を押し、Googleの許可画面で「メールの閲覧」（Gmail）の項目にチェックを入れてから「続行」を押してください。';
-const GMAIL_PERMISSION_MESSAGE = 'Gmailの読み取り権限がまだ許可されていません。下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。';
+// 末尾にGoogleが返したエラーコード（例: 401 / 403 insufficientPermissions）を残し、再発時に原因を特定できるようにする。
+const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。`;
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
@@ -3215,7 +3216,7 @@ const DateEntryModal: React.FC<{
     } catch (err) {
       setGmailStatus('error');
       if (err instanceof GmailPermissionError) {
-        setGmailMessage(GMAIL_PERMISSION_MESSAGE);
+        setGmailMessage(gmailPermissionMessage(err));
         setGmailNeedsReauth(true);
       } else {
         setGmailMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
@@ -3340,7 +3341,7 @@ const BulkGmailReplyImportModal: React.FC<{
     } catch (err) {
       setStatus('error');
       if (err instanceof GmailPermissionError) {
-        setMessage(GMAIL_PERMISSION_MESSAGE);
+        setMessage(gmailPermissionMessage(err));
         setNeedsReauth(true);
       } else {
         setMessage(err instanceof Error ? err.message : 'Gmailの取得に失敗しました。');
@@ -4279,6 +4280,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-05',
     items: [
+      '【不具合修正】Gmailからの返信数取得が、権限を許可済みでも「権限が許可されていません」で失敗することがある不具合を修正。①取得中にログインの有効期限（約1時間）が切れた場合は、自動でログイン情報を更新して続行するようにした。②別のタブやPCでログアウトすると、開いている他の画面のGmail権限まで取り消されてしまっていたのを、ログアウトしても他の画面には影響しないようにした',
       '【不具合修正】「Gmailから返信数を取得」で、権限は許可済みなのに「Gmailの読み取り権限が許可されていません」と表示され、「Gmailの権限を許可する」を押しても直らないことがある不具合を修正。実際にはGmail側の同時アクセス数の上限に一時的に引っかかっていたケースを権限エラーと誤って表示していたため、混み合っている場合は自動で少し待って再試行するようにし、同時アクセス数も抑えた',
       'Googleの許可画面でGmailの項目にチェックを入れずに「続行」した場合、その旨と、チェックを入れて許可し直す手順を表示するようにした',
     ],

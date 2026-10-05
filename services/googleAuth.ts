@@ -249,11 +249,11 @@ export async function reauthorizeWithConsent(): Promise<GoogleIdentity> {
   return requestToken('consent', lastEmail);
 }
 
+// Deliberately does NOT call google.accounts.oauth2.revoke: revoking withdraws the user's whole
+// grant to this app, which instantly invalidated the tokens in every other open tab/PC (Gmail
+// fetches there then failed with 401 as a "permission" error) and made the next consent screen
+// start with every scope unticked, so Gmail was easily left ungranted.
 export function signOut() {
-  const session = getStoredSession();
   clearSession();
   clearLastKnownEmail();
-  if (session?.accessToken && window.google?.accounts?.oauth2?.revoke) {
-    window.google.accounts.oauth2.revoke(session.accessToken, () => {});
-  }
 }
