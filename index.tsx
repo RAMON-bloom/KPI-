@@ -1140,6 +1140,12 @@ interface UserData {
   // よいため。チーム設定（TeamsConfig）は管理者しか書けないので、レポートを作る人本人の
   // UserDataに保存する（他のリーダーの見立ては共有されない）。
   meetingForecast?: MeetingForecastSettings;
+  // 共有チーム設定（kpi-manager-teams.json）の控え。管理者（TEAMS_ADMIN_EMAIL）本人の
+  // UserDataにだけ、正常に読み込めた／保存できたチーム設定を新しい順に最大
+  // TEAMS_CONFIG_BACKUP_LIMIT件まで自動で残す。共有ファイルが不具合や誤操作で消えた・
+  // 壊れたときに、チーム管理画面の「チーム設定のバックアップ」からその時点の内容に戻せる
+  // ようにするため（2026-09-29・10-07に共有ファイルが全消去される事故が実際に起きた）。
+  teamsConfigBackups?: TeamsConfigBackup[];
 }
 
 // バグ報告・改善要望の種別とステータス。STAGE_COLOR_MAPと同じ考え方で、白文字と組み合わせて
@@ -1367,6 +1373,30 @@ interface TeamsConfig {
   // 適用される——メンバー本人が個人タブで入力するkpiTargets（媒体別の月間目標、他の画面全般
   // で使われる）とは別物。チーム別タブの「Google Chatに送信」パネル右側から直接設定する。
   reportMonthlyTarget?: { repliesTarget?: number; interviewsTarget?: number };
+}
+
+interface TeamsConfigBackup {
+  savedAt: string; // ISO
+  config: TeamsConfig;
+}
+const TEAMS_CONFIG_BACKUP_LIMIT = 20;
+
+// このタブで動いているJSバンドルが、本番に公開されている最新版より古いかどうか。index.htmlを
+// キャッシュなしで取り直し、そこに書かれたバンドルのパスと、このページが読み込んだバンドルの
+// パスを比べる。判定できない場合（開発サーバー・通信失敗など）は「古くない」とみなし、保存を
+// 妨げない。
+async function isRunningStaleBundle(): Promise<boolean> {
+  try {
+    const current = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/"]');
+    if (!current) return false;
+    const currentPath = new URL(current.src).pathname;
+    const html = await fetch(`/?_=${Date.now()}`, { cache: 'no-store' }).then(r => (r.ok ? r.text() : ''));
+    const match = html.match(/<script[^>]*type="module"[^>]*src="([^"]*\/assets\/[^"]+\.js)"/);
+    if (!match) return false;
+    return new URL(match[1], window.location.origin).pathname !== currentPath;
+  } catch {
+    return false;
+  }
 }
 
 // weekStartsOn: 0 = 日曜始まり（既定）, 6 = 土曜始まり。週間サマリー・各カレンダーの表示形式
@@ -4281,6 +4311,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-10-07',
     items: [
       '【不具合修正】チーム設定（チーム編成・メンバー・Chat通知先・月間目標など）が、所属部署などを変更したタイミングで全て消えてしまうことがある不具合を修正。保存の直前に最新の設定を読み込めなかった場合（Googleドライブが一時的に混み合っている時など）に、空の設定で上書き保存していたのが原因。読み込めなかった場合は保存を中断し、時間をおいて再度お試しいただくようメッセージを表示するようにした',
+      'チーム設定の保護を強化。①1回の操作でチーム・所属部署・権限が2件以上一度に消えるような保存は、不具合とみなして中断するようにした。②アプリの新しいバージョンが公開された後に古い画面を開いたままの場合、チーム設定を保存しようとすると自動で再読み込みするようにした',
+      '管理者向けに「チーム設定のバックアップ」を追加。チーム設定が変わるたびに管理者の個人データへ自動で控えを取り、万一チーム設定が消えたりおかしくなったりした場合でも、チーム管理画面から正常だった時点の内容にワンクリックで戻せるようにした',
     ],
   },
   {
@@ -5058,7 +5090,9 @@ const TeamsModal: React.FC<{
     reportChatThreadKey: string | undefined;
     onSetReportChatWebhookUrl: (url: string) => void;
     onCreateOrResetReportThread: (openingText: string) => Promise<void>;
-}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamScoutAwardMedia, onSetTeamReportMembers, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread }) => {
+    teamsConfigBackups: TeamsConfigBackup[];
+    onRestoreTeamsConfigBackup: (backup: TeamsConfigBackup) => void;
+}> = ({ teams, isEditable, isAdmin, authorizedEditorEmails, userOptions, memberDepartments, middleEmails, activeMedia, onClose, onCreateTeam, onRenameTeam, onDeleteTeam, onAddMember, onRemoveMember, onGrantEditor, onRevokeEditor, onSetMemberDepartment, onToggleMiddle, onSetTeamMedia, onSetTeamScoutAwardMedia, onSetTeamReportMembers, onSetTeamWeekStartDay, onSetTeamChatWebhookUrl, onCreateOrResetTeamThread, reportChatWebhookUrl, reportChatThreadKey, onSetReportChatWebhookUrl, onCreateOrResetReportThread, teamsConfigBackups, onRestoreTeamsConfigBackup }) => {
     const [newTeamName, setNewTeamName] = useState('');
     const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
     const [editedName, setEditedName] = useState('');
@@ -5066,7 +5100,7 @@ const TeamsModal: React.FC<{
     const [newEditorEmail, setNewEditorEmail] = useState('');
     // Collapsed by default — most visits are just to add/remove a team member, so these four
     // (rarely touched) sections shouldn't force scrolling past them every time.
-    const [openSections, setOpenSections] = useState({ permissions: false, departments: false, middle: false, chat: false });
+    const [openSections, setOpenSections] = useState({ permissions: false, departments: false, middle: false, chat: false, backup: false });
     const toggleSection = (key: keyof typeof openSections) => setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
 
     // チームが増えて一覧が縦に長くなった際、チームごとに詳細（メンバー・媒体・週の始まり・
@@ -5672,6 +5706,52 @@ const TeamsModal: React.FC<{
                                     </button>
                                     {createThreadError && <p className="no-data-message" style={{ marginTop: '0.4rem' }}>{createThreadError}</p>}
                                 </div>
+                            </div>
+                        </div>
+                    )}
+                    {isAdmin && (
+                        <div className="teams-permission-section">
+                            <hr style={{ margin: '1rem 0' }} />
+                            <h4
+                                className="sub-section-title teams-permission-section-header"
+                                onClick={() => toggleSection('backup')}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('backup'); } }}
+                                role="button"
+                                tabIndex={0}
+                                aria-expanded={openSections.backup}
+                            >
+                                <span>チーム設定のバックアップ</span>
+                                <span className={`toggle-icon ${openSections.backup ? 'open' : ''}`}>▼</span>
+                            </h4>
+                            <div className={`collapsible-content ${openSections.backup ? 'open' : ''}`}>
+                                <p className="modal-description">
+                                    チーム設定（チーム編成・メンバー・所属部署・編集権限・BP/ミドル権限・Google Chat通知設定・月間目標）は、
+                                    変更があるたびにあなたの個人データへ自動で控えを取っています（新しい順に最大{TEAMS_CONFIG_BACKUP_LIMIT}件）。
+                                    チーム設定が消えた・おかしくなった場合は、正常だった時点の「この時点に戻す」を押すと、その内容で全員分のチーム設定を置き換えます。
+                                </p>
+                                {teamsConfigBackups.length === 0 ? (
+                                    <p className="no-data-message">まだバックアップはありません。</p>
+                                ) : (
+                                    <ul className="teams-member-list">
+                                        {teamsConfigBackups.map(backup => {
+                                            const memberCount = new Set(backup.config.teams.flatMap(t => t.memberEmails)).size;
+                                            return (
+                                                <li key={backup.savedAt} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                                    <span>
+                                                        {new Date(backup.savedAt).toLocaleString('ja-JP')}
+                                                        {' '}— {backup.config.teams.length}チーム・{memberCount}名
+                                                        <span className="form-helper-text" style={{ display: 'block' }}>
+                                                            {backup.config.teams.map(t => t.name).join('、')}
+                                                        </span>
+                                                    </span>
+                                                    <button type="button" className="cancel-button" onClick={() => onRestoreTeamsConfigBackup(backup)}>
+                                                        この時点に戻す
+                                                    </button>
+                                                </li>
+                                            );
+                                        })}
+                                    </ul>
+                                )}
                             </div>
                         </div>
                     )}
@@ -14572,6 +14652,8 @@ const App: React.FC = () => {
     scoutAchievementLog: d.scoutAchievementLog,
     // 同じ理由: 会議用レポートの上書き値も許可リストに無いと再読み込みのたびに消える。
     meetingForecast: d.meetingForecast,
+    // 同じ理由: チーム設定の控えも許可リストに無いと再読み込みのたびに消え、復元に使えない。
+    teamsConfigBackups: d.teamsConfigBackups,
   }), [currentIdentity]);
 
   // Load the signed-in user's data. Drive is the source of truth, but if we have a local
@@ -14801,6 +14883,7 @@ const App: React.FC = () => {
         setReportChatWebhookUrl(result.data?.reportChatWebhookUrl);
         setReportChatThreadKey(result.data?.reportChatThreadKey);
         setReportMonthlyTarget(result.data?.reportMonthlyTarget || {});
+        if (result.data) recordTeamsConfigBackup(result.data);
         setDriveReauthNeeded(false);
         if (!hasAppliedDefaultDivisionRef.current) {
           hasAppliedDefaultDivisionRef.current = true;
@@ -15339,7 +15422,10 @@ const App: React.FC = () => {
     middleEmailsUpdater: (latest: string[]) => string[],
     reportChatWebhookUrlPatch?: { value: string | undefined },
     reportChatThreadKeyPatch?: { value: string | undefined },
-    reportMonthlyTargetPatch?: { value: { repliesTarget?: number; interviewsTarget?: number } }
+    reportMonthlyTargetPatch?: { value: { repliesTarget?: number; interviewsTarget?: number } },
+    // バックアップからの復元など、意図して設定を丸ごと置き換える場合だけtrue。下の「一度に大量に
+    // 減る保存」の安全弁を外す。
+    options?: { allowBulkReplace?: boolean }
   ) => {
     // teams/authorizedEditorEmails/memberDepartments/middleEmailsは、Driveから読み直さず
     // このタブのローカルstateをそのまま「全データ」として書き込むと、読み込みが完了する前
@@ -15392,21 +15478,39 @@ const App: React.FC = () => {
           setTeamsConfigReloadNonce(n => n + 1);
           return;
         }
-        const finalTeams = teamsUpdater(latest?.teams || []);
-        // 最後の安全弁: 1回の操作（チーム削除は1件ずつ）で複数あったチームが一気に0件になるのは
-        // 通常の操作ではあり得ないため、何らかの不整合とみなして保存しない。
-        if ((latest?.teams?.length ?? 0) >= 2 && finalTeams.length === 0) {
-          console.error('Refusing to save teams config that would remove all teams at once', { before: latest?.teams?.length });
-          alert('全チームが一度に消える内容の保存を検知したため中断しました（データ消失防止）。ページを再読み込みしてください。');
-          setTeamsConfigReloadNonce(n => n + 1);
+        // 修正前の古い画面（JSバンドル）を開いたままのタブからは保存させない。古いコードには
+        // ここまでの安全弁が入っていないため、そのタブが共有ファイルを壊す余地を残さないよう、
+        // 新しいバージョンが公開されていたら保存を中断して再読み込みしてもらう。
+        if (await isRunningStaleBundle()) {
+          alert('アプリの新しいバージョンが公開されています。データ保護のため保存を中断し、ページを再読み込みします。再読み込み後にもう一度操作してください。');
+          window.location.reload();
           return;
         }
+        const finalTeams = teamsUpdater(latest?.teams || []);
         const finalAuthorizedEditors = authorizedEditorsUpdater(latest?.authorizedEditorEmails || []);
         const finalDepartments = departmentsUpdater(latest?.memberDepartments || {});
         const finalMiddleEmails = middleEmailsUpdater(latest?.middleEmails || []);
         const finalReportChatWebhookUrl = reportChatWebhookUrlPatch ? reportChatWebhookUrlPatch.value : latest?.reportChatWebhookUrl;
         const finalReportChatThreadKey = reportChatThreadKeyPatch ? reportChatThreadKeyPatch.value : latest?.reportChatThreadKey;
         const finalReportMonthlyTarget = reportMonthlyTargetPatch ? reportMonthlyTargetPatch.value : (latest?.reportMonthlyTarget || {});
+        // 最後の安全弁: 画面上の操作はどれも1回に1件（チーム1つ・メンバー1人・権限1人）しか
+        // 減らさない。1回の保存で2件以上一気に減るのは何らかの不整合（空の状態を土台にした上書き
+        // など）とみなして保存しない。意図的な丸ごと置き換え（バックアップからの復元）だけ例外。
+        if (!options?.allowBulkReplace && latest) {
+          const shrank = (before: number, after: number) => before >= 2 && after < before - 1;
+          const shrunkFields = [
+            shrank(latest.teams?.length ?? 0, finalTeams.length) && 'チーム',
+            shrank(Object.keys(latest.memberDepartments || {}).length, Object.keys(finalDepartments).length) && '所属部署',
+            shrank(latest.authorizedEditorEmails?.length ?? 0, finalAuthorizedEditors.length) && '編集権限',
+            shrank(latest.middleEmails?.length ?? 0, finalMiddleEmails.length) && 'BP/ミドル権限',
+          ].filter(Boolean);
+          if (shrunkFields.length > 0) {
+            console.error('Refusing to save teams config that would remove many entries at once', shrunkFields);
+            alert(`チーム設定の${shrunkFields.join('・')}が一度に大量に消える内容の保存を検知したため中断しました（データ消失防止）。ページを再読み込みしてからもう一度お試しください。`);
+            setTeamsConfigReloadNonce(n => n + 1);
+            return;
+          }
+        }
         const payload: TeamsConfig = {
           schemaVersion: 1,
           teams: finalTeams,
@@ -15430,6 +15534,7 @@ const App: React.FC = () => {
         if (!reportChatWebhookUrlPatch) setReportChatWebhookUrl(finalReportChatWebhookUrl);
         if (!reportChatThreadKeyPatch) setReportChatThreadKey(finalReportChatThreadKey);
         if (!reportMonthlyTargetPatch) setReportMonthlyTarget(finalReportMonthlyTarget);
+        recordTeamsConfigBackup(payload);
       } catch (error) {
         console.error('Failed to save teams config', error);
         alert('チーム設定の保存に失敗しました。');
@@ -15437,6 +15542,61 @@ const App: React.FC = () => {
         teamsWritesInFlightRef.current--;
       }
     });
+  };
+
+  // 管理者本人のUserDataに、チーム設定の控えを残す（TeamsConfigBackup参照）。直前の控えと
+  // 内容が同じなら何もしない。チームが1つも無い状態は「控えるべき正常な状態」ではないので
+  // 残さない（空の状態で古い正常な控えを押し出さないため）。
+  const recordTeamsConfigBackup = (config: TeamsConfig) => {
+    if (currentIdentity?.email !== TEAMS_ADMIN_EMAIL) return;
+    if (!config.teams || config.teams.length === 0) return;
+    const snapshot: TeamsConfig = JSON.parse(JSON.stringify(config));
+    const snapshotJson = JSON.stringify(snapshot);
+    setCurrentUserData(prev => {
+      if (!prev) return prev;
+      const list = prev.teamsConfigBackups || [];
+      if (list[0] && JSON.stringify(list[0].config) === snapshotJson) return prev;
+      return {
+        ...prev,
+        teamsConfigBackups: [{ savedAt: new Date().toISOString(), config: snapshot }, ...list].slice(0, TEAMS_CONFIG_BACKUP_LIMIT),
+      };
+    });
+  };
+
+  // サインイン直後はUserDataとチーム設定の読み込み順が前後するため、両方そろった時点で
+  // 一度控えを取る（チーム設定の読み込み時点でUserDataがまだ無いと、上の控えは取られない）。
+  const hasRecordedInitialTeamsBackupRef = useRef(false);
+  useEffect(() => {
+    if (hasRecordedInitialTeamsBackupRef.current) return;
+    if (!teamsConfigLoaded || !currentUserData || teamsWritesInFlightRef.current > 0) return;
+    hasRecordedInitialTeamsBackupRef.current = true;
+    recordTeamsConfigBackup({
+      schemaVersion: 1,
+      teams,
+      authorizedEditorEmails: teamsAuthorizedEditors,
+      memberDepartments,
+      middleEmails,
+      reportChatWebhookUrl,
+      reportChatThreadKey,
+      reportMonthlyTarget,
+    });
+  }, [teamsConfigLoaded, currentUserData]);
+
+  // チーム管理画面の「チーム設定のバックアップ」から、控えの内容で共有ファイルを丸ごと置き換える。
+  const handleRestoreTeamsConfigBackup = (backup: TeamsConfigBackup) => {
+    const b = backup.config;
+    const savedAtLabel = new Date(backup.savedAt).toLocaleString('ja-JP');
+    if (!window.confirm(`${savedAtLabel} 時点のチーム設定（${b.teams.length}チーム）で、現在のチーム設定を丸ごと置き換えます。よろしいですか？`)) return;
+    persistTeamsConfig(
+      () => b.teams,
+      () => b.authorizedEditorEmails || [],
+      () => b.memberDepartments || {},
+      () => b.middleEmails || [],
+      { value: b.reportChatWebhookUrl },
+      { value: b.reportChatThreadKey },
+      { value: b.reportMonthlyTarget || {} },
+      { allowBulkReplace: true }
+    );
   };
 
   const identity = <T,>(value: T): T => value;
@@ -17287,6 +17447,8 @@ const App: React.FC = () => {
           reportChatThreadKey={reportChatThreadKey}
           onSetReportChatWebhookUrl={handleSetReportChatWebhookUrl}
           onCreateOrResetReportThread={handleCreateOrResetReportThread}
+          teamsConfigBackups={currentUserData?.teamsConfigBackups || []}
+          onRestoreTeamsConfigBackup={handleRestoreTeamsConfigBackup}
         />
       )}
       {isChangelogModalOpen && (
