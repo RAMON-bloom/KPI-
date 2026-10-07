@@ -4278,6 +4278,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-07',
+    items: [
+      '【不具合修正】チーム設定（チーム編成・メンバー・Chat通知先・月間目標など）が、所属部署などを変更したタイミングで全て消えてしまうことがある不具合を修正。保存の直前に最新の設定を読み込めなかった場合（Googleドライブが一時的に混み合っている時など）に、空の設定で上書き保存していたのが原因。読み込めなかった場合は保存を中断し、時間をおいて再度お試しいただくようメッセージを表示するようにした',
+    ],
+  },
+  {
     date: '2026-10-05',
     items: [
       'RDSの返信数を数える際に、同じ候補者の2通目以降のメッセージを除外するために遡って確認する期間を、過去30日から過去10日に短縮した（Gmailの取得量を減らすため）。最後のやり取りから10日以上空いて同じ候補者から再度メッセージが来た場合は、新しい返信として数えられます',
@@ -15364,14 +15370,37 @@ const App: React.FC = () => {
     teamsWritesInFlightRef.current++;
     teamsWriteQueueRef.current = teamsWriteQueueRef.current.catch(() => {}).then(async () => {
       try {
+        // 保存直前の読み直しに失敗した（Drive APIのクォータ超過・一時的な権限エラー等）場合は、
+        // 保存自体を中断する。以前はここで失敗を握りつぶしてlatest=nullのまま続行していたため、
+        // 「空の設定」に今回の変更だけを適用した内容で共有ファイルを丸ごと上書きし、全チーム・
+        // Webhook・月間目標を消してしまっていた（2026-10-07に実際に発生）。
         let latest: TeamsConfig | null = null;
         try {
           const result = await loadTeamsConfig<TeamsConfig>(TEAMS_ADMIN_EMAIL);
           latest = result.data;
+          if (result.driveFileId) teamsDriveFileIdRef.current = result.driveFileId;
         } catch (error) {
-          console.error('Failed to refresh teams config before saving', error);
+          console.error('Failed to refresh teams config before saving; aborting save to avoid data loss', error);
+          alert('チーム設定の最新状態を読み込めなかったため、保存を中断しました（データ消失防止）。少し待ってから再度お試しください。');
+          setTeamsConfigReloadNonce(n => n + 1);
+          return;
+        }
+        // ファイル自体は存在するはずなのに中身が読めなかった場合も、空を土台にした上書きはしない。
+        if (!latest && teamsDriveFileIdRef.current) {
+          console.error('Teams config file exists but returned no data; aborting save to avoid data loss');
+          alert('チーム設定の最新状態を読み込めなかったため、保存を中断しました（データ消失防止）。少し待ってから再度お試しください。');
+          setTeamsConfigReloadNonce(n => n + 1);
+          return;
         }
         const finalTeams = teamsUpdater(latest?.teams || []);
+        // 最後の安全弁: 1回の操作（チーム削除は1件ずつ）で複数あったチームが一気に0件になるのは
+        // 通常の操作ではあり得ないため、何らかの不整合とみなして保存しない。
+        if ((latest?.teams?.length ?? 0) >= 2 && finalTeams.length === 0) {
+          console.error('Refusing to save teams config that would remove all teams at once', { before: latest?.teams?.length });
+          alert('全チームが一度に消える内容の保存を検知したため中断しました（データ消失防止）。ページを再読み込みしてください。');
+          setTeamsConfigReloadNonce(n => n + 1);
+          return;
+        }
         const finalAuthorizedEditors = authorizedEditorsUpdater(latest?.authorizedEditorEmails || []);
         const finalDepartments = departmentsUpdater(latest?.memberDepartments || {});
         const finalMiddleEmails = middleEmailsUpdater(latest?.middleEmails || []);
