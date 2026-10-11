@@ -14163,7 +14163,7 @@ const AllUsersDashboard: React.FC<{
     setCustomGrossProfitEndDate(fmt(monthEnd));
     setIsCustomGrossProfitPeriodEnabled(true);
   };
-  // 開始月〜終了月をワンクリックで指定するためのショートカット（今年度・直近3ヶ月など）。
+  // 開始月〜終了月をワンクリックで指定するためのショートカット（今期・賞与対象期間など）。
   const handleSetCustomGrossProfitRange = (start: Date, end: Date) => {
     const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     setCustomGrossProfitStartDate(fmt(start));
