@@ -1114,6 +1114,11 @@ interface UserData {
   // で保存する（他のXxxDefaultsと同じ「今の状態をそのままデフォルトとして保存」パターン）。
   // 未設定/空配列ならこれまで通りDEFAULT_TREND_METRIC_KEYS（スカウト返信数のみ）から始まる。
   monthlyTrendMetricDefaults?: string[];
+  // 個人実績タブで目標入力・進捗確認の対象にする媒体（MediaEntry.id）。チームの「使用する媒体」
+  // （Team.mediaIds）とは別の、本人だけの表示設定。未設定（undefined）は「絞り込みなし」=
+  // アーカイブされていない媒体すべてを表示（従来通り）。チェックを外した媒体は個人実績タブの
+  // 媒体別の表示・目標入力欄から隠れるだけで、保存済みの実績・目標値はそのまま残る。
+  personalMediaIds?: string[];
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -4310,6 +4315,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '個人実績タブに「表示する媒体」を追加。目標入力や進捗確認に使う媒体を各自で選べ、チェックを外した媒体は「本日の進捗」「週間サマリー」「媒体別 月次進捗」と月次・週次・日次の目標設定に表示されなくなります。チームの「使用する媒体」とは別の、本人だけの設定です（入力済みの実績・目標値は消えません）',
       '全ユーザータブ・チーム別タブの「想定粗利」カードにも「内定承諾一覧（成約月ごと）」を追加。何月に誰（担当者・候補者・企業）が内定承諾したかを、選択中の期間または全期間で確認できます。成約月の変更は、自分の候補者と、ミドルとして代理編集できるメンバーの候補者に限り一覧上から行えます（それ以外は閲覧のみ）',
       '【不具合修正】想定粗利を「内定承諾」などの選考フェーズで絞り込んでも、正しい金額にならないことがある不具合を修正。複数社を受けている候補者は確度の評価だけで1社を選んで集計していたため、確度が未入力だと内定承諾した企業ではなく別の企業の選考で数えられていたのが原因。内定承諾の選考がある候補者は、必ずその選考で集計するようにした（内定承諾が無い場合も、お見送り・選考辞退より進行中の選考を優先します）',
       '【不具合修正】想定粗利の「選考フェーズで絞り込み」が、合計カードにしか効かず「メンバー別想定粗利」「月別想定粗利」「メンバー別×月別」の表には反映されていなかったのを修正（全ユーザー/チーム別タブ・個人実績タブ・パイプラインのチーム表示すべて）',
@@ -14755,7 +14761,7 @@ type SectionVisibilityKeys =
   | 'monthlyProgress' | 'monthlyPerformance' | 'monthOverMonthPerformance'
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
-  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit'
+  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit' | 'personalMediaSettings'
   | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit'
   | 'allUsersMonthlyTrend';
 
@@ -14988,6 +14994,7 @@ const App: React.FC = () => {
     history: false,
     customPeriodReport: false,
     personalGrossProfit: false,
+    personalMediaSettings: false,
     allUsersProgress: false,
     allUsersDayOfWeekRate: false,
     allUsersWeeklySummary: false,
@@ -15198,6 +15205,8 @@ const App: React.FC = () => {
     // 同じ理由: 月別パフォーマンストレンドのデフォルトチェック項目も許可リストに無いと保存
     // 直後は効いていても再読み込みで消える。
     monthlyTrendMetricDefaults: d.monthlyTrendMetricDefaults,
+    // 同じ理由: 個人実績タブで表示する媒体の設定も許可リストに無いと再読み込みで消える。
+    personalMediaIds: d.personalMediaIds,
     // 同じ理由: スカウト達成の累計ログも許可リストに無いと、記録した直後は効いていても
     // 再読み込みのたびに消えてしまい「目標を変えても累計は変わらない」が実現できない。
     scoutAchievementLog: d.scoutAchievementLog,
@@ -15578,6 +15587,25 @@ const App: React.FC = () => {
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
+  // 個人実績タブで目標入力・進捗確認に使う媒体 — 本人が「表示する媒体」で選んだものだけ
+  // （UserData.personalMediaIds）。未設定なら従来通りactiveMediaすべて。チームの「使用する媒体」
+  // とは独立した設定で、全ユーザー/チーム別タブや実績入力画面には影響しない。
+  const personalMedia = useMemo(() => {
+    const ids = currentUserData?.personalMediaIds;
+    if (!ids) return activeMedia;
+    return activeMedia.filter(m => ids.includes(m.id));
+  }, [activeMedia, currentUserData?.personalMediaIds]);
+  const handleTogglePersonalMedia = (mediaId: string) => {
+    setCurrentUserData(prev => {
+      if (!prev) return prev;
+      const current = prev.personalMediaIds ?? activeMedia.map(m => m.id);
+      const next = current.includes(mediaId) ? current.filter(id => id !== mediaId) : [...current, mediaId];
+      return { ...prev, personalMediaIds: next };
+    });
+  };
+  const handleResetPersonalMedia = () => {
+    setCurrentUserData(prev => (prev ? { ...prev, personalMediaIds: undefined } : prev));
+  };
 
   const handleCustomPeriodExport = (label: string, exportUsers: string[]) => {
     if (!customExportStartDate || !customExportEndDate) {
@@ -17630,7 +17658,7 @@ const App: React.FC = () => {
           return entryTime >= weekStart && entryTime <= weekEnd;
       });
 
-      const allKeys = buildAllKpiKeys(activeMedia);
+      const allKeys = buildAllKpiKeys(personalMedia);
       const weeklyTotals = weeklyEntries.reduce((acc, entry) => {
           allKeys.forEach(key => {
               acc[key] = (acc[key] || 0) + (entry.values[key] || 0);
@@ -17638,7 +17666,7 @@ const App: React.FC = () => {
           return acc;
       }, {} as KpiTotals);
 
-      const mediaStats = activeMedia.map(source => {
+      const mediaStats = personalMedia.map(source => {
           const sourceKey = source.id;
           return {
               source: source.name,
@@ -17657,7 +17685,7 @@ const App: React.FC = () => {
       const totalInitialInterviews = mediaStats.reduce((sum, stat) => sum + stat.initialInterviews, 0);
 
       return { mediaStats, totalCandidatesSubmitted, totalInitialInterviews };
-  }, [entries, viewWeekStartDate, activeMedia]);
+  }, [entries, viewWeekStartDate, personalMedia]);
 
   // 週次/月次のスカウト目標達成バナー（ScoutAchievementBanner）専用の集計。weeklySummaryData/
   // monthlyTotalsは前週・前月ボタンで過去に移動できてしまう（履歴閲覧用）ため使い回せず、常に
@@ -18317,8 +18345,46 @@ const App: React.FC = () => {
                   <span className={`toggle-icon ${sectionVisibility.dailyProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="daily-progress-content" className={`collapsible-content ${sectionVisibility.dailyProgress ? 'open' : ''}`}>
-                   <DailyProgress activeMedia={activeMedia} todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
+                   <DailyProgress activeMedia={personalMedia} todayTotals={todayTotals} dailyKpiTargets={dailyKpiTargets} />
                 </div>
+            </section>
+
+            <section aria-labelledby="personal-media-settings-title">
+              <h2
+                id="personal-media-settings-title"
+                className="section-title collapsible-header"
+                onClick={() => toggleSection('personalMediaSettings')}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('personalMediaSettings'); } }}
+                role="button" tabIndex={0} aria-expanded={sectionVisibility.personalMediaSettings} aria-controls="personal-media-settings-content"
+              >
+                <span>表示する媒体（{currentUserData?.personalMediaIds ? `${personalMedia.length}/${activeMedia.length}媒体` : 'すべて'}）</span>
+                <span className={`toggle-icon ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>▼</span>
+              </h2>
+              <div id="personal-media-settings-content" className={`collapsible-content ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>
+                <p className="modal-description">
+                  個人実績タブの「本日の進捗」「週間サマリー」「媒体別 月次進捗」と各目標設定に表示する媒体を選べます。チェックを外した媒体は表示されなくなります（入力済みの実績・目標はそのまま残り、再度チェックすれば元通り表示されます）。チームの「使用する媒体」とは別の、あなただけの設定です。
+                </p>
+                <div className="comparison-user-checkbox-list">
+                  {activeMedia.map(m => (
+                    <label key={m.id} className="comparison-user-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={personalMedia.some(pm => pm.id === m.id)}
+                        onChange={() => handleTogglePersonalMedia(m.id)}
+                      />
+                      {m.name}
+                    </label>
+                  ))}
+                </div>
+                {currentUserData?.personalMediaIds && (
+                  <button type="button" onClick={handleResetPersonalMedia} className="secondary-action-button" style={{ marginTop: '0.5rem' }}>
+                    すべての媒体を表示に戻す
+                  </button>
+                )}
+                {currentUserData?.personalMediaIds && personalMedia.length === 0 && (
+                  <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の進捗・目標欄は表示されません。</p>
+                )}
+              </div>
             </section>
 
             <section aria-labelledby="weekly-summary-title">
@@ -18371,7 +18437,7 @@ const App: React.FC = () => {
                     </p>
                   )}
                   <div className="media-dashboard kpi-dashboard">
-                     {activeMedia.map(source => (
+                     {personalMedia.map(source => (
                           <MediaKpiCard
                               key={source.id}
                               source={source}
@@ -18541,7 +18607,7 @@ const App: React.FC = () => {
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 目標</h3>
                            <div className="media-kpi-grid">
-                             {activeMedia.map(source => {
+                             {personalMedia.map(source => {
                                  const sourceKey = source.id;
                                  const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
@@ -18605,7 +18671,7 @@ const App: React.FC = () => {
                              )}
                            </p>
                            <div className="media-kpi-grid">
-                             {activeMedia.map(source => {
+                             {personalMedia.map(source => {
                                  const sourceKey = source.id;
                                   const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
@@ -18663,7 +18729,7 @@ const App: React.FC = () => {
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 日次目標</h3>
                            <div className="media-kpi-grid">
-                             {activeMedia.map(source => {
+                             {personalMedia.map(source => {
                                  const sourceKey = source.id;
                                  const fields: {key: KpiKey, label: string}[] = [
                                      {key: `${sourceKey}_scoutsSent`, label: 'スカウト数'},
