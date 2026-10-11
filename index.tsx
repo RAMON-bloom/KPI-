@@ -4310,6 +4310,9 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '個人実績タブに「自分の想定粗利・内定承諾一覧」を追加。自分の候補者の想定粗利を、今月・前月/次月・任意の期間（「今期（3月〜翌2月）」などのワンクリック指定あり）で確認でき、複数月にまたがる期間では月別の内訳も表示します',
+      '同じく「内定承諾一覧」で、いつ（何月の成約として）誰が内定承諾したかを成約月ごとに確認できるようにした。一覧上で成約月を変更でき、変更すると想定粗利もその月に集計されます（非表示にした候補者の内定承諾も含みます）',
+      '想定粗利の「よく使う期間」に「前期」を追加',
       '全ユーザータブ・チーム別タブの「想定粗利」カードで、開始日〜終了日を指定して絞り込めるようにした（前月/次月の月送りより優先されます）。「直近3ヶ月」「今後3ヶ月」「今四半期」「今期」のワンクリック指定も追加（「今期」「今四半期」は会社の期に合わせ、3月〜翌2月・3ヶ月ごとの区切りで集計します）',
       '指定した期間が複数月にまたがる場合は、「月別想定粗利」（月ごとの対象件数・想定紹介料・想定媒体手数料・想定粗利と合計）と「メンバー別×月別」の集計表を表示するようにした（表示する値は想定粗利／想定紹介料／対象件数から切り替え可能）。「メンバー別想定粗利」の表にも合計行を追加',
       '全ユーザータブにも「想定粗利」カードを表示するようにした（比較対象に選んだユーザーの合計・メンバー別を確認できます）',
@@ -8087,6 +8090,22 @@ const splitPeriodIntoMonths = (period: { start: Date; end: Date }): { label: str
     return result;
 };
 
+// 想定粗利の期間指定で使う「よく使う期間」ボタンの定義（全ユーザー/チーム別タブ・個人実績タブ共通）。
+// 会社の期は3月始まり（3月〜翌2月）。四半期も期に合わせて3〜5月/6〜8月/9〜11月/12〜翌2月で区切る。
+const buildGrossProfitPeriodPresets = (now: Date = new Date()): { label: string; start: Date; end: Date }[] => {
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    const fiscalStartYear = m >= 2 ? y : y - 1;
+    const quarterStartMonth = Math.floor((m - 2 + 12) % 12 / 3) * 3 + 2 - (m < 2 ? 12 : 0);
+    return [
+        { label: '直近3ヶ月', start: new Date(y, m - 2, 1), end: new Date(y, m + 1, 0) },
+        { label: '今後3ヶ月', start: new Date(y, m, 1), end: new Date(y, m + 3, 0) },
+        { label: '今四半期', start: new Date(y, quarterStartMonth, 1), end: new Date(y, quarterStartMonth + 3, 0) },
+        { label: `今期（${fiscalStartYear}年3月〜${fiscalStartYear + 1}年2月）`, start: new Date(fiscalStartYear, 2, 1), end: new Date(fiscalStartYear + 1, 2, 0) },
+        { label: `前期（${fiscalStartYear - 1}年3月〜${fiscalStartYear}年2月）`, start: new Date(fiscalStartYear - 1, 2, 1), end: new Date(fiscalStartYear, 2, 0) },
+    ];
+};
+
 const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
 
 /**
@@ -8308,6 +8327,268 @@ const GrossProfitSummary: React.FC<{
                         </table>
                     </div>
                 </>
+            )}
+        </div>
+    );
+};
+
+
+// 内定承諾の「成約月」— 想定粗利の集計と同じ基準（選考の意思決定時期を優先し、未入力なら
+// 候補者の見込み月）で、どの月の成約として数えられているかを yyyy-mm で返す。どちらも無ければ空文字。
+const getAcceptedDealMonth = (candidate: Candidate, application: CompanyApplication): string =>
+    application.expectedDecisionDate ? application.expectedDecisionDate.slice(0, 7) : (candidate.expectedDecisionMonth || '');
+
+// 選考トラック上で最後に「内定承諾」になった日（記録が無ければ空文字）。
+const getAcceptedOnDate = (application: CompanyApplication): string => {
+    const history = application.stageHistory || [];
+    for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].stage === '内定承諾') return history[i].date || '';
+    }
+    return '';
+};
+
+const formatYearMonthLabel = (yyyymm: string): string => {
+    if (!yyyymm) return '成約月未設定';
+    const [y, m] = yyyymm.split('-').map(Number);
+    return `${y}年${m}月`;
+};
+
+/**
+ * 個人実績タブの「自分の想定粗利・内定承諾一覧」。自分の候補者だけを対象に、全ユーザー/チーム別
+ * タブの想定粗利カードと同じ期間指定（今月既定・前月/次月・任意期間・よく使う期間）で想定粗利を
+ * 集計し、期間が複数月にまたがる場合は月別の内訳も出す。あわせて内定承諾済みの選考を成約月ごとに
+ * 一覧し、成約月（=その選考の意思決定時期）をその場で付け替えられる——付け替えると想定粗利の
+ * 集計月も同時に変わる（どちらも同じ意思決定時期を見ているため）。
+ */
+const PersonalGrossProfitSection: React.FC<{
+    candidates: Candidate[];
+    allMedia: MediaEntry[];
+    onSaveCandidate: (candidate: Candidate) => void;
+}> = ({ candidates, allMedia, onSaveCandidate }) => {
+    const [monthOffset, setMonthOffset] = useState(0);
+    const [customStartDate, setCustomStartDate] = useState('');
+    const [customEndDate, setCustomEndDate] = useState('');
+    const [isCustomEnabled, setIsCustomEnabled] = useState(false);
+    const fmtDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const customPeriod = useMemo(() => {
+        if (!isCustomEnabled || !customStartDate || !customEndDate) return null;
+        return { start: new Date(customStartDate + 'T00:00:00'), end: new Date(customEndDate + 'T23:59:59') };
+    }, [isCustomEnabled, customStartDate, customEndDate]);
+    const monthPeriod = useMemo(() => getMonthRangeOverride(monthOffset), [monthOffset]);
+    const periodOverride = customPeriod ?? monthPeriod;
+    const periodLabel = periodOverride ? `${formatPeriodDate(periodOverride.start)}〜${formatPeriodDate(periodOverride.end)}` : '今月';
+
+    const handleToggleCustom = () => {
+        if (customPeriod) {
+            setIsCustomEnabled(false);
+            return;
+        }
+        if (!customStartDate || !customEndDate) {
+            alert('開始日と終了日を指定してください。');
+            return;
+        }
+        if (customStartDate > customEndDate) {
+            alert('終了日は開始日以降の日付を指定してください。');
+            return;
+        }
+        setIsCustomEnabled(true);
+    };
+    const handleShiftCustomMonth = (offset: number) => {
+        const reference = customStartDate ? new Date(customStartDate + 'T00:00:00') : new Date();
+        setCustomStartDate(fmtDate(new Date(reference.getFullYear(), reference.getMonth() + offset, 1)));
+        setCustomEndDate(fmtDate(new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0)));
+        setIsCustomEnabled(true);
+    };
+    const handleSetRange = (start: Date, end: Date) => {
+        setCustomStartDate(fmtDate(start));
+        setCustomEndDate(fmtDate(end));
+        setIsCustomEnabled(true);
+    };
+
+    const periodTotal = useMemo(
+        () => sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, periodOverride)),
+        [candidates, allMedia, periodOverride]
+    );
+    const monthlyRows = useMemo(() => {
+        if (!periodOverride) return null;
+        const months = splitPeriodIntoMonths(periodOverride);
+        if (months.length < 2) return null;
+        return months.map(month => ({
+            label: month.label,
+            total: sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, { start: month.start, end: month.end })),
+        }));
+    }, [candidates, allMedia, periodOverride]);
+
+    // 内定承諾の一覧 — 非表示（掘り起しリスト・アーカイブ）にした候補者も、想定粗利の集計と同じく含める。
+    const [showAllAccepted, setShowAllAccepted] = useState(false);
+    type AcceptedDealRow = {
+        candidate: Candidate;
+        application: CompanyApplication;
+        dealMonth: string;
+        acceptedOn: string;
+        result: { revenue: number; cost: number; profit: number } | null;
+    };
+    const acceptedDeals = useMemo(() => {
+        const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
+        const rows: AcceptedDealRow[] = [];
+        candidates.forEach(candidate => {
+            candidate.applications.forEach(application => {
+                if (application.isHidden || application.stage !== '内定承諾') return;
+                if (!showAllAccepted && !isDecisionInPeriod(candidate, application, periodOverride)) return;
+                rows.push({
+                    candidate,
+                    application,
+                    dealMonth: getAcceptedDealMonth(candidate, application),
+                    acceptedOn: getAcceptedOnDate(application),
+                    result: computeApplicationGrossProfit(candidate, application, mediaFeeRateById),
+                });
+            });
+        });
+        // 成約月の新しい順（未設定は末尾）、同じ月の中は内定承諾日の新しい順
+        rows.sort((a, b) => {
+            if (a.dealMonth !== b.dealMonth) {
+                if (!a.dealMonth) return 1;
+                if (!b.dealMonth) return -1;
+                return b.dealMonth.localeCompare(a.dealMonth);
+            }
+            return b.acceptedOn.localeCompare(a.acceptedOn);
+        });
+        return rows;
+    }, [candidates, allMedia, periodOverride, showAllAccepted]);
+    const acceptedDealGroups = useMemo(() => {
+        const groups: { month: string; rows: AcceptedDealRow[] }[] = [];
+        acceptedDeals.forEach((row: AcceptedDealRow) => {
+            const last = groups[groups.length - 1];
+            if (last && last.month === row.dealMonth) last.rows.push(row);
+            else groups.push({ month: row.dealMonth, rows: [row] });
+        });
+        return groups;
+    }, [acceptedDeals]);
+
+    const handleChangeDealMonth = (candidate: Candidate, applicationId: string, yyyymm: string) => {
+        if (!yyyymm) return;
+        onSaveCandidate({
+            ...candidate,
+            applications: candidate.applications.map(app =>
+                app.id === applicationId ? { ...app, expectedDecisionDate: `${yyyymm}-01` } : app
+            ),
+        });
+    };
+
+    return (
+        <div className="gross-profit-summary">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <button type="button" onClick={() => setMonthOffset(o => o - 1)} disabled={isCustomEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                <span className="gmail-scout-message" style={{ margin: 0 }}>{periodLabel}</span>
+                <button type="button" onClick={() => setMonthOffset(o => o + 1)} disabled={isCustomEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            </div>
+            <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
+                <span>期間を指定して絞り込み・集計:</span>
+                <button type="button" onClick={() => handleShiftCustomMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+                <input type="date" value={customStartDate} onChange={(e) => setCustomStartDate(e.target.value)} aria-label="自分の想定粗利の開始日" />
+                <span>〜</span>
+                <input type="date" value={customEndDate} onChange={(e) => setCustomEndDate(e.target.value)} aria-label="自分の想定粗利の終了日" />
+                <button type="button" onClick={() => handleShiftCustomMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+                <button type="button" onClick={handleToggleCustom} className="secondary-action-button">
+                    {isCustomEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
+                </button>
+            </div>
+            <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
+                <span>よく使う期間:</span>
+                {buildGrossProfitPeriodPresets().map(p => (
+                    <button key={p.label} type="button" onClick={() => handleSetRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
+                ))}
+            </div>
+
+            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} />
+
+            {monthlyRows && (
+                <>
+                    <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{periodLabel}）</h3>
+                    <div className="all-users-table-container">
+                        <table className="weekly-summary-table">
+                            <thead>
+                                <tr>
+                                    <th>月</th>
+                                    <th>対象件数</th>
+                                    <th>想定紹介料</th>
+                                    <th>想定媒体手数料</th>
+                                    <th>想定粗利</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {[...monthlyRows, { label: '合計', total: periodTotal }].map(row => (
+                                    <tr key={row.label} style={row.label === '合計' ? { fontWeight: 'bold' } : undefined}>
+                                        <td>{row.label}</td>
+                                        <td>{row.total.count}件{row.total.count > row.total.estimableCount && `（うち算出可能 ${row.total.estimableCount}件）`}</td>
+                                        <td>{formatManYen(row.total.revenue)}</td>
+                                        <td>{formatManYen(row.total.cost)}</td>
+                                        <td>{formatManYen(row.total.profit)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </>
+            )}
+
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>内定承諾一覧（成約月ごと）</h3>
+            <div className="pipeline-sort-controls">
+                <button type="button" onClick={() => setShowAllAccepted(false)} className={!showAllAccepted ? 'active' : ''}>{periodLabel}の成約</button>
+                <button type="button" onClick={() => setShowAllAccepted(true)} className={showAllAccepted ? 'active' : ''}>全期間</button>
+            </div>
+            <p className="gross-profit-note">
+                成約月を変更すると、その選考の意思決定時期が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
+            </p>
+            {acceptedDealGroups.length === 0 ? (
+                <p className="no-data-message">{showAllAccepted ? '内定承諾の選考はまだありません。' : `${periodLabel}に成約した内定承諾の選考はありません。`}</p>
+            ) : (
+                <div className="all-users-table-container">
+                    <table className="weekly-summary-table">
+                        <thead>
+                            <tr>
+                                <th>成約月</th>
+                                <th>候補者</th>
+                                <th>企業</th>
+                                <th>内定承諾日</th>
+                                <th>想定紹介料</th>
+                                <th>想定粗利</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {acceptedDealGroups.map(group => {
+                                const groupRevenue = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.revenue || 0), 0);
+                                const groupProfit = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.profit || 0), 0);
+                                return (
+                                    <React.Fragment key={group.month || 'unset'}>
+                                        <tr style={{ fontWeight: 'bold' }}>
+                                            <td colSpan={4}>{formatYearMonthLabel(group.month)}（{group.rows.length}件）</td>
+                                            <td>{formatManYen(groupRevenue)}</td>
+                                            <td>{formatManYen(groupProfit)}</td>
+                                        </tr>
+                                        {group.rows.map(({ candidate, application, dealMonth, acceptedOn, result }) => (
+                                            <tr key={`${candidate.id}:${application.id}`}>
+                                                <td>
+                                                    <input
+                                                        type="month"
+                                                        value={dealMonth}
+                                                        onChange={(e) => handleChangeDealMonth(candidate, application.id, e.target.value)}
+                                                        aria-label={`${candidate.name}さん（${application.companyName}）の成約月`}
+                                                    />
+                                                </td>
+                                                <td>{candidate.name}{candidate.isHidden && <small>（非表示）</small>}</td>
+                                                <td>{application.companyName}</td>
+                                                <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
+                                                <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
+                                                <td>{result ? formatManYen(result.profit) : '未入力'}</td>
+                                            </tr>
+                                        ))}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
             )}
         </div>
     );
@@ -13837,23 +14118,9 @@ const AllUsersDashboard: React.FC<{
           </div>
           <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
             <span>よく使う期間:</span>
-            {(() => {
-              const now = new Date();
-              const y = now.getFullYear();
-              const m = now.getMonth();
-              const fiscalStartYear = m >= 2 ? y : y - 1;
-              const quarterStartMonth = Math.floor((m - 2 + 12) % 12 / 3) * 3 + 2 - (m < 2 ? 12 : 0);
-              const presets: { label: string; start: Date; end: Date }[] = [
-                { label: '直近3ヶ月', start: new Date(y, m - 2, 1), end: new Date(y, m + 1, 0) },
-                { label: '今後3ヶ月', start: new Date(y, m, 1), end: new Date(y, m + 3, 0) },
-                // 会社の期は3月始まり（3月〜翌2月）。四半期も期に合わせて3〜5月/6〜8月/9〜11月/12〜翌2月で区切る。
-                { label: '今四半期', start: new Date(y, quarterStartMonth, 1), end: new Date(y, quarterStartMonth + 3, 0) },
-                { label: `今期（${fiscalStartYear}年3月〜${fiscalStartYear + 1}年2月）`, start: new Date(fiscalStartYear, 2, 1), end: new Date(fiscalStartYear + 1, 2, 0) },
-              ];
-              return presets.map(p => (
-                <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
-              ));
-            })()}
+            {buildGrossProfitPeriodPresets().map(p => (
+              <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
+            ))}
           </div>
           <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} />
           {grossProfitMonthlyBreakdown && (
@@ -14411,7 +14678,7 @@ type SectionVisibilityKeys =
   | 'monthlyProgress' | 'monthlyPerformance' | 'monthOverMonthPerformance'
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
-  | 'dailyProgress' | 'customPeriodReport'
+  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit'
   | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit'
   | 'allUsersMonthlyTrend';
 
@@ -14643,6 +14910,7 @@ const App: React.FC = () => {
     dailyProgress: true,
     history: false,
     customPeriodReport: false,
+    personalGrossProfit: false,
     allUsersProgress: false,
     allUsersDayOfWeekRate: false,
     allUsersWeeklySummary: false,
@@ -18101,6 +18369,25 @@ const App: React.FC = () => {
               </div>
             </section>
             
+            <section aria-labelledby="personal-gross-profit-title">
+              <h2
+                id="personal-gross-profit-title"
+                className="section-title collapsible-header"
+                onClick={() => toggleSection('personalGrossProfit')}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('personalGrossProfit'); } }}
+                role="button"
+                tabIndex={0}
+                aria-expanded={sectionVisibility.personalGrossProfit}
+                aria-controls="personal-gross-profit-content"
+              >
+                <span>自分の想定粗利・内定承諾一覧</span>
+                <span className={`toggle-icon ${sectionVisibility.personalGrossProfit ? 'open' : ''}`}>▼</span>
+              </h2>
+              <div id="personal-gross-profit-content" className={`collapsible-content ${sectionVisibility.personalGrossProfit ? 'open' : ''}`}>
+                <PersonalGrossProfitSection candidates={candidates} allMedia={allMedia} onSaveCandidate={handleSaveCandidate} />
+              </div>
+            </section>
+
             <section aria-labelledby="custom-report-title">
                <h2
                 id="custom-report-title"

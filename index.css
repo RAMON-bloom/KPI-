@@ -541,6 +541,7 @@ section {
    滑らかさを保つため5000pxのまま）。*/
 #all-users-progress-content.open,
 #all-users-gross-profit-content.open,
+#personal-gross-profit-content.open,
 #all-users-member-weekly-summary-content.open,
 #meeting-forecast-content.open {
   max-height: 200000px;
