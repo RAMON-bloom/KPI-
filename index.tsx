@@ -4308,6 +4308,14 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-11',
+    items: [
+      '全ユーザータブ・チーム別タブの「想定粗利」カードで、開始日〜終了日を指定して絞り込めるようにした（前月/次月の月送りより優先されます）。「直近3ヶ月」「今後3ヶ月」「今四半期」「今年」のワンクリック指定も追加',
+      '指定した期間が複数月にまたがる場合は、「月別想定粗利」（月ごとの対象件数・想定紹介料・想定媒体手数料・想定粗利と合計）と「メンバー別×月別」の集計表を表示するようにした（表示する値は想定粗利／想定紹介料／対象件数から切り替え可能）。「メンバー別想定粗利」の表にも合計行を追加',
+      '全ユーザータブにも「想定粗利」カードを表示するようにした（比較対象に選んだユーザーの合計・メンバー別を確認できます）',
+    ],
+  },
+  {
     date: '2026-10-07',
     items: [
       '【不具合修正】チーム設定（チーム編成・メンバー・Chat通知先・月間目標など）が、所属部署などを変更したタイミングで全て消えてしまうことがある不具合を修正。保存の直前に最新の設定を読み込めなかった場合（Googleドライブが一時的に混み合っている時など）に、空の設定で上書き保存していたのが原因。読み込めなかった場合は保存を中断し、時間をおいて再度お試しいただくようメッセージを表示するようにした',
@@ -8044,6 +8052,40 @@ function computeGrossProfitByStage(
 
     return PIPELINE_STAGES.map(stage => totalsByStage.get(stage)!);
 }
+
+// お見送り・選考辞退・内定承諾後辞退（成約に至らないフェーズ）を除いた合計 — 想定粗利の
+// 「合計」表示で共通に使う集計。
+type GrossProfitTotal = { count: number; estimableCount: number; revenue: number; cost: number; profit: number };
+const EMPTY_GROSS_PROFIT_TOTAL: GrossProfitTotal = { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 };
+const addGrossProfitTotals = (a: GrossProfitTotal, b: GrossProfitTotal): GrossProfitTotal => ({
+    count: a.count + b.count,
+    estimableCount: a.estimableCount + b.estimableCount,
+    revenue: a.revenue + b.revenue,
+    cost: a.cost + b.cost,
+    profit: a.profit + b.profit,
+});
+const sumActiveGrossProfit = (stageTotals: StageGrossProfit[]): GrossProfitTotal =>
+    stageTotals
+        .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
+        .reduce<GrossProfitTotal>((acc, s) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL);
+
+// 指定期間をカレンダー月ごとに区切る（先頭・末尾の月は期間の開始日/終了日で切り詰める）。
+// 想定粗利の「月別集計」で、期間が複数月にまたがるときの行の単位として使う。
+const splitPeriodIntoMonths = (period: { start: Date; end: Date }): { label: string; start: Date; end: Date }[] => {
+    const result: { label: string; start: Date; end: Date }[] = [];
+    let cursor = new Date(period.start.getFullYear(), period.start.getMonth(), 1);
+    while (cursor.getTime() <= period.end.getTime() && result.length < 120) {
+        const monthStart = new Date(cursor);
+        const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0, 23, 59, 59, 999);
+        result.push({
+            label: `${monthStart.getFullYear()}年${monthStart.getMonth() + 1}月`,
+            start: monthStart.getTime() < period.start.getTime() ? period.start : monthStart,
+            end: monthEnd.getTime() > period.end.getTime() ? period.end : monthEnd,
+        });
+        cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+    }
+    return result;
+};
 
 const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
 
@@ -13352,7 +13394,7 @@ const AllUsersDashboard: React.FC<{
   showGrossProfit = true,
   funnelPeriodOverride = null,
   progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
-  grossProfitPeriodOverride, onPrevGrossProfitMonth, onNextGrossProfitMonth,
+  grossProfitPeriodOverride: grossProfitPeriodOverrideProp, onPrevGrossProfitMonth, onNextGrossProfitMonth,
   dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
 }) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
@@ -13396,6 +13438,49 @@ const AllUsersDashboard: React.FC<{
     setIsCustomProgressPeriodEnabled(true);
   };
   const progressPeriodOverride = customProgressPeriodOverride ?? progressPeriodOverrideProp;
+
+  // 「想定粗利」カード専用のカスタム期間指定 — 進捗カードと同じ仕組みで、有効化すると前月/次月の
+  // 月送り（grossProfitPeriodOverrideProp）より優先される。期間が複数月にまたがる場合は、
+  // 合計に加えて月別の集計表も表示する。
+  const [customGrossProfitStartDate, setCustomGrossProfitStartDate] = useState('');
+  const [customGrossProfitEndDate, setCustomGrossProfitEndDate] = useState('');
+  const [isCustomGrossProfitPeriodEnabled, setIsCustomGrossProfitPeriodEnabled] = useState(false);
+  const customGrossProfitPeriodOverride = useMemo(() => {
+    if (!isCustomGrossProfitPeriodEnabled || !customGrossProfitStartDate || !customGrossProfitEndDate) return null;
+    return { start: new Date(customGrossProfitStartDate + 'T00:00:00'), end: new Date(customGrossProfitEndDate + 'T23:59:59') };
+  }, [isCustomGrossProfitPeriodEnabled, customGrossProfitStartDate, customGrossProfitEndDate]);
+  const handleToggleCustomGrossProfitPeriod = () => {
+    if (customGrossProfitPeriodOverride) {
+      setIsCustomGrossProfitPeriodEnabled(false);
+      return;
+    }
+    if (!customGrossProfitStartDate || !customGrossProfitEndDate) {
+      alert('開始日と終了日を指定してください。');
+      return;
+    }
+    if (customGrossProfitStartDate > customGrossProfitEndDate) {
+      alert('終了日は開始日以降の日付を指定してください。');
+      return;
+    }
+    setIsCustomGrossProfitPeriodEnabled(true);
+  };
+  const handleShiftCustomGrossProfitMonth = (offset: number) => {
+    const reference = customGrossProfitStartDate ? new Date(customGrossProfitStartDate + 'T00:00:00') : new Date();
+    const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
+    const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    setCustomGrossProfitStartDate(fmt(monthStart));
+    setCustomGrossProfitEndDate(fmt(monthEnd));
+    setIsCustomGrossProfitPeriodEnabled(true);
+  };
+  // 開始月〜終了月をワンクリックで指定するためのショートカット（今年度・直近3ヶ月など）。
+  const handleSetCustomGrossProfitRange = (start: Date, end: Date) => {
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    setCustomGrossProfitStartDate(fmt(start));
+    setCustomGrossProfitEndDate(fmt(end));
+    setIsCustomGrossProfitPeriodEnabled(true);
+  };
+  const grossProfitPeriodOverride = customGrossProfitPeriodOverride ?? grossProfitPeriodOverrideProp;
 
   // 歩留まり分析（periodOverride=funnelPeriodOverride）専用のラベル。進捗・想定粗利・曜日別
   // 返信率はそれぞれ自分専用のラベル（下記）を使う。
@@ -13442,19 +13527,28 @@ const AllUsersDashboard: React.FC<{
     if (!showGrossProfit) return [];
     return users.map(user => {
       const displayName = allUsersData[user]?.displayName || user;
-      const stageTotals = computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, grossProfitPeriodOverride);
-      const total = stageTotals
-        .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
-        .reduce((acc, s) => ({
-          count: acc.count + s.count,
-          estimableCount: acc.estimableCount + s.estimableCount,
-          revenue: acc.revenue + s.revenue,
-          cost: acc.cost + s.cost,
-          profit: acc.profit + s.profit,
-        }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+      const total = sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, grossProfitPeriodOverride));
       return { user, displayName, ...total };
     });
   }, [showGrossProfit, users, allUsersData, allMedia, grossProfitPeriodOverride]);
+  const perUserGrossProfitGrandTotal = useMemo(
+    () => perUserGrossProfitTotals.reduce<GrossProfitTotal>((acc, s) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL),
+    [perUserGrossProfitTotals]
+  );
+  // 月別集計 — 期間が複数のカレンダー月にまたがるときだけ、月ごとの合計とメンバー×月の内訳を出す。
+  const grossProfitMonthlyBreakdown = useMemo(() => {
+    if (!showGrossProfit || !grossProfitPeriodOverride) return null;
+    const months = splitPeriodIntoMonths(grossProfitPeriodOverride);
+    if (months.length < 2) return null;
+    const rows = months.map(month => {
+      const range = { start: month.start, end: month.end };
+      const perUser = users.map(user => sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, range)));
+      const total = perUser.reduce((acc: GrossProfitTotal, s: GrossProfitTotal) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL);
+      return { label: month.label, total, perUser };
+    });
+    return { rows };
+  }, [showGrossProfit, grossProfitPeriodOverride, users, allUsersData, allMedia]);
+  const [grossProfitMonthlyMetric, setGrossProfitMonthlyMetric] = useState('profit' as 'profit' | 'revenue' | 'count');
 
   // Hoisted out of the table's render loop so the same per-user period totals can also be
   // handed to the AI panel as context, instead of duplicating this calculation twice.
@@ -13725,12 +13819,113 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-            <button type="button" onClick={onPrevGrossProfitMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <button type="button" onClick={onPrevGrossProfitMonth} disabled={isCustomGrossProfitPeriodEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
             <span className="gmail-scout-message" style={{ margin: 0 }}>{grossProfitPeriodLabel}</span>
-            <button type="button" onClick={onNextGrossProfitMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            <button type="button" onClick={onNextGrossProfitMonth} disabled={isCustomGrossProfitPeriodEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
+          </div>
+          <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
+            <span>期間を指定して絞り込み・集計:</span>
+            <button type="button" onClick={() => handleShiftCustomGrossProfitMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
+            <input type="date" value={customGrossProfitStartDate} onChange={(e) => setCustomGrossProfitStartDate(e.target.value)} aria-label="想定粗利の開始日" />
+            <span>〜</span>
+            <input type="date" value={customGrossProfitEndDate} onChange={(e) => setCustomGrossProfitEndDate(e.target.value)} aria-label="想定粗利の終了日" />
+            <button type="button" onClick={() => handleShiftCustomGrossProfitMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
+            <button type="button" onClick={handleToggleCustomGrossProfitPeriod} className="secondary-action-button">
+              {isCustomGrossProfitPeriodEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
+            </button>
+          </div>
+          <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
+            <span>よく使う期間:</span>
+            {(() => {
+              const now = new Date();
+              const y = now.getFullYear();
+              const m = now.getMonth();
+              const presets: { label: string; start: Date; end: Date }[] = [
+                { label: '直近3ヶ月', start: new Date(y, m - 2, 1), end: new Date(y, m + 1, 0) },
+                { label: '今後3ヶ月', start: new Date(y, m, 1), end: new Date(y, m + 3, 0) },
+                { label: '今四半期', start: new Date(y, Math.floor(m / 3) * 3, 1), end: new Date(y, Math.floor(m / 3) * 3 + 3, 0) },
+                { label: '今年（1〜12月）', start: new Date(y, 0, 1), end: new Date(y, 12, 0) },
+              ];
+              return presets.map(p => (
+                <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
+              ));
+            })()}
           </div>
           <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} />
+          {grossProfitMonthlyBreakdown && (
+            <>
+              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{grossProfitPeriodLabel}）</h3>
+              <div className="all-users-table-container">
+                <table className="weekly-summary-table">
+                  <thead>
+                    <tr>
+                      <th>月</th>
+                      <th>対象件数</th>
+                      <th>想定紹介料</th>
+                      <th>想定媒体手数料</th>
+                      <th>想定粗利</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grossProfitMonthlyBreakdown.rows.map(row => (
+                      <tr key={row.label}>
+                        <td>{row.label}</td>
+                        <td>{row.total.count}件{row.total.count > row.total.estimableCount && `（うち算出可能 ${row.total.estimableCount}件）`}</td>
+                        <td>{formatManYen(row.total.revenue)}</td>
+                        <td>{formatManYen(row.total.cost)}</td>
+                        <td>{formatManYen(row.total.profit)}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ fontWeight: 'bold' }}>
+                      <td>合計</td>
+                      <td>{perUserGrossProfitGrandTotal.count}件{perUserGrossProfitGrandTotal.count > perUserGrossProfitGrandTotal.estimableCount && `（うち算出可能 ${perUserGrossProfitGrandTotal.estimableCount}件）`}</td>
+                      <td>{formatManYen(perUserGrossProfitGrandTotal.revenue)}</td>
+                      <td>{formatManYen(perUserGrossProfitGrandTotal.cost)}</td>
+                      <td>{formatManYen(perUserGrossProfitGrandTotal.profit)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別×月別</h3>
+              <div className="pipeline-sort-controls">
+                <span>表示する値:</span>
+                {([['profit', '想定粗利'], ['revenue', '想定紹介料'], ['count', '対象件数']] as const).map(([key, label]) => (
+                  <button key={key} type="button" onClick={() => setGrossProfitMonthlyMetric(key)} className={grossProfitMonthlyMetric === key ? 'active' : ''}>{label}</button>
+                ))}
+              </div>
+              <div className="all-users-table-container">
+                <table className="weekly-summary-table">
+                  <thead>
+                    <tr>
+                      <th>ユーザー</th>
+                      {grossProfitMonthlyBreakdown.rows.map(row => <th key={row.label}>{row.label}</th>)}
+                      <th>合計</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((user, userIdx) => {
+                      const formatValue = (t: GrossProfitTotal) => grossProfitMonthlyMetric === 'count' ? `${t.count}件` : formatManYen(t[grossProfitMonthlyMetric]);
+                      return (
+                        <tr key={user}>
+                          <td>{allUsersData[user]?.displayName || user}</td>
+                          {grossProfitMonthlyBreakdown.rows.map(row => <td key={row.label}>{formatValue(row.perUser[userIdx])}</td>)}
+                          <td style={{ fontWeight: 'bold' }}>{formatValue(perUserGrossProfitTotals[userIdx])}</td>
+                        </tr>
+                      );
+                    })}
+                    <tr style={{ fontWeight: 'bold' }}>
+                      <td>合計</td>
+                      {grossProfitMonthlyBreakdown.rows.map(row => (
+                        <td key={row.label}>{grossProfitMonthlyMetric === 'count' ? `${row.total.count}件` : formatManYen(row.total[grossProfitMonthlyMetric])}</td>
+                      ))}
+                      <td>{grossProfitMonthlyMetric === 'count' ? `${perUserGrossProfitGrandTotal.count}件` : formatManYen(perUserGrossProfitGrandTotal[grossProfitMonthlyMetric])}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
           <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{grossProfitPeriodLabel}）</h3>
           <div className="all-users-table-container">
             <table className="weekly-summary-table">
@@ -13753,8 +13948,16 @@ const AllUsersDashboard: React.FC<{
                     <td>{formatManYen(stat.profit)}</td>
                   </tr>
                 ))}
-                {perUserGrossProfitTotals.length === 0 && (
+                {perUserGrossProfitTotals.length === 0 ? (
                   <tr><td colSpan={5}>表示するユーザーがいません。</td></tr>
+                ) : (
+                  <tr style={{ fontWeight: 'bold' }}>
+                    <td>合計</td>
+                    <td>{perUserGrossProfitGrandTotal.count}件{perUserGrossProfitGrandTotal.count > perUserGrossProfitGrandTotal.estimableCount && `（うち算出可能 ${perUserGrossProfitGrandTotal.estimableCount}件）`}</td>
+                    <td>{formatManYen(perUserGrossProfitGrandTotal.revenue)}</td>
+                    <td>{formatManYen(perUserGrossProfitGrandTotal.cost)}</td>
+                    <td>{formatManYen(perUserGrossProfitGrandTotal.profit)}</td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -18258,7 +18461,6 @@ const App: React.FC = () => {
                   onSaveSectionDefaults={handleSaveAllUsersSectionDefaults}
                   sectionOrder={resolveAllUsersSectionOrder(currentUserData?.allUsersSectionOrder)}
                   onMoveSection={handleMoveAllUsersSection}
-                  showGrossProfit={false}
                   funnelPeriodOverride={dashboardPeriodOverride}
                   progressPeriodOverride={progressPeriodOverride}
                   onPrevProgressMonth={() => handleShiftProgressMonth(-1)}
