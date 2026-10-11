@@ -18349,44 +18349,6 @@ const App: React.FC = () => {
                 </div>
             </section>
 
-            <section aria-labelledby="personal-media-settings-title">
-              <h2
-                id="personal-media-settings-title"
-                className="section-title collapsible-header"
-                onClick={() => toggleSection('personalMediaSettings')}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('personalMediaSettings'); } }}
-                role="button" tabIndex={0} aria-expanded={sectionVisibility.personalMediaSettings} aria-controls="personal-media-settings-content"
-              >
-                <span>表示する媒体（{currentUserData?.personalMediaIds ? `${personalMedia.length}/${activeMedia.length}媒体` : 'すべて'}）</span>
-                <span className={`toggle-icon ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>▼</span>
-              </h2>
-              <div id="personal-media-settings-content" className={`collapsible-content ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>
-                <p className="modal-description">
-                  個人実績タブの「本日の進捗」「週間サマリー」「媒体別 月次進捗」と各目標設定に表示する媒体を選べます。チェックを外した媒体は表示されなくなります（入力済みの実績・目標はそのまま残り、再度チェックすれば元通り表示されます）。チームの「使用する媒体」とは別の、あなただけの設定です。
-                </p>
-                <div className="comparison-user-checkbox-list">
-                  {activeMedia.map(m => (
-                    <label key={m.id} className="comparison-user-checkbox">
-                      <input
-                        type="checkbox"
-                        checked={personalMedia.some(pm => pm.id === m.id)}
-                        onChange={() => handleTogglePersonalMedia(m.id)}
-                      />
-                      {m.name}
-                    </label>
-                  ))}
-                </div>
-                {currentUserData?.personalMediaIds && (
-                  <button type="button" onClick={handleResetPersonalMedia} className="secondary-action-button" style={{ marginTop: '0.5rem' }}>
-                    すべての媒体を表示に戻す
-                  </button>
-                )}
-                {currentUserData?.personalMediaIds && personalMedia.length === 0 && (
-                  <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の進捗・目標欄は表示されません。</p>
-                )}
-              </div>
-            </section>
-
             <section aria-labelledby="weekly-summary-title">
               <h2 
                 id="weekly-summary-title"
@@ -18570,6 +18532,44 @@ const App: React.FC = () => {
               </div>
             </section>
             
+            <section aria-labelledby="personal-media-settings-title">
+              <h2
+                id="personal-media-settings-title"
+                className="section-title collapsible-header"
+                onClick={() => toggleSection('personalMediaSettings')}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('personalMediaSettings'); } }}
+                role="button" tabIndex={0} aria-expanded={sectionVisibility.personalMediaSettings} aria-controls="personal-media-settings-content"
+              >
+                <span>表示する媒体（{currentUserData?.personalMediaIds ? `${personalMedia.length}/${activeMedia.length}媒体` : 'すべて'}）</span>
+                <span className={`toggle-icon ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>▼</span>
+              </h2>
+              <div id="personal-media-settings-content" className={`collapsible-content ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>
+                <p className="modal-description">
+                  個人実績タブの「本日の進捗」「週間サマリー」「媒体別 月次進捗」と各目標設定に表示する媒体を選べます。チェックを外した媒体は表示されなくなります（入力済みの実績・目標はそのまま残り、再度チェックすれば元通り表示されます）。チームの「使用する媒体」とは別の、あなただけの設定です。
+                </p>
+                <div className="comparison-user-checkbox-list">
+                  {activeMedia.map(m => (
+                    <label key={m.id} className="comparison-user-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={personalMedia.some(pm => pm.id === m.id)}
+                        onChange={() => handleTogglePersonalMedia(m.id)}
+                      />
+                      {m.name}
+                    </label>
+                  ))}
+                </div>
+                {currentUserData?.personalMediaIds && (
+                  <button type="button" onClick={handleResetPersonalMedia} className="secondary-action-button" style={{ marginTop: '0.5rem' }}>
+                    すべての媒体を表示に戻す
+                  </button>
+                )}
+                {currentUserData?.personalMediaIds && personalMedia.length === 0 && (
+                  <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の進捗・目標欄は表示されません。</p>
+                )}
+              </div>
+            </section>
+
             <section aria-labelledby="target-settings-title">
                 <h2
                     id="target-settings-title"
