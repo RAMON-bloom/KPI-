@@ -1119,6 +1119,10 @@ interface UserData {
   // アーカイブされていない媒体すべてを表示（従来通り）。チェックを外した媒体は個人実績タブの
   // 媒体別の表示・目標入力欄から隠れるだけで、保存済みの実績・目標値はそのまま残る。
   personalMediaIds?: string[];
+  // 日次・週次・月次目標の期間換算の設定。workDaysPerMonth未設定 = その月の平日（月〜金）の日数を
+  // 自動で使う。workDaysPerWeek未設定 = 5日。autoSyncがtrueなら、どれかの期間の目標を入力した
+  // 時点で同じ項目の他の期間の目標も換算して自動で書き換える。
+  targetConversion?: { workDaysPerMonth?: number; workDaysPerWeek?: number; autoSync?: boolean };
   // お問い合わせ（バグ報告・改善要望）— 投稿者本人のUserDataに保存され、全ユーザー分を
   // 集約して社内掲示板として表示する（allFeedbackPosts参照）。返信・ステータス変更・削除は
   // 開発者（TEAMS_ADMIN_EMAIL）のみが行え、投稿者以外のファイルへの書き込みは
@@ -1425,6 +1429,73 @@ const getWeekdayLabels = (weekStartsOn: 0 | 6): string[] =>
   weekStartsOn === 6 ? WEEKDAY_LABELS_SATURDAY_START : WEEKDAY_LABELS_SUNDAY_START;
 const getLeadingEmptyDays = (firstOfMonthDayOfWeek: number, weekStartsOn: 0 | 6): number =>
   (firstOfMonthDayOfWeek - weekStartsOn + 7) % 7;
+
+// 目標設定の期間換算（日次⇔週次⇔月次）。媒体別の目標項目のうち、各期間の目標設定画面に
+// 入力欄がある項目だけを対象にする（日次目標はスカウト数・返信数・有効返信数の3項目のみ）。
+type TargetPeriod = 'monthly' | 'weekly' | 'daily';
+const MEDIA_TARGET_SUFFIXES = ['scoutsSent', 'scoutReplies', 'effectiveReplies', 'documentsCollected', 'effectiveDocumentsCollected', 'initialInterviews', 'effectiveInitialInterviews'] as const;
+const DAILY_TARGET_SUFFIXES: readonly string[] = ['scoutsSent', 'scoutReplies', 'effectiveReplies'];
+const TARGET_PERIOD_LABELS: Record<TargetPeriod, string> = { monthly: '月次', weekly: '週次', daily: '日次' };
+const targetSuffixesForPeriod = (period: TargetPeriod): readonly string[] =>
+  period === 'daily' ? DAILY_TARGET_SUFFIXES : MEDIA_TARGET_SUFFIXES;
+// 指定した月の平日（月〜金）の日数 — 月の稼働日数を未設定にした場合の既定値。
+const countWeekdaysInMonth = (reference: Date): number => {
+  const year = reference.getFullYear();
+  const month = reference.getMonth();
+  const days = new Date(year, month + 1, 0).getDate();
+  let count = 0;
+  for (let d = 1; d <= days; d++) {
+    const dow = new Date(year, month, d).getDay();
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count;
+};
+// 1日あたりに直してから換算先の日数を掛ける。割り算を含む場合は、小さい期間の目標を毎回
+// 達成すれば大きい期間の目標にも届くよう切り上げる（掛け算だけの場合は整数のまま）。
+const convertTargetValue = (value: number, from: TargetPeriod, to: TargetPeriod, days: { perMonth: number; perWeek: number }): number => {
+  if (from === to) return value;
+  const daysOf = (period: TargetPeriod) => (period === 'monthly' ? days.perMonth : period === 'weekly' ? days.perWeek : 1);
+  const converted = (value / daysOf(from)) * daysOf(to);
+  return Math.max(0, Math.ceil(converted - 1e-9));
+};
+// kpiTargets等のキー（`${媒体ID}_${項目}`）を媒体IDと項目に分解する。媒体別の目標項目でなければnull。
+const splitMediaTargetKey = (key: string): { mediaId: string; suffix: string } | null => {
+  const suffix = MEDIA_TARGET_SUFFIXES.find(sf => key.endsWith(`_${sf}`));
+  if (!suffix) return null;
+  return { mediaId: key.slice(0, -(suffix.length + 1)), suffix };
+};
+const TARGET_FIELD_BY_PERIOD: Record<TargetPeriod, 'kpiTargets' | 'weeklyKpiTargets' | 'dailyKpiTargets'> = {
+  monthly: 'kpiTargets',
+  weekly: 'weeklyKpiTargets',
+  daily: 'dailyKpiTargets',
+};
+// fromの期間の目標を基準に、他の2期間の目標のうち (媒体ID, 項目) が entries に含まれるものを
+// 換算値で上書きしたUserDataを返す。換算元の期間の値は変更しない。
+const applyTargetConversion = (
+  data: UserData,
+  from: TargetPeriod,
+  entries: { mediaId: string; suffix: string }[],
+  days: { perMonth: number; perWeek: number }
+): UserData => {
+  const source = (data[TARGET_FIELD_BY_PERIOD[from]] || {}) as KpiTotals;
+  const next: UserData = { ...data };
+  (['monthly', 'weekly', 'daily'] as TargetPeriod[]).filter(to => to !== from).forEach(to => {
+    const field = TARGET_FIELD_BY_PERIOD[to];
+    const updated = { ...((data[field] || {}) as KpiTotals) };
+    let changed = false;
+    entries.forEach(({ mediaId, suffix }) => {
+      if (!targetSuffixesForPeriod(to).includes(suffix)) return;
+      const key = `${mediaId}_${suffix}` as KpiKey;
+      updated[key] = convertTargetValue(source[key] || 0, from, to, days);
+      changed = true;
+    });
+    if (changed) {
+      (next as any)[field] = updated;
+      if (to === 'weekly') next.weeklyKpiTargetsUpdatedAt = new Date().toISOString();
+    }
+  });
+  return next;
+};
 
 // 全ユーザー/チーム別タブの各カード（進捗・想定粗利・曜日別返信率）が個別に持つ「前月/次月」
 // ナビゲーション用 — offset=0は「今月」（他の箇所と同じくnullを返し、目標・達成率の表示など
@@ -4315,6 +4386,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '個人実績タブに「目標の期間換算」を追加。日次・週次・月次のいずれかの目標をもとに、稼働日数（月は既定で今月の平日数、週は既定で5日。各自で変更可）に応じて他の期間の目標をワンクリックで一括設定できます。「目標を入力したら他の期間も自動で換算する」をオンにすると、目標を入力した時点で同じ項目の他の期間の目標も自動で書き換わります',
       '個人実績タブに「表示する媒体」を追加。目標入力や進捗確認に使う媒体を各自で選べ、チェックを外した媒体は「本日の進捗」「週間サマリー」「媒体別 月次進捗」と月次・週次・日次の目標設定に表示されなくなります。チームの「使用する媒体」とは別の、本人だけの設定です（入力済みの実績・目標値は消えません）',
       '全ユーザータブ・チーム別タブの「想定粗利」カードにも「内定承諾一覧（成約月ごと）」を追加。何月に誰（担当者・候補者・企業）が内定承諾したかを、選択中の期間または全期間で確認できます。成約月の変更は、自分の候補者と、ミドルとして代理編集できるメンバーの候補者に限り一覧上から行えます（それ以外は閲覧のみ）',
       '【不具合修正】想定粗利を「内定承諾」などの選考フェーズで絞り込んでも、正しい金額にならないことがある不具合を修正。複数社を受けている候補者は確度の評価だけで1社を選んで集計していたため、確度が未入力だと内定承諾した企業ではなく別の企業の選考で数えられていたのが原因。内定承諾の選考がある候補者は、必ずその選考で集計するようにした（内定承諾が無い場合も、お見送り・選考辞退より進行中の選考を優先します）',
@@ -14761,7 +14833,7 @@ type SectionVisibilityKeys =
   | 'monthlyProgress' | 'monthlyPerformance' | 'monthOverMonthPerformance'
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
   | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
-  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit' | 'personalMediaSettings'
+  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit' | 'personalMediaSettings' | 'targetConversion'
   | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit'
   | 'allUsersMonthlyTrend';
 
@@ -14995,6 +15067,7 @@ const App: React.FC = () => {
     customPeriodReport: false,
     personalGrossProfit: false,
     personalMediaSettings: false,
+    targetConversion: false,
     allUsersProgress: false,
     allUsersDayOfWeekRate: false,
     allUsersWeeklySummary: false,
@@ -15207,6 +15280,8 @@ const App: React.FC = () => {
     monthlyTrendMetricDefaults: d.monthlyTrendMetricDefaults,
     // 同じ理由: 個人実績タブで表示する媒体の設定も許可リストに無いと再読み込みで消える。
     personalMediaIds: d.personalMediaIds,
+    // 同じ理由: 目標の期間換算の設定も許可リストに無いと再読み込みで消える。
+    targetConversion: d.targetConversion,
     // 同じ理由: スカウト達成の累計ログも許可リストに無いと、記録した直後は効いていても
     // 再読み込みのたびに消えてしまい「目標を変えても累計は変わらない」が実現できない。
     scoutAchievementLog: d.scoutAchievementLog,
@@ -16514,23 +16589,59 @@ const App: React.FC = () => {
         }
     };
 
+  // 目標の期間換算に使う稼働日数（未設定なら月=今月の平日数、週=5日）。
+  const targetConversionDays = useMemo(() => ({
+    perMonth: currentUserData?.targetConversion?.workDaysPerMonth || countWeekdaysInMonth(new Date()),
+    perWeek: currentUserData?.targetConversion?.workDaysPerWeek || 5,
+  }), [currentUserData?.targetConversion?.workDaysPerMonth, currentUserData?.targetConversion?.workDaysPerWeek]);
+  const isTargetAutoSyncEnabled = !!currentUserData?.targetConversion?.autoSync;
+
+  // 「入力したら他の期間も自動で換算」がオンなら、変更した1項目だけ他の期間にも反映する。
+  const withAutoTargetSync = (data: UserData, from: TargetPeriod, key: string): UserData => {
+    if (!data.targetConversion?.autoSync) return data;
+    const parsed = splitMediaTargetKey(key);
+    if (!parsed || !targetSuffixesForPeriod(from).includes(parsed.suffix)) return data;
+    return applyTargetConversion(data, from, [parsed], targetConversionDays);
+  };
+
   const handleTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target as { name: KpiKey; value: string };
-    setCurrentUserData(prev => prev ? ({ ...prev, kpiTargets: { ...prev.kpiTargets, [name]: value === '' ? 0 : Number(value) }}) : null);
+    setCurrentUserData(prev => prev ? withAutoTargetSync({ ...prev, kpiTargets: { ...prev.kpiTargets, [name]: value === '' ? 0 : Number(value) }}, 'monthly', name) : null);
   };
 
   const handleWeeklyTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target as { name: KpiKey; value: string };
-    setCurrentUserData(prev => prev ? ({
+    setCurrentUserData(prev => prev ? withAutoTargetSync({
       ...prev,
       weeklyKpiTargets: { ...prev.weeklyKpiTargets, [name]: value === '' ? 0 : Number(value) },
       weeklyKpiTargetsUpdatedAt: new Date().toISOString(),
-    }) : null);
+    }, 'weekly', name) : null);
   };
-  
+
   const handleDailyTargetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target as { name: KpiKey; value: string };
-    setCurrentUserData(prev => prev ? ({ ...prev, dailyKpiTargets: { ...prev.dailyKpiTargets, [name]: value === '' ? 0 : Number(value) }}) : null);
+    setCurrentUserData(prev => prev ? withAutoTargetSync({ ...prev, dailyKpiTargets: { ...prev.dailyKpiTargets, [name]: value === '' ? 0 : Number(value) }}, 'daily', name) : null);
+  };
+
+  // 選んだ期間の目標をもとに、他の2期間の目標を一括で換算して上書きする。対象は個人実績タブで
+  // 表示中の媒体（personalMedia）の、各期間の目標設定画面に入力欄がある項目だけ。
+  const handleBulkConvertTargets = (from: TargetPeriod) => {
+    const others = (['monthly', 'weekly', 'daily'] as TargetPeriod[]).filter(p => p !== from).map(p => TARGET_PERIOD_LABELS[p]).join('・');
+    if (personalMedia.length === 0) {
+      alert('表示する媒体が選ばれていません。');
+      return;
+    }
+    const ok = window.confirm(
+      `${TARGET_PERIOD_LABELS[from]}目標をもとに、${others}目標を一括で上書きします。\n` +
+      `（月の稼働日数 ${targetConversionDays.perMonth}日・週の稼働日数 ${targetConversionDays.perWeek}日で換算／対象: ${personalMedia.map(m => m.name).join('、')}）\n` +
+      'よろしいですか？'
+    );
+    if (!ok) return;
+    const entries = personalMedia.flatMap(m => targetSuffixesForPeriod(from).map(suffix => ({ mediaId: m.id, suffix })));
+    setCurrentUserData(prev => (prev ? applyTargetConversion(prev, from, entries, targetConversionDays) : prev));
+  };
+  const handleUpdateTargetConversion = (patch: { workDaysPerMonth?: number; workDaysPerWeek?: number; autoSync?: boolean }) => {
+    setCurrentUserData(prev => (prev ? { ...prev, targetConversion: { ...(prev.targetConversion || {}), ...patch } } : prev));
   };
 
   const persistEntry = (date: string, newValues: KpiTotals) => {
@@ -18567,6 +18678,64 @@ const App: React.FC = () => {
                 {currentUserData?.personalMediaIds && personalMedia.length === 0 && (
                   <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の進捗・目標欄は表示されません。</p>
                 )}
+              </div>
+            </section>
+
+            <section aria-labelledby="target-conversion-title">
+              <h2
+                id="target-conversion-title"
+                className="section-title collapsible-header"
+                onClick={() => toggleSection('targetConversion')}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('targetConversion'); } }}
+                role="button" tabIndex={0} aria-expanded={sectionVisibility.targetConversion} aria-controls="target-conversion-content"
+              >
+                <span>目標の期間換算（日次・週次・月次の一括設定）{isTargetAutoSyncEnabled ? '：自動換算オン' : ''}</span>
+                <span className={`toggle-icon ${sectionVisibility.targetConversion ? 'open' : ''}`}>▼</span>
+              </h2>
+              <div id="target-conversion-content" className={`collapsible-content ${sectionVisibility.targetConversion ? 'open' : ''}`}>
+                <p className="modal-description">
+                  いずれかの期間の目標をもとに、他の期間の目標を稼働日数に応じて換算して一括で設定できます（例: 日次20件 × 週5日 = 週次100件）。小さい期間へ割り戻す場合は切り上げます。対象は「表示する媒体」で選んでいる媒体の、各目標設定画面にある項目です（日次目標はスカウト数・返信数・有効返信数のみ）。
+                </p>
+                <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
+                  <label htmlFor="target-conversion-month-days">月の稼働日数</label>
+                  <input
+                    id="target-conversion-month-days"
+                    type="number"
+                    min="1"
+                    max="31"
+                    style={{ width: '5rem' }}
+                    value={currentUserData?.targetConversion?.workDaysPerMonth ?? ''}
+                    placeholder={String(countWeekdaysInMonth(new Date()))}
+                    onChange={(e) => handleUpdateTargetConversion({ workDaysPerMonth: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
+                  />
+                  <span>日（未入力なら今月の平日数 {countWeekdaysInMonth(new Date())}日）</span>
+                  <label htmlFor="target-conversion-week-days" style={{ marginLeft: '1rem' }}>週の稼働日数</label>
+                  <input
+                    id="target-conversion-week-days"
+                    type="number"
+                    min="1"
+                    max="7"
+                    style={{ width: '5rem' }}
+                    value={currentUserData?.targetConversion?.workDaysPerWeek ?? ''}
+                    placeholder="5"
+                    onChange={(e) => handleUpdateTargetConversion({ workDaysPerWeek: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
+                  />
+                  <span>日</span>
+                </div>
+                <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
+                  <span>一括設定:</span>
+                  <button type="button" onClick={() => handleBulkConvertTargets('monthly')} className="secondary-action-button">月次目標 → 週次・日次</button>
+                  <button type="button" onClick={() => handleBulkConvertTargets('weekly')} className="secondary-action-button">週次目標 → 月次・日次</button>
+                  <button type="button" onClick={() => handleBulkConvertTargets('daily')} className="secondary-action-button">日次目標 → 月次・週次</button>
+                </div>
+                <label className="comparison-user-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={isTargetAutoSyncEnabled}
+                    onChange={(e) => handleUpdateTargetConversion({ autoSync: e.target.checked })}
+                  />
+                  目標を入力したら、同じ項目の他の期間の目標も自動で換算して書き換える
+                </label>
               </div>
             </section>
 
