@@ -4390,6 +4390,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '候補者パイプラインの「想定粗利」も、個人実績タブ・全ユーザー/チーム別タブと同じ機能にそろえた。前月/次月、任意期間、「今期（3月〜翌2月）」「前期」などのワンクリック指定、複数月にまたがる期間の「月別想定粗利」、内定承諾一覧（成約月の確認・変更）が使えます。チーム・全ユーザー表示ではメンバー別・メンバー別×月別の集計と担当者付きの内定承諾一覧も表示し、全ユーザー表示でもメンバー別想定粗利を確認できるようにした',
       '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプラインのチーム表示）の各案件に、粗利の金額と、計算に足りない入力（年収・fee料率など）を「要入力」として表示するようにした。「編集」から想定年収・オファー年収・報酬形態（料率/固定報酬）・fee料率・固定報酬額・媒体をその場で入力・修正でき、入力内容は候補者パイプラインの同じ項目にも反映されます（他メンバーの候補者は、ミドルとして代理編集できる場合のみ）。「未入力の案件だけ表示」で入力漏れの案件だけを絞り込めます',
       '個人実績タブの各セクションも、全ユーザー/チーム別タブと同じく「現在の開閉状態をデフォルトとして保存」で次回以降の開閉状態を保存でき、見出しの▲▼ボタンで表示順を入れ替えられるようにした（どちらもユーザーごとの設定です）',
       '個人実績タブの「表示する媒体」「目標の期間換算」「月次目標設定」「週次目標設定」「日次目標設定」を、1つの「目標・表示媒体の設定」にまとめた。上で表示する媒体を選び、その下の「月次／週次／日次」タブを切り替えて目標を入力します。期間の換算（「この月次目標から週次・日次目標を換算して設定」など）と稼働日数・自動換算の設定も、各タブの上の1行から操作できます',
@@ -8631,8 +8632,11 @@ const AcceptedDealsList: React.FC<{
     periodLabel: string;
     showOwner?: boolean;
     canEdit: (ownerKey: string) => boolean;
+    // 担当者単位ではなく候補者単位で編集可否が決まる場合に渡す（未指定ならcanEditで判定）。
+    canEditRow?: (ownerKey: string, candidateId: string) => boolean;
     onChangeDealMonth: (ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
-}> = ({ sources, allMedia, periodOverride, periodLabel, showOwner = false, canEdit, onChangeDealMonth }) => {
+}> = ({ sources, allMedia, periodOverride, periodLabel, showOwner = false, canEdit, canEditRow, onChangeDealMonth }) => {
+    const isRowEditable = (ownerKey: string, candidateId: string) => (canEditRow ? canEditRow(ownerKey, candidateId) : canEdit(ownerKey));
     const [showAllAccepted, setShowAllAccepted] = useState(false);
     const acceptedDeals = useMemo(() => {
         const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
@@ -8674,7 +8678,7 @@ const AcceptedDealsList: React.FC<{
         });
         return groups;
     }, [acceptedDeals]);
-    const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !canEdit(r.ownerKey));
+    const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !isRowEditable(r.ownerKey, r.candidate.id));
     const leadingColumns = showOwner ? 5 : 4;
 
     return (
@@ -8718,7 +8722,7 @@ const AcceptedDealsList: React.FC<{
                                         {group.rows.map(({ ownerKey, ownerLabel, candidate, application, dealMonth, acceptedOn, result }) => (
                                             <tr key={`${ownerKey}:${candidate.id}:${application.id}`}>
                                                 <td>
-                                                    {canEdit(ownerKey) ? (
+                                                    {isRowEditable(ownerKey, candidate.id) ? (
                                                         <input
                                                             type="month"
                                                             value={dealMonth}
@@ -8757,7 +8761,12 @@ const PersonalGrossProfitSection: React.FC<{
     candidates: Candidate[];
     allMedia: MediaEntry[];
     onSaveCandidate: (candidate: Candidate) => void;
-}> = ({ candidates, allMedia, onSaveCandidate }) => {
+    // 以下は候補者パイプラインの想定粗利（チーム/全ユーザー表示）で使う拡張。memberBreakdownを
+    // 渡すとメンバー別・メンバー別×月別の表と、担当者列付きの内定承諾一覧を出す。
+    // canEditCandidateがfalseの候補者（編集権限のない他メンバー分）は閲覧のみ。
+    memberBreakdown?: { key: string; label: string; candidates: Candidate[] }[];
+    canEditCandidate?: (candidate: Candidate) => boolean;
+}> = ({ candidates, allMedia, onSaveCandidate, memberBreakdown, canEditCandidate }) => {
     const [monthOffset, setMonthOffset] = useState(0);
     const [customStartDate, setCustomStartDate] = useState('');
     const [customEndDate, setCustomEndDate] = useState('');
@@ -8813,8 +8822,40 @@ const PersonalGrossProfitSection: React.FC<{
         }));
     }, [candidates, allMedia, periodOverride, stageFilters]);
 
-    const acceptedDealSources = useMemo(() => [{ ownerKey: 'self', ownerLabel: '', candidates }], [candidates]);
+    const memberMonthlyRows = useMemo(() => {
+        if (!memberBreakdown || !periodOverride) return null;
+        const months = splitPeriodIntoMonths(periodOverride);
+        if (months.length < 2) return null;
+        return memberBreakdown.map(group => ({
+            key: group.key,
+            label: group.label,
+            months: months.map(month => sumActiveGrossProfit(computeGrossProfitByStage(group.candidates, allMedia, { start: month.start, end: month.end }), stageFilters)),
+            total: sumActiveGrossProfit(computeGrossProfitByStage(group.candidates, allMedia, periodOverride), stageFilters),
+        }));
+    }, [memberBreakdown, allMedia, periodOverride, stageFilters]);
+    const [memberMonthlyMetric, setMemberMonthlyMetric] = useState('profit' as 'profit' | 'revenue' | 'count');
+    const formatMemberMonthlyValue = (t: GrossProfitTotal) => (memberMonthlyMetric === 'count' ? `${t.count}件` : formatManYen(t[memberMonthlyMetric]));
+
+    const acceptedDealSources = useMemo(
+        () => (memberBreakdown
+            ? memberBreakdown.map(g => ({ ownerKey: g.key, ownerLabel: g.label, candidates: g.candidates }))
+            : [{ ownerKey: 'self', ownerLabel: '', candidates }]),
+        [memberBreakdown, candidates]
+    );
+    // 内定承諾一覧の行（担当者キー単位）が編集できるか — 候補者単位の判定をそのまま使う。
+    const findAcceptedCandidate = (ownerKey: string, candidateId: string) =>
+        acceptedDealSources.find(src => src.ownerKey === ownerKey)?.candidates.find(c => c.id === candidateId);
+    const canEditAcceptedRow = (ownerKey: string, candidateId?: string) => {
+        if (!canEditCandidate) return true;
+        if (!candidateId) {
+            const src = acceptedDealSources.find(x => x.ownerKey === ownerKey);
+            return !!src && src.candidates.some(c => canEditCandidate(c));
+        }
+        const c = findAcceptedCandidate(ownerKey, candidateId);
+        return !!c && canEditCandidate(c);
+    };
     const handleChangeDealMonth = (_ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
+        if (canEditCandidate && !canEditCandidate(candidate)) return;
         onSaveCandidate({
             ...candidate,
             applications: candidate.applications.map(app =>
@@ -8848,7 +8889,7 @@ const PersonalGrossProfitSection: React.FC<{
                 ))}
             </div>
 
-            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} onSaveCandidate={onSaveCandidate} />
+            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} onSaveCandidate={onSaveCandidate} canEditCandidate={canEditCandidate} memberBreakdown={memberBreakdown} />
 
             {monthlyRows && (
                 <>
@@ -8880,12 +8921,51 @@ const PersonalGrossProfitSection: React.FC<{
                 </>
             )}
 
+            {memberMonthlyRows && monthlyRows && (
+                <>
+                    <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別×月別{stageFilters.length > 0 && `・${stageFilters.join('/')}のみ`}</h3>
+                    <div className="pipeline-sort-controls">
+                        <span>表示する値:</span>
+                        {([['profit', '想定粗利'], ['revenue', '想定紹介料'], ['count', '対象件数']] as const).map(([key, label]) => (
+                            <button key={key} type="button" onClick={() => setMemberMonthlyMetric(key)} className={memberMonthlyMetric === key ? 'active' : ''}>{label}</button>
+                        ))}
+                    </div>
+                    <div className="all-users-table-container">
+                        <table className="weekly-summary-table">
+                            <thead>
+                                <tr>
+                                    <th>ユーザー</th>
+                                    {monthlyRows.map(row => <th key={row.label}>{row.label}</th>)}
+                                    <th>合計</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {memberMonthlyRows.map(row => (
+                                    <tr key={row.key}>
+                                        <td>{row.label}</td>
+                                        {row.months.map((t, i) => <td key={i}>{formatMemberMonthlyValue(t)}</td>)}
+                                        <td style={{ fontWeight: 'bold' }}>{formatMemberMonthlyValue(row.total)}</td>
+                                    </tr>
+                                ))}
+                                <tr style={{ fontWeight: 'bold' }}>
+                                    <td>合計</td>
+                                    {monthlyRows.map(row => <td key={row.label}>{formatMemberMonthlyValue(row.total)}</td>)}
+                                    <td>{formatMemberMonthlyValue(periodTotal)}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </>
+            )}
+
             <AcceptedDealsList
                 sources={acceptedDealSources}
                 allMedia={allMedia}
                 periodOverride={periodOverride}
                 periodLabel={periodLabel}
-                canEdit={() => true}
+                showOwner={!!memberBreakdown}
+                canEdit={(ownerKey) => canEditAcceptedRow(ownerKey)}
+                canEditRow={(ownerKey, candidateId) => canEditAcceptedRow(ownerKey, candidateId)}
                 onChangeDealMonth={handleChangeDealMonth}
             />
         </div>
@@ -12061,7 +12141,7 @@ const CandidatePipelineView: React.FC<{
     // それをキーにまとめるだけで済む。他のスコープ（自分/全ユーザー/ユーザー別）では出さない
     // ためundefinedを返す。
     const teamGrossProfitMemberGroups = useMemo(() => {
-        if (scope !== 'team') return undefined;
+        if (scope !== 'team' && scope !== 'all_users') return undefined;
         const groups = new Map<string, { key: string; label: string; candidates: Candidate[] }>();
         candidates.forEach(c => {
             const key = c.ownerEmail || currentUserEmail;
@@ -12618,7 +12698,13 @@ const CandidatePipelineView: React.FC<{
                     <span className={`toggle-icon ${isGrossProfitVisible ? 'open' : ''}`}>▼</span>
                 </h3>
                 <div id="gross-profit-content" className={`collapsible-content ${isGrossProfitVisible ? 'open' : ''}`}>
-                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} memberBreakdown={teamGrossProfitMemberGroups} onSaveCandidate={saveCandidate} canEditCandidate={(c) => isOwn(c) || isManagedByMiddle(c)} />
+                    <PersonalGrossProfitSection
+                        candidates={candidates}
+                        allMedia={allMedia}
+                        onSaveCandidate={saveCandidate}
+                        canEditCandidate={(c) => isOwn(c) || isManagedByMiddle(c)}
+                        memberBreakdown={teamGrossProfitMemberGroups}
+                    />
                 </div>
             </div>
 
