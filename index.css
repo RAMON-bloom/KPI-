@@ -3746,3 +3746,31 @@ p.memo-content-text {
   resize: vertical;
   white-space: pre;
 }
+
+/* 想定粗利の各案件のインライン編集フォーム（GrossProfitEntryEditor）と未入力バッジ */
+.gross-profit-entry-editor {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border-color, #dee2e6);
+  border-radius: 6px;
+  background: var(--card-background, #fff);
+}
+.gross-profit-entry-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.5rem;
+}
+.gross-profit-entry-editor-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.gross-profit-entry-editor-grid input,
+.gross-profit-entry-editor-grid select {
+  width: 100%;
+}
+.gross-profit-missing-badge {
+  color: var(--danger-color, #dc3545);
+  font-weight: bold;
+}

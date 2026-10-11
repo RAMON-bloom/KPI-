@@ -4390,6 +4390,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプラインのチーム表示）の各案件に、粗利の金額と、計算に足りない入力（年収・fee料率など）を「要入力」として表示するようにした。「編集」から想定年収・オファー年収・報酬形態（料率/固定報酬）・fee料率・固定報酬額・媒体をその場で入力・修正でき、入力内容は候補者パイプラインの同じ項目にも反映されます（他メンバーの候補者は、ミドルとして代理編集できる場合のみ）。「未入力の案件だけ表示」で入力漏れの案件だけを絞り込めます',
       '個人実績タブの各セクションも、全ユーザー/チーム別タブと同じく「現在の開閉状態をデフォルトとして保存」で次回以降の開閉状態を保存でき、見出しの▲▼ボタンで表示順を入れ替えられるようにした（どちらもユーザーごとの設定です）',
       '個人実績タブの「表示する媒体」「目標の期間換算」「月次目標設定」「週次目標設定」「日次目標設定」を、1つの「目標・表示媒体の設定」にまとめた。上で表示する媒体を選び、その下の「月次／週次／日次」タブを切り替えて目標を入力します。期間の換算（「この月次目標から週次・日次目標を換算して設定」など）と稼働日数・自動換算の設定も、各タブの上の1行から操作できます',
       '個人実績タブに「目標の期間換算」を追加。日次・週次・月次のいずれかの目標をもとに、稼働日数（月は既定で今月の平日数、週は既定で5日。各自で変更可）に応じて他の期間の目標をワンクリックで一括設定できます。「目標を入力したら他の期間も自動で換算する」をオンにすると、目標を入力した時点で同じ項目の他の期間の目標も自動で書き換わります',
@@ -8205,6 +8206,117 @@ const buildGrossProfitPeriodPresets = (now: Date = new Date()): { label: string;
 
 const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
 
+// 想定粗利の算出に足りない入力を、利用者向けの言葉で列挙する（足りていれば空配列）。
+const describeMissingGrossProfitInputs = (candidate: Candidate, application: CompanyApplication): string[] => {
+    if (application.feeType === 'fixed') {
+        return application.fixedFeeAmount === undefined || application.fixedFeeAmount === null ? ['固定報酬額'] : [];
+    }
+    const missing: string[] = [];
+    if (!(application.offerAmount ?? candidate.expectedAnnualSalary)) missing.push('年収（想定年収またはオファー年収）');
+    if (application.feeRate === undefined || application.feeRate === null) missing.push('fee料率');
+    return missing;
+};
+
+/**
+ * 想定粗利の一覧から、その案件の粗利計算に使う値（想定年収・オファー年収・報酬形態・fee料率・
+ * 固定報酬額・媒体）をその場で入力・修正するためのフォーム。保存先は候補者データそのもの
+ * （候補者パイプラインの同じ項目と連動）——想定年収・媒体は候補者単位、それ以外はこの選考単位。
+ * 金額はすべて万円単位で扱う（想定粗利の表示と同じ単位）。
+ */
+const GrossProfitEntryEditor: React.FC<{
+    candidate: Candidate;
+    application: CompanyApplication;
+    allMedia: MediaEntry[];
+    onSave: (candidate: Candidate) => void;
+    onClose: () => void;
+}> = ({ candidate, application, allMedia, onSave, onClose }) => {
+    const toInput = (n: number | undefined) => (n === undefined || n === null || n === 0 ? '' : String(n));
+    const [expectedSalary, setExpectedSalary] = useState(toInput(candidate.expectedAnnualSalary));
+    const [offerAmount, setOfferAmount] = useState(toInput(application.offerAmount));
+    const [feeType, setFeeType] = useState<'rate' | 'fixed'>(application.feeType === 'fixed' ? 'fixed' : 'rate');
+    const [feeRate, setFeeRate] = useState(application.feeRate === undefined || application.feeRate === null ? '' : String(application.feeRate));
+    const [fixedFee, setFixedFee] = useState(toInput(application.fixedFeeAmount));
+    const [source, setSource] = useState(candidate.source || '');
+
+    const parse = (v: string): number | undefined => (v.trim() === '' || isNaN(Number(v)) ? undefined : Number(v));
+    const draftCandidate: Candidate = { ...candidate, expectedAnnualSalary: parse(expectedSalary) ?? 0, source };
+    const draftApplication: CompanyApplication = {
+        ...application,
+        offerAmount: parse(offerAmount),
+        feeType,
+        feeRate: parse(feeRate),
+        fixedFeeAmount: parse(fixedFee),
+    };
+    const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
+    const preview = computeApplicationGrossProfit(draftCandidate, draftApplication, mediaFeeRateById);
+    const missing = describeMissingGrossProfitInputs(draftCandidate, draftApplication);
+    const selectableMedia = allMedia.filter(m => !m.isArchived || m.id === candidate.source);
+    const selectedMediaFeeRate = mediaFeeRateById.get(source) || 0;
+
+    const handleSave = () => {
+        onSave({
+            ...candidate,
+            expectedAnnualSalary: draftCandidate.expectedAnnualSalary,
+            source,
+            applications: candidate.applications.map(app => (app.id === application.id ? draftApplication : app)),
+        });
+        onClose();
+    };
+
+    return (
+        <div className="gross-profit-entry-editor" onClick={(e) => e.stopPropagation()}>
+            <div className="gross-profit-entry-editor-grid">
+                <label>
+                    <span>想定年収（万円）</span>
+                    <input type="number" min="0" step="any" value={expectedSalary} onChange={(e) => setExpectedSalary(e.target.value)} placeholder="例: 600" />
+                </label>
+                <label>
+                    <span>オファー年収（万円）</span>
+                    <input type="number" min="0" step="any" value={offerAmount} onChange={(e) => setOfferAmount(e.target.value)} placeholder="内定後に入力" />
+                </label>
+                <label>
+                    <span>報酬形態</span>
+                    <select value={feeType} onChange={(e) => setFeeType(e.target.value as 'rate' | 'fixed')}>
+                        <option value="rate">料率(%)</option>
+                        <option value="fixed">固定報酬</option>
+                    </select>
+                </label>
+                {feeType === 'rate' ? (
+                    <label>
+                        <span>fee料率（%）</span>
+                        <input type="number" min="0" step="any" value={feeRate} onChange={(e) => setFeeRate(e.target.value)} placeholder="例: 35" />
+                    </label>
+                ) : (
+                    <label>
+                        <span>固定報酬額（万円）</span>
+                        <input type="number" min="0" step="any" value={fixedFee} onChange={(e) => setFixedFee(e.target.value)} placeholder="例: 200" />
+                    </label>
+                )}
+                <label>
+                    <span>媒体（手数料 {selectedMediaFeeRate}%）</span>
+                    <select value={source} onChange={(e) => setSource(e.target.value)}>
+                        <option value="">未設定</option>
+                        {selectableMedia.map(m => <option key={m.id} value={m.id}>{m.name}{m.isArchived ? '（アーカイブ済み）' : ''}</option>)}
+                        <option value="Other">その他</option>
+                    </select>
+                </label>
+            </div>
+            <p className="gross-profit-note" style={{ margin: '0.5rem 0' }}>
+                {preview
+                    ? <>計算: 紹介料 {formatManYen(preview.revenue)} − 媒体手数料 {formatManYen(preview.cost)} = <strong>粗利 {formatManYen(preview.profit)}</strong>{feeType === 'rate' && draftApplication.offerAmount ? '（オファー年収で計算）' : ''}</>
+                    : <>未入力: {missing.join('、')}</>}
+            </p>
+            <p className="gross-profit-note" style={{ margin: '0 0 0.5rem' }}>
+                想定年収・媒体は候補者全体の情報、オファー年収・報酬形態・料率はこの企業の選考の情報として、候補者パイプラインにも反映されます。
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button type="button" onClick={handleSave} className="submit-button">保存</button>
+                <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
+            </div>
+        </div>
+    );
+};
+
 /**
  * Shows expected gross profit (client referral fee minus the sourcing media's handling fee)
  * broken down by selection stage, plus a grand total across every stage except お見送り/選考辞退/
@@ -8235,7 +8347,14 @@ const GrossProfitSummary: React.FC<{
     // 絞り込みを効かせるため。渡さなければこのコンポーネント内だけで管理する。
     stageFilters?: PipelineStage[];
     onStageFiltersChange?: (next: PipelineStage[]) => void;
-}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel, memberBreakdown, stageFilters: externalStageFilters, onStageFiltersChange }) => {
+    // 一覧の各案件から粗利計算に使う値（年収・料率・媒体等）を直接入力・修正できるようにする場合に
+    // 渡す。canEditCandidateがfalseを返す案件（編集権限のない他メンバーの候補者）は閲覧のみ。
+    onSaveCandidate?: (candidate: Candidate) => void;
+    canEditCandidate?: (candidate: Candidate) => boolean;
+}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel, memberBreakdown, stageFilters: externalStageFilters, onStageFiltersChange, onSaveCandidate, canEditCandidate }) => {
+    const [editingEntryKey, setEditingEntryKey] = useState<string | null>(null);
+    const [showMissingOnly, setShowMissingOnly] = useState(false);
+    const grossProfitMediaFeeRateById = useMemo(() => new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number])), [allMedia]);
     const isControlled = externalPeriodOverride !== undefined;
     const [ownStageFilters, setOwnStageFilters] = useState<PipelineStage[]>([]);
     const selectedStageFilters = externalStageFilters ?? ownStageFilters;
@@ -8364,6 +8483,13 @@ const GrossProfitSummary: React.FC<{
                     <strong>{formatManYen(grandTotal.profit)}</strong>
                 </div>
             </div>
+            {(grandTotal.count > grandTotal.estimableCount || showMissingOnly) && (
+                <div className="pipeline-sort-controls">
+                    <button type="button" onClick={() => setShowMissingOnly(false)} className={!showMissingOnly ? 'active' : ''}>すべての案件</button>
+                    <button type="button" onClick={() => setShowMissingOnly(true)} className={showMissingOnly ? 'active' : ''}>未入力の案件だけ表示（{grandTotal.count - grandTotal.estimableCount}件）</button>
+                    {onSaveCandidate && <span className="gross-profit-note" style={{ margin: 0 }}>各案件の「編集」から年収・料率・媒体を入力できます</span>}
+                </div>
+            )}
             {grandTotal.count > grandTotal.estimableCount && (
                 <p className="gross-profit-note">
                     ※ {selectedStageFilters.length > 0 ? '選択中のフェーズ' : 'お見送り・選考辞退・内定承諾後辞退を除く'}{grandTotal.count}件中、想定年収とfee料率が両方入力済み、または固定報酬額が入力済みの{grandTotal.estimableCount}件のみを集計しています（残り{grandTotal.count - grandTotal.estimableCount}件は未入力のため対象外）。
@@ -8383,14 +8509,45 @@ const GrossProfitSummary: React.FC<{
                         </div>
                         {s.entries.length > 0 && (
                             <div className="company-pipeline-entries" style={{ marginTop: '0.75rem' }}>
-                                {s.entries.map(({ candidate, application }) => (
-                                    <div key={`${candidate.ownerEmail || ''}:${candidate.id}:${application.id}`} className="company-pipeline-entry">
-                                        <span className="company-pipeline-entry-name">
-                                            {candidate.name} - {application.companyName}
-                                            {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
-                                        </span>
-                                    </div>
-                                ))}
+                                {s.entries.map(({ candidate, application }) => {
+                                    const entryKey = `${candidate.ownerEmail || ''}:${candidate.id}:${application.id}`;
+                                    const result = computeApplicationGrossProfit(candidate, application, grossProfitMediaFeeRateById);
+                                    if (showMissingOnly && result) return null;
+                                    const missing = result ? [] : describeMissingGrossProfitInputs(candidate, application);
+                                    const editable = !!onSaveCandidate && (canEditCandidate ? canEditCandidate(candidate) : true);
+                                    return (
+                                        <div key={entryKey} className="company-pipeline-entry" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                                <span className="company-pipeline-entry-name" style={{ flex: 1 }}>
+                                                    {candidate.name} - {application.companyName}
+                                                    {candidate.ownerLabel && <small> ({candidate.ownerLabel})</small>}
+                                                </span>
+                                                {result
+                                                    ? <small>粗利 {formatManYen(result.profit)}</small>
+                                                    : <small className="gross-profit-missing-badge" title={`未入力: ${missing.join('、')}`}>要入力: {missing.join('・')}</small>}
+                                                {editable && (
+                                                    <button
+                                                        type="button"
+                                                        className="secondary-action-button"
+                                                        style={{ padding: '0.15rem 0.5rem' }}
+                                                        onClick={() => setEditingEntryKey(editingEntryKey === entryKey ? null : entryKey)}
+                                                    >
+                                                        {editingEntryKey === entryKey ? '閉じる' : '編集'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                            {editable && editingEntryKey === entryKey && (
+                                                <GrossProfitEntryEditor
+                                                    candidate={candidate}
+                                                    application={application}
+                                                    allMedia={allMedia}
+                                                    onSave={(next) => onSaveCandidate!(next)}
+                                                    onClose={() => setEditingEntryKey(null)}
+                                                />
+                                            )}
+                                        </div>
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
@@ -8691,7 +8848,7 @@ const PersonalGrossProfitSection: React.FC<{
                 ))}
             </div>
 
-            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} />
+            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} onSaveCandidate={onSaveCandidate} />
 
             {monthlyRows && (
                 <>
@@ -12461,7 +12618,7 @@ const CandidatePipelineView: React.FC<{
                     <span className={`toggle-icon ${isGrossProfitVisible ? 'open' : ''}`}>▼</span>
                 </h3>
                 <div id="gross-profit-content" className={`collapsible-content ${isGrossProfitVisible ? 'open' : ''}`}>
-                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} memberBreakdown={teamGrossProfitMemberGroups} />
+                    <GrossProfitSummary candidates={candidates} allMedia={allMedia} memberBreakdown={teamGrossProfitMemberGroups} onSaveCandidate={saveCandidate} canEditCandidate={(c) => isOwn(c) || isManagedByMiddle(c)} />
                 </div>
             </div>
 
@@ -13828,6 +13985,8 @@ const AllUsersDashboard: React.FC<{
   // 編集時の保存処理。未指定なら閲覧のみ。
   canEditAcceptedDealOwner?: (ownerEmail: string) => boolean;
   onChangeAcceptedDealMonth?: (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
+  // 想定粗利の一覧から候補者（ownerEmail付き）の年収・料率・媒体などを修正した時の保存処理。
+  onSaveAggregateCandidate?: (candidate: Candidate) => void;
 }> = ({
   users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults,
   sectionOrder = DEFAULT_ALL_USERS_SECTION_ORDER, onMoveSection,
@@ -13836,7 +13995,7 @@ const AllUsersDashboard: React.FC<{
   progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride: grossProfitPeriodOverrideProp, onPrevGrossProfitMonth, onNextGrossProfitMonth,
   dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
-  canEditAcceptedDealOwner, onChangeAcceptedDealMonth,
+  canEditAcceptedDealOwner, onChangeAcceptedDealMonth, onSaveAggregateCandidate,
 }) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
   const handleSaveSectionDefaultsClick = () => {
@@ -13949,8 +14108,9 @@ const AllUsersDashboard: React.FC<{
   const formatMemberWeekDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
   const memberWeekRange = `${formatMemberWeekDate(memberWeekStartDate)} - ${formatMemberWeekDate(memberWeeklyEndDate)}`;
   const isMemberWeekThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === memberWeekStartDate.getTime();
+  // 想定粗利の一覧で担当者を表示し、編集時に保存先を振り分けられるよう、候補者に担当者を付けておく。
   const candidatesAcrossUsers = useMemo(
-    () => users.flatMap(user => allUsersData[user]?.candidates || []),
+    () => users.flatMap(user => (allUsersData[user]?.candidates || []).map(c => ({ ...c, ownerEmail: user, ownerLabel: allUsersData[user]?.displayName || user }))),
     [users, allUsersData]
   );
   const perUserTrendEntries = useMemo(
@@ -14288,7 +14448,16 @@ const AllUsersDashboard: React.FC<{
               <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
             ))}
           </div>
-          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} stageFilters={grossProfitStageFilters} onStageFiltersChange={setGrossProfitStageFilters} />
+          <GrossProfitSummary
+            candidates={candidatesAcrossUsers}
+            allMedia={allMedia}
+            periodOverride={grossProfitPeriodOverride}
+            periodLabel={grossProfitPeriodLabel}
+            stageFilters={grossProfitStageFilters}
+            onStageFiltersChange={setGrossProfitStageFilters}
+            onSaveCandidate={onSaveAggregateCandidate}
+            canEditCandidate={(c) => !!c.ownerEmail && !!canEditAcceptedDealOwner && canEditAcceptedDealOwner(c.ownerEmail)}
+          />
           {grossProfitMonthlyBreakdown && (
             <>
               <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{grossProfitPeriodLabel}{grossProfitStageFilters.length > 0 && `・${grossProfitStageFilters.join('/')}のみ`}）</h3>
@@ -16889,6 +17058,26 @@ const App: React.FC = () => {
     if (currentIdentity && normalizeEmail(ownerEmail) === normalizeEmail(currentIdentity.email)) return true;
     return middleManagedMemberEmails.some(e => normalizeEmail(e) === normalizeEmail(ownerEmail));
   };
+  // 全ユーザー/チーム別タブの想定粗利から候補者（ownerEmail付き）を修正した時の保存。自分の候補者は
+  // 通常の保存、ミドルが代理編集できるメンバーの候補者は、手元で知っている版との差分だけを
+  // persistTeammateCandidateEditで本人のデータへ書き込む（パイプラインの代理編集と同じ方式）。
+  const handleSaveAggregateCandidate = (candidateData: Candidate) => {
+    const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
+    if (!ownerEmail) return;
+    if (currentIdentity && normalizeEmail(ownerEmail) === normalizeEmail(currentIdentity.email)) {
+      handleSaveCandidate(sanitized as Candidate);
+      return;
+    }
+    if (!canEditAcceptedDealOwner(ownerEmail)) return;
+    const prevKnown = allUsersData[ownerEmail]?.candidates.find(c => c.id === sanitized.id);
+    if (!prevKnown) return;
+    const patch: Partial<Candidate> = {};
+    (Object.keys(sanitized) as (keyof Candidate)[]).forEach(key => {
+      if ((sanitized as any)[key] !== (prevKnown as any)[key]) (patch as any)[key] = (sanitized as any)[key];
+    });
+    if (Object.keys(patch).length === 0) return;
+    persistTeammateCandidateEdit(ownerEmail, sanitized.id, patch);
+  };
   const handleChangeAcceptedDealMonth = (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
     const withMonth = (apps: CompanyApplication[]) =>
       apps.map(app => (app.id === applicationId ? { ...app, expectedDecisionDate: `${yyyymm}-01` } : app));
@@ -19127,6 +19316,7 @@ const App: React.FC = () => {
                   onNextDowMonth={() => handleShiftDowMonth(1)}
                   canEditAcceptedDealOwner={canEditAcceptedDealOwner}
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
+                  onSaveAggregateCandidate={handleSaveAggregateCandidate}
               />
             </>
           )
@@ -19248,6 +19438,7 @@ const App: React.FC = () => {
                   onNextDowMonth={() => handleShiftDowMonth(1)}
                   canEditAcceptedDealOwner={canEditAcceptedDealOwner}
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
+                  onSaveAggregateCandidate={handleSaveAggregateCandidate}
               />
             )}
           </div>
