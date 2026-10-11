@@ -1097,6 +1097,10 @@ interface UserData {
   // （読み込み側で欠けたキーの補完・不正なキーの除去まで行う）に一本化しているため、ここでは
   // 生の配列をそのまま保持するだけでよい。
   allUsersSectionOrder?: AllUsersSectionKey[];
+  // 個人実績タブの各セクションの開閉デフォルト（「現在の開閉状態をデフォルトとして保存」で保存）と
+  // 表示順（見出しの▲▼で動かすたびに即保存）。全ユーザー/チーム別タブの上2つと同じ仕組み。
+  personalSectionDefaults?: Partial<Record<PersonalSectionKey, boolean>>;
+  personalSectionOrder?: PersonalSectionKey[];
   // 候補者パイプライン一覧の「選考フェーズで絞り込み」— 現在チェックしているフェーズを
   // "現在の選択をデフォルトとして保存" で保存しておくと、次回このタブ（またはスコープ）を
   // 開いた時に選択済みの状態から始められる。スコープ（自分/全ユーザー/チーム/ユーザー別）ごとに
@@ -4386,6 +4390,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '個人実績タブの各セクションも、全ユーザー/チーム別タブと同じく「現在の開閉状態をデフォルトとして保存」で次回以降の開閉状態を保存でき、見出しの▲▼ボタンで表示順を入れ替えられるようにした（どちらもユーザーごとの設定です）',
       '個人実績タブの「表示する媒体」「目標の期間換算」「月次目標設定」「週次目標設定」「日次目標設定」を、1つの「目標・表示媒体の設定」にまとめた。上で表示する媒体を選び、その下の「月次／週次／日次」タブを切り替えて目標を入力します。期間の換算（「この月次目標から週次・日次目標を換算して設定」など）と稼働日数・自動換算の設定も、各タブの上の1行から操作できます',
       '個人実績タブに「目標の期間換算」を追加。日次・週次・月次のいずれかの目標をもとに、稼働日数（月は既定で今月の平日数、週は既定で5日。各自で変更可）に応じて他の期間の目標をワンクリックで一括設定できます。「目標を入力したら他の期間も自動で換算する」をオンにすると、目標を入力した時点で同じ項目の他の期間の目標も自動で書き換わります',
       '個人実績タブに「表示する媒体」を追加。目標入力や進捗確認に使う媒体を各自で選べ、チェックを外した媒体は「本日の進捗」「週間サマリー」「媒体別 月次進捗」と月次・週次・日次の目標設定に表示されなくなります。チームの「使用する媒体」とは別の、本人だけの設定です（入力済みの実績・目標値は消えません）',
@@ -13766,6 +13771,20 @@ const resolveAllUsersSectionOrder = (saved: AllUsersSectionKey[] | undefined): A
   return [...validSaved, ...missing];
 };
 
+// 個人実績タブの各セクションの表示順・開閉デフォルト（全ユーザー/チーム別タブの
+// allUsersSectionOrder/allUsersSectionDefaultsと同じ仕組みの個人実績版）。キーは各セクションの
+// 開閉状態（sectionVisibility）のキーをそのまま使う。
+type PersonalSectionKey = 'calendar' | 'dailyProgress' | 'weeklySummary' | 'mediaProgress' | 'monthlyPerformance' | 'monthOverMonthPerformance' | 'dayOfWeekRate' | 'personalGrossProfit' | 'customPeriodReport' | 'monthlyTargetSettings';
+const DEFAULT_PERSONAL_SECTION_ORDER: PersonalSectionKey[] = ['calendar', 'dailyProgress', 'weeklySummary', 'mediaProgress', 'monthlyPerformance', 'monthOverMonthPerformance', 'dayOfWeekRate', 'personalGrossProfit', 'customPeriodReport', 'monthlyTargetSettings'];
+// 保存済みの並びは古い版・破損データの可能性があるため、resolveAllUsersSectionOrderと同じく
+// 不正なキーを除き、後から増えたセクションは末尾に補う。
+const resolvePersonalSectionOrder = (saved: PersonalSectionKey[] | undefined): PersonalSectionKey[] => {
+  if (!saved || saved.length === 0) return DEFAULT_PERSONAL_SECTION_ORDER;
+  const validSaved = saved.filter((key, i): key is PersonalSectionKey => DEFAULT_PERSONAL_SECTION_ORDER.includes(key) && saved.indexOf(key) === i);
+  const missing = DEFAULT_PERSONAL_SECTION_ORDER.filter(key => !validSaved.includes(key));
+  return [...validSaved, ...missing];
+};
+
 const AllUsersDashboard: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -15089,7 +15108,8 @@ const App: React.FC = () => {
     if (hasAppliedSectionDefaultsRef.current || !currentUserData) return;
     hasAppliedSectionDefaultsRef.current = true;
     const saved = currentUserData.allUsersSectionDefaults;
-    if (saved) setSectionVisibility(prev => ({ ...prev, ...saved }));
+    const savedPersonal = currentUserData.personalSectionDefaults;
+    if (saved || savedPersonal) setSectionVisibility(prev => ({ ...prev, ...(saved || {}), ...(savedPersonal || {}) }));
   }, [currentUserData]);
 
   // Captures the CURRENT open/closed state of the 全ユーザー/チーム別進捗 dashboard's sections
@@ -15117,6 +15137,56 @@ const App: React.FC = () => {
       [nextOrder[idxA], nextOrder[idxB]] = [nextOrder[idxB], nextOrder[idxA]];
       return { ...prev, allUsersSectionOrder: nextOrder };
     });
+  };
+
+  // 個人実績タブ版の「現在の開閉状態をデフォルトとして保存」と▲▼並び替え。
+  const [justSavedPersonalSectionDefaults, setJustSavedPersonalSectionDefaults] = useState(false);
+  const handleSavePersonalSectionDefaults = () => {
+    const personalSectionDefaults = Object.fromEntries(
+      DEFAULT_PERSONAL_SECTION_ORDER.map(key => [key, sectionVisibility[key]])
+    ) as Record<PersonalSectionKey, boolean>;
+    setCurrentUserData(prev => (prev ? { ...prev, personalSectionDefaults } : prev));
+    setJustSavedPersonalSectionDefaults(true);
+    setTimeout(() => setJustSavedPersonalSectionDefaults(false), 2500);
+  };
+  const personalSectionOrder = resolvePersonalSectionOrder(currentUserData?.personalSectionOrder);
+  const handleMovePersonalSection = (key: PersonalSectionKey, direction: 'up' | 'down') => {
+    setCurrentUserData(prev => {
+      if (!prev) return prev;
+      const order = resolvePersonalSectionOrder(prev.personalSectionOrder);
+      const idx = order.indexOf(key);
+      const target = direction === 'up' ? idx - 1 : idx + 1;
+      if (idx === -1 || target < 0 || target >= order.length) return prev;
+      const nextOrder = [...order];
+      [nextOrder[idx], nextOrder[target]] = [nextOrder[target], nextOrder[idx]];
+      return { ...prev, personalSectionOrder: nextOrder };
+    });
+  };
+  const personalSectionOrderStyle = (key: PersonalSectionKey): React.CSSProperties => ({ order: personalSectionOrder.indexOf(key) });
+  const renderPersonalSectionMoveControls = (key: PersonalSectionKey, label: string) => {
+    const idx = personalSectionOrder.indexOf(key);
+    return (
+      <span className="section-move-controls" role="group" aria-label={`${label}の表示順を変更`}>
+        <button
+          type="button"
+          className="section-move-button"
+          onClick={(e) => { e.stopPropagation(); handleMovePersonalSection(key, 'up'); }}
+          onKeyDown={(e) => e.stopPropagation()}
+          disabled={idx <= 0}
+          aria-label={`${label}を上へ移動`}
+          title="上へ移動"
+        >▲</button>
+        <button
+          type="button"
+          className="section-move-button"
+          onClick={(e) => { e.stopPropagation(); handleMovePersonalSection(key, 'down'); }}
+          onKeyDown={(e) => e.stopPropagation()}
+          disabled={idx === -1 || idx >= personalSectionOrder.length - 1}
+          aria-label={`${label}を下へ移動`}
+          title="下へ移動"
+        >▼</button>
+      </span>
+    );
   };
 
   // 週間サマリー・各カレンダーの週の始まり。個人で明示的に上書き（currentUserData.weekStartDay
@@ -15266,6 +15336,9 @@ const App: React.FC = () => {
     // 同じ理由: カードの並び順（allUsersSectionOrder）も許可リストに無いと、並び替えた直後は
     // 効いていても再読み込みのたびに既定順へ戻ってしまう。
     allUsersSectionOrder: d.allUsersSectionOrder,
+    // 同じ理由: 個人実績タブの開閉デフォルト・表示順も許可リストに無いと再読み込みで消える。
+    personalSectionDefaults: d.personalSectionDefaults,
+    personalSectionOrder: d.personalSectionOrder,
     // 同じ理由でここに列挙し忘れていた不具合修正: 「選考フェーズで絞り込み」のスコープ別
     // デフォルトも、normalize()の許可リストに無いと保存直後は効いていても再読み込みのたびに
     // 消えて見えていた。
@@ -18396,7 +18469,15 @@ const App: React.FC = () => {
              </div>
              <ScoutProgressLeaderboard weekly={scoutProgressLeaderboards.weekly} monthly={scoutProgressLeaderboards.monthly} />
 
-             <section aria-labelledby="calendar-title">
+             <div className="section-defaults-bar">
+               <button type="button" onClick={handleSavePersonalSectionDefaults} className="secondary-action-button">
+                 現在の開閉状態をデフォルトとして保存
+               </button>
+               {justSavedPersonalSectionDefaults && <span className="section-defaults-saved-message">保存しました。次回以降この状態で表示されます。</span>}
+               <span className="section-defaults-saved-message" style={{ opacity: 0.8 }}>各見出しの▲▼で表示順を入れ替えられます（自動で保存）</span>
+             </div>
+             <div className="all-users-dashboard-sections">
+             <section aria-labelledby="calendar-title" style={personalSectionOrderStyle('calendar')}>
               <h2
                 id="calendar-title"
                 className="section-title collapsible-header"
@@ -18407,7 +18488,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.calendar}
                 aria-controls="calendar-content"
               >
-                <span>実績カレンダー</span>
+                <span className="section-title-label"><span>実績カレンダー</span>{renderPersonalSectionMoveControls('calendar', '実績カレンダー')}</span>
                 <span className={`toggle-icon ${sectionVisibility.calendar ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="calendar-content" className={`collapsible-content ${sectionVisibility.calendar ? 'open' : ''}`}>
@@ -18443,7 +18524,7 @@ const App: React.FC = () => {
               </div>
             </section>
 
-            <section aria-labelledby="daily-progress-title">
+            <section aria-labelledby="daily-progress-title" style={personalSectionOrderStyle('dailyProgress')}>
                 <h2
                   id="daily-progress-title"
                   className="section-title collapsible-header"
@@ -18451,7 +18532,7 @@ const App: React.FC = () => {
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('dailyProgress'); } }}
                   role="button" tabIndex={0} aria-expanded={sectionVisibility.dailyProgress} aria-controls="daily-progress-content"
                 >
-                  <span>本日の進捗</span>
+                  <span className="section-title-label"><span>本日の進捗</span>{renderPersonalSectionMoveControls('dailyProgress', '本日の進捗')}</span>
                   <span className={`toggle-icon ${sectionVisibility.dailyProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="daily-progress-content" className={`collapsible-content ${sectionVisibility.dailyProgress ? 'open' : ''}`}>
@@ -18459,7 +18540,7 @@ const App: React.FC = () => {
                 </div>
             </section>
 
-            <section aria-labelledby="weekly-summary-title">
+            <section aria-labelledby="weekly-summary-title" style={personalSectionOrderStyle('weeklySummary')}>
               <h2 
                 id="weekly-summary-title"
                 className="section-title collapsible-header"
@@ -18467,7 +18548,7 @@ const App: React.FC = () => {
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('weeklySummary'); } }}
                 role="button" tabIndex={0} aria-expanded={sectionVisibility.weeklySummary} aria-controls="weekly-summary-content"
               >
-                <span>週間サマリー</span>
+                <span className="section-title-label"><span>週間サマリー</span>{renderPersonalSectionMoveControls('weeklySummary', '週間サマリー')}</span>
                 <span className={`toggle-icon ${sectionVisibility.weeklySummary ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="weekly-summary-content" className={`collapsible-content ${sectionVisibility.weeklySummary ? 'open' : ''}`}>
@@ -18483,7 +18564,7 @@ const App: React.FC = () => {
               </div>
             </section>
             
-            <section aria-labelledby="media-progress-title">
+            <section aria-labelledby="media-progress-title" style={personalSectionOrderStyle('mediaProgress')}>
                 <h2 
                   id="media-progress-title"
                   className="section-title collapsible-header"
@@ -18491,7 +18572,7 @@ const App: React.FC = () => {
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('mediaProgress'); } }}
                   role="button" tabIndex={0} aria-expanded={sectionVisibility.mediaProgress} aria-controls="media-progress-content"
                 >
-                  <span>媒体別 月次進捗（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>
+                  <span className="section-title-label"><span>媒体別 月次進捗（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>{renderPersonalSectionMoveControls('mediaProgress', '媒体別 月次進捗')}</span>
                   <span className={`toggle-icon ${sectionVisibility.mediaProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="media-progress-content" className={`collapsible-content ${sectionVisibility.mediaProgress ? 'open' : ''}`}>
@@ -18521,7 +18602,7 @@ const App: React.FC = () => {
                 </div>
             </section>
 
-             <section aria-labelledby="current-month-performance-title">
+             <section aria-labelledby="current-month-performance-title" style={personalSectionOrderStyle('monthlyPerformance')}>
                <h2
                 id="current-month-performance-title"
                 className="section-title collapsible-header"
@@ -18532,7 +18613,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.monthlyPerformance}
                 aria-controls="current-month-performance-content"
               >
-                <span>日次パフォーマンストレンド（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>
+                <span className="section-title-label"><span>日次パフォーマンストレンド（{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月）</span>{renderPersonalSectionMoveControls('monthlyPerformance', '日次パフォーマンストレンド')}</span>
                 <span className={`toggle-icon ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="current-month-performance-content" className={`collapsible-content ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>
@@ -18548,7 +18629,7 @@ const App: React.FC = () => {
               </div>
             </section>
             
-             <section aria-labelledby="month-over-month-performance-title">
+             <section aria-labelledby="month-over-month-performance-title" style={personalSectionOrderStyle('monthOverMonthPerformance')}>
                <h2
                 id="month-over-month-performance-title"
                 className="section-title collapsible-header"
@@ -18559,7 +18640,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.monthOverMonthPerformance}
                 aria-controls="month-over-month-performance-content"
               >
-                <span>月別パフォーマンストレンド</span>
+                <span className="section-title-label"><span>月別パフォーマンストレンド</span>{renderPersonalSectionMoveControls('monthOverMonthPerformance', '月別パフォーマンストレンド')}</span>
                 <span className={`toggle-icon ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="month-over-month-performance-content" className={`collapsible-content ${sectionVisibility.monthOverMonthPerformance ? 'open' : ''}`}>
@@ -18572,7 +18653,7 @@ const App: React.FC = () => {
               </div>
             </section>
             
-            <section aria-labelledby="day-of-week-rate-title">
+            <section aria-labelledby="day-of-week-rate-title" style={personalSectionOrderStyle('dayOfWeekRate')}>
                <h2
                 id="day-of-week-rate-title"
                 className="section-title collapsible-header"
@@ -18583,7 +18664,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.dayOfWeekRate}
                 aria-controls="day-of-week-rate-content"
               >
-                <span>曜日別 累積返信率（{personalDowPeriodOverride ? '指定期間' : '全期間'}）</span>
+                <span className="section-title-label"><span>曜日別 累積返信率（{personalDowPeriodOverride ? '指定期間' : '全期間'}）</span>{renderPersonalSectionMoveControls('dayOfWeekRate', '曜日別 累積返信率')}</span>
                 <span className={`toggle-icon ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="day-of-week-rate-content" className={`collapsible-content ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>
@@ -18604,7 +18685,7 @@ const App: React.FC = () => {
               </div>
             </section>
             
-            <section aria-labelledby="personal-gross-profit-title">
+            <section aria-labelledby="personal-gross-profit-title" style={personalSectionOrderStyle('personalGrossProfit')}>
               <h2
                 id="personal-gross-profit-title"
                 className="section-title collapsible-header"
@@ -18615,7 +18696,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.personalGrossProfit}
                 aria-controls="personal-gross-profit-content"
               >
-                <span>自分の想定粗利・内定承諾一覧</span>
+                <span className="section-title-label"><span>自分の想定粗利・内定承諾一覧</span>{renderPersonalSectionMoveControls('personalGrossProfit', '自分の想定粗利・内定承諾一覧')}</span>
                 <span className={`toggle-icon ${sectionVisibility.personalGrossProfit ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="personal-gross-profit-content" className={`collapsible-content ${sectionVisibility.personalGrossProfit ? 'open' : ''}`}>
@@ -18623,7 +18704,7 @@ const App: React.FC = () => {
               </div>
             </section>
 
-            <section aria-labelledby="custom-report-title">
+            <section aria-labelledby="custom-report-title" style={personalSectionOrderStyle('customPeriodReport')}>
                <h2
                 id="custom-report-title"
                 className="section-title collapsible-header"
@@ -18634,7 +18715,7 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.customPeriodReport}
                 aria-controls="custom-report-content"
               >
-                <span>カスタム期間レポート</span>
+                <span className="section-title-label"><span>カスタム期間レポート</span>{renderPersonalSectionMoveControls('customPeriodReport', 'カスタム期間レポート')}</span>
                 <span className={`toggle-icon ${sectionVisibility.customPeriodReport ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="custom-report-content" className={`collapsible-content ${sectionVisibility.customPeriodReport ? 'open' : ''}`}>
@@ -18642,7 +18723,7 @@ const App: React.FC = () => {
               </div>
             </section>
             
-            <section aria-labelledby="target-settings-title">
+            <section aria-labelledby="target-settings-title" style={personalSectionOrderStyle('monthlyTargetSettings')}>
                 <h2
                     id="target-settings-title"
                     className="section-title collapsible-header"
@@ -18653,7 +18734,7 @@ const App: React.FC = () => {
                     aria-expanded={sectionVisibility.monthlyTargetSettings}
                     aria-controls="target-settings-content"
                 >
-                    <span>目標・表示媒体の設定</span>
+                    <span className="section-title-label"><span>目標・表示媒体の設定</span>{renderPersonalSectionMoveControls('monthlyTargetSettings', '目標・表示媒体の設定')}</span>
                     <span className={`toggle-icon ${sectionVisibility.monthlyTargetSettings ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="target-settings-content" className={`collapsible-content ${sectionVisibility.monthlyTargetSettings ? 'open' : ''}`}>
@@ -18882,6 +18963,7 @@ const App: React.FC = () => {
                     )}
                 </div>
             </section>
+             </div>
           </>
         )}
         {view === 'all_users_kpi' && (
