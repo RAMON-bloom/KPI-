@@ -4310,6 +4310,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '【不具合修正】想定粗利を「内定承諾」などの選考フェーズで絞り込んでも、正しい金額にならないことがある不具合を修正。複数社を受けている候補者は確度の評価だけで1社を選んで集計していたため、確度が未入力だと内定承諾した企業ではなく別の企業の選考で数えられていたのが原因。内定承諾の選考がある候補者は、必ずその選考で集計するようにした（内定承諾が無い場合も、お見送り・選考辞退より進行中の選考を優先します）',
+      '【不具合修正】想定粗利の「選考フェーズで絞り込み」が、合計カードにしか効かず「メンバー別想定粗利」「月別想定粗利」「メンバー別×月別」の表には反映されていなかったのを修正（全ユーザー/チーム別タブ・個人実績タブ・パイプラインのチーム表示すべて）',
       '個人実績タブに「自分の想定粗利・内定承諾一覧」を追加。自分の候補者の想定粗利を、今月・前月/次月・任意の期間（「今期（3月〜翌2月）」などのワンクリック指定あり）で確認でき、複数月にまたがる期間では月別の内訳も表示します',
       '同じく「内定承諾一覧」で、いつ（何月の成約として）誰が内定承諾したかを成約月ごとに確認できるようにした。一覧上で成約月を変更でき、変更すると想定粗利もその月に集計されます（非表示にした候補者の内定承諾も含みます）',
       '想定粗利の「よく使う期間」に「前期」を追加',
@@ -7968,17 +7970,26 @@ function isDateInMonth(dateISO: string, yyyyMM: string): boolean {
  * いる場合だけは例外的に残す — 非表示は「もう追いかけていない」ことを表すだけで、成約後に
  * 掘り起しリストや非表示に移した候補者の実績まで想定粗利から消えてしまうのは意図しない挙動
  * だったため。内定承諾後辞退（EXIT_PIPELINE_STAGESの1つ）は成約が覆った扱いなので対象外のまま。
+ *
+ * 表示中の候補者でも、内定承諾の選考があればそれを最優先する（成約は確度の見込みより確かな
+ * 事実のため）。以前は確度の評価だけで1社を選んでいたため、確度未入力同士なら先頭の選考が選ばれ、
+ * 他社の選考に内定承諾分の粗利が置き換わって「内定承諾」で絞り込んでも集計に出ないことがあった。
+ * 内定承諾が無い場合も、お見送り・選考辞退などで終わった選考より進行中の選考を優先する。
  */
 function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipelineEntry[] {
     const result: CompanyPipelineEntry[] = [];
     candidates.forEach(candidate => {
-        if (!candidate.isHidden) {
-            const best = getBestConfidenceApplication(candidate);
-            if (best) result.push({ candidate, application: best });
+        const visibleApps = candidate.applications.filter(app => !app.isHidden);
+        const acceptedApp = visibleApps.find(app => app.stage === '内定承諾');
+        if (acceptedApp) {
+            result.push({ candidate, application: acceptedApp });
             return;
         }
-        const acceptedApp = candidate.applications.find(app => !app.isHidden && app.stage === '内定承諾');
-        if (acceptedApp) result.push({ candidate, application: acceptedApp });
+        if (candidate.isHidden || visibleApps.length === 0) return;
+        const activeApps = visibleApps.filter(app => !EXIT_PIPELINE_STAGES.includes(app.stage));
+        const pool = activeApps.length > 0 ? activeApps : visibleApps;
+        const best = pool.reduce((a, b) => (confidenceScore(b) < confidenceScore(a) ? b : a));
+        result.push({ candidate, application: best });
     });
     return result;
 }
@@ -8067,9 +8078,10 @@ const addGrossProfitTotals = (a: GrossProfitTotal, b: GrossProfitTotal): GrossPr
     cost: a.cost + b.cost,
     profit: a.profit + b.profit,
 });
-const sumActiveGrossProfit = (stageTotals: StageGrossProfit[]): GrossProfitTotal =>
+// stageFiltersを指定した場合（想定粗利の「選考フェーズで絞り込み」）は、そのフェーズだけの合計にする。
+const sumActiveGrossProfit = (stageTotals: StageGrossProfit[], stageFilters: PipelineStage[] = []): GrossProfitTotal =>
     stageTotals
-        .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
+        .filter(s => stageFilters.length > 0 ? stageFilters.includes(s.stage) : !EXIT_PIPELINE_STAGES.includes(s.stage))
         .reduce<GrossProfitTotal>((acc, s) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL);
 
 // 指定期間をカレンダー月ごとに区切る（先頭・末尾の月は期間の開始日/終了日で切り詰める）。
@@ -8134,11 +8146,20 @@ const GrossProfitSummary: React.FC<{
     // 集計にはこのコンポーネントが（uncontrolledの場合は自前で）持っているperiodOverideを
     // そのまま使うので、合計とメンバー別で対象期間がずれることはない。
     memberBreakdown?: { key: string; label: string; candidates: Candidate[] }[];
-}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel, memberBreakdown }) => {
+    // 「選考フェーズで絞り込み」を親が持つ場合に渡す — 親側のメンバー別・月別の表にも同じ
+    // 絞り込みを効かせるため。渡さなければこのコンポーネント内だけで管理する。
+    stageFilters?: PipelineStage[];
+    onStageFiltersChange?: (next: PipelineStage[]) => void;
+}> = ({ candidates, allMedia, periodOverride: externalPeriodOverride, periodLabel: externalPeriodLabel, memberBreakdown, stageFilters: externalStageFilters, onStageFiltersChange }) => {
     const isControlled = externalPeriodOverride !== undefined;
-    const [selectedStageFilters, setSelectedStageFilters] = useState<PipelineStage[]>([]);
+    const [ownStageFilters, setOwnStageFilters] = useState<PipelineStage[]>([]);
+    const selectedStageFilters = externalStageFilters ?? ownStageFilters;
+    const setSelectedStageFilters = (next: PipelineStage[]) => {
+        if (onStageFiltersChange) onStageFiltersChange(next);
+        else setOwnStageFilters(next);
+    };
     const toggleStageFilter = (stage: PipelineStage) => {
-        setSelectedStageFilters(prev => prev.includes(stage) ? prev.filter(s => s !== stage) : [...prev, stage]);
+        setSelectedStageFilters(selectedStageFilters.includes(stage) ? selectedStageFilters.filter(s => s !== stage) : [...selectedStageFilters, stage]);
     };
 
     // 自前の期間ピッカー（isControlledがfalseの時だけ使う）。全ユーザー/チーム別ダッシュボードの
@@ -8205,19 +8226,10 @@ const GrossProfitSummary: React.FC<{
     const memberBreakdownTotals = useMemo(() => {
         if (!memberBreakdown) return [];
         return memberBreakdown.map(group => {
-            const groupStageTotals = computeGrossProfitByStage(group.candidates, allMedia, periodOverride);
-            const total = groupStageTotals
-                .filter(s => !EXIT_PIPELINE_STAGES.includes(s.stage))
-                .reduce((acc, s) => ({
-                    count: acc.count + s.count,
-                    estimableCount: acc.estimableCount + s.estimableCount,
-                    revenue: acc.revenue + s.revenue,
-                    cost: acc.cost + s.cost,
-                    profit: acc.profit + s.profit,
-                }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
+            const total = sumActiveGrossProfit(computeGrossProfitByStage(group.candidates, allMedia, periodOverride), selectedStageFilters);
             return { key: group.key, label: group.label, ...total };
         });
-    }, [memberBreakdown, allMedia, periodOverride]);
+    }, [memberBreakdown, allMedia, periodOverride, selectedStageFilters]);
 
     return (
         <div className="gross-profit-summary">
@@ -8405,9 +8417,10 @@ const PersonalGrossProfitSection: React.FC<{
         setIsCustomEnabled(true);
     };
 
+    const [stageFilters, setStageFilters] = useState<PipelineStage[]>([]);
     const periodTotal = useMemo(
-        () => sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, periodOverride)),
-        [candidates, allMedia, periodOverride]
+        () => sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, periodOverride), stageFilters),
+        [candidates, allMedia, periodOverride, stageFilters]
     );
     const monthlyRows = useMemo(() => {
         if (!periodOverride) return null;
@@ -8415,9 +8428,9 @@ const PersonalGrossProfitSection: React.FC<{
         if (months.length < 2) return null;
         return months.map(month => ({
             label: month.label,
-            total: sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, { start: month.start, end: month.end })),
+            total: sumActiveGrossProfit(computeGrossProfitByStage(candidates, allMedia, { start: month.start, end: month.end }), stageFilters),
         }));
-    }, [candidates, allMedia, periodOverride]);
+    }, [candidates, allMedia, periodOverride, stageFilters]);
 
     // 内定承諾の一覧 — 非表示（掘り起しリスト・アーカイブ）にした候補者も、想定粗利の集計と同じく含める。
     const [showAllAccepted, setShowAllAccepted] = useState(false);
@@ -8500,11 +8513,11 @@ const PersonalGrossProfitSection: React.FC<{
                 ))}
             </div>
 
-            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} />
+            <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} />
 
             {monthlyRows && (
                 <>
-                    <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{periodLabel}）</h3>
+                    <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{periodLabel}{stageFilters.length > 0 && `・${stageFilters.join('/')}のみ`}）</h3>
                     <div className="all-users-table-container">
                         <table className="weekly-summary-table">
                             <thead>
@@ -13804,14 +13817,16 @@ const AllUsersDashboard: React.FC<{
   // メンバー別想定粗利 — 全体合計だけでなく個人単位でも確認できるように、ユーザーごとに同じ
   // computeGrossProfitByStageを回して合計行（お見送り・選考辞退・内定承諾後辞退を除く）だけ
   // 取り出す。showGrossProfitがfalse（全ユーザータブ）の間は計算自体を省略する。
+  // 想定粗利カードの「選考フェーズで絞り込み」— 合計カードだけでなく、メンバー別・月別の表にも効かせる。
+  const [grossProfitStageFilters, setGrossProfitStageFilters] = useState<PipelineStage[]>([]);
   const perUserGrossProfitTotals = useMemo(() => {
     if (!showGrossProfit) return [];
     return users.map(user => {
       const displayName = allUsersData[user]?.displayName || user;
-      const total = sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, grossProfitPeriodOverride));
+      const total = sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, grossProfitPeriodOverride), grossProfitStageFilters);
       return { user, displayName, ...total };
     });
-  }, [showGrossProfit, users, allUsersData, allMedia, grossProfitPeriodOverride]);
+  }, [showGrossProfit, users, allUsersData, allMedia, grossProfitPeriodOverride, grossProfitStageFilters]);
   const perUserGrossProfitGrandTotal = useMemo(
     () => perUserGrossProfitTotals.reduce<GrossProfitTotal>((acc, s) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL),
     [perUserGrossProfitTotals]
@@ -13823,12 +13838,12 @@ const AllUsersDashboard: React.FC<{
     if (months.length < 2) return null;
     const rows = months.map(month => {
       const range = { start: month.start, end: month.end };
-      const perUser = users.map(user => sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, range)));
+      const perUser = users.map(user => sumActiveGrossProfit(computeGrossProfitByStage(allUsersData[user]?.candidates || [], allMedia, range), grossProfitStageFilters));
       const total = perUser.reduce((acc: GrossProfitTotal, s: GrossProfitTotal) => addGrossProfitTotals(acc, s), EMPTY_GROSS_PROFIT_TOTAL);
       return { label: month.label, total, perUser };
     });
     return { rows };
-  }, [showGrossProfit, grossProfitPeriodOverride, users, allUsersData, allMedia]);
+  }, [showGrossProfit, grossProfitPeriodOverride, users, allUsersData, allMedia, grossProfitStageFilters]);
   const [grossProfitMonthlyMetric, setGrossProfitMonthlyMetric] = useState('profit' as 'profit' | 'revenue' | 'count');
 
   // Hoisted out of the table's render loop so the same per-user period totals can also be
@@ -14122,10 +14137,10 @@ const AllUsersDashboard: React.FC<{
               <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
             ))}
           </div>
-          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} />
+          <GrossProfitSummary candidates={candidatesAcrossUsers} allMedia={allMedia} periodOverride={grossProfitPeriodOverride} periodLabel={grossProfitPeriodLabel} stageFilters={grossProfitStageFilters} onStageFiltersChange={setGrossProfitStageFilters} />
           {grossProfitMonthlyBreakdown && (
             <>
-              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{grossProfitPeriodLabel}）</h3>
+              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>月別想定粗利（{grossProfitPeriodLabel}{grossProfitStageFilters.length > 0 && `・${grossProfitStageFilters.join('/')}のみ`}）</h3>
               <div className="all-users-table-container">
                 <table className="weekly-summary-table">
                   <thead>
@@ -14157,7 +14172,7 @@ const AllUsersDashboard: React.FC<{
                   </tbody>
                 </table>
               </div>
-              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別×月別</h3>
+              <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別×月別{grossProfitStageFilters.length > 0 && `・${grossProfitStageFilters.join('/')}のみ`}</h3>
               <div className="pipeline-sort-controls">
                 <span>表示する値:</span>
                 {([['profit', '想定粗利'], ['revenue', '想定紹介料'], ['count', '対象件数']] as const).map(([key, label]) => (
@@ -14196,7 +14211,7 @@ const AllUsersDashboard: React.FC<{
               </div>
             </>
           )}
-          <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{grossProfitPeriodLabel}）</h3>
+          <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>メンバー別想定粗利（{grossProfitPeriodLabel}{grossProfitStageFilters.length > 0 && `・${grossProfitStageFilters.join('/')}のみ`}）</h3>
           <div className="all-users-table-container">
             <table className="weekly-summary-table">
               <thead>
