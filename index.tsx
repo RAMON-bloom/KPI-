@@ -4310,7 +4310,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
-      '全ユーザータブ・チーム別タブの「想定粗利」カードで、開始日〜終了日を指定して絞り込めるようにした（前月/次月の月送りより優先されます）。「直近3ヶ月」「今後3ヶ月」「今四半期」「今年」のワンクリック指定も追加',
+      '全ユーザータブ・チーム別タブの「想定粗利」カードで、開始日〜終了日を指定して絞り込めるようにした（前月/次月の月送りより優先されます）。「直近3ヶ月」「今後3ヶ月」「今四半期」「今期」のワンクリック指定も追加（「今期」「今四半期」は会社の期に合わせ、3月〜翌2月・3ヶ月ごとの区切りで集計します）',
       '指定した期間が複数月にまたがる場合は、「月別想定粗利」（月ごとの対象件数・想定紹介料・想定媒体手数料・想定粗利と合計）と「メンバー別×月別」の集計表を表示するようにした（表示する値は想定粗利／想定紹介料／対象件数から切り替え可能）。「メンバー別想定粗利」の表にも合計行を追加',
       '全ユーザータブにも「想定粗利」カードを表示するようにした（比較対象に選んだユーザーの合計・メンバー別を確認できます）',
     ],
@@ -13841,11 +13841,14 @@ const AllUsersDashboard: React.FC<{
               const now = new Date();
               const y = now.getFullYear();
               const m = now.getMonth();
+              const fiscalStartYear = m >= 2 ? y : y - 1;
+              const quarterStartMonth = Math.floor((m - 2 + 12) % 12 / 3) * 3 + 2 - (m < 2 ? 12 : 0);
               const presets: { label: string; start: Date; end: Date }[] = [
                 { label: '直近3ヶ月', start: new Date(y, m - 2, 1), end: new Date(y, m + 1, 0) },
                 { label: '今後3ヶ月', start: new Date(y, m, 1), end: new Date(y, m + 3, 0) },
-                { label: '今四半期', start: new Date(y, Math.floor(m / 3) * 3, 1), end: new Date(y, Math.floor(m / 3) * 3 + 3, 0) },
-                { label: '今年（1〜12月）', start: new Date(y, 0, 1), end: new Date(y, 12, 0) },
+                // 会社の期は3月始まり（3月〜翌2月）。四半期も期に合わせて3〜5月/6〜8月/9〜11月/12〜翌2月で区切る。
+                { label: '今四半期', start: new Date(y, quarterStartMonth, 1), end: new Date(y, quarterStartMonth + 3, 0) },
+                { label: `今期（${fiscalStartYear}年3月〜${fiscalStartYear + 1}年2月）`, start: new Date(fiscalStartYear, 2, 1), end: new Date(fiscalStartYear + 1, 2, 0) },
               ];
               return presets.map(p => (
                 <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
