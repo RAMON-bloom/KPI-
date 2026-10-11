@@ -4390,6 +4390,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '想定粗利の「よく使う期間」に「6月賞与対象（前年12月〜5月）」「12月賞与対象（6月〜11月）」を追加し、「直近3ヶ月」「今後3ヶ月」を削除した（全ユーザー/チーム別タブ・個人実績タブ・候補者パイプライン共通）',
       '候補者パイプラインの「想定粗利」も、個人実績タブ・全ユーザー/チーム別タブと同じ機能にそろえた。前月/次月、任意期間、「今期（3月〜翌2月）」「前期」などのワンクリック指定、複数月にまたがる期間の「月別想定粗利」、内定承諾一覧（成約月の確認・変更）が使えます。チーム・全ユーザー表示ではメンバー別・メンバー別×月別の集計と担当者付きの内定承諾一覧も表示し、全ユーザー表示でもメンバー別想定粗利を確認できるようにした',
       '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプラインのチーム表示）の各案件に、粗利の金額と、計算に足りない入力（年収・fee料率など）を「要入力」として表示するようにした。「編集」から想定年収・オファー年収・報酬形態（料率/固定報酬）・fee料率・固定報酬額・媒体をその場で入力・修正でき、入力内容は候補者パイプラインの同じ項目にも反映されます（他メンバーの候補者は、ミドルとして代理編集できる場合のみ）。「未入力の案件だけ表示」で入力漏れの案件だけを絞り込めます',
       '個人実績タブの各セクションも、全ユーザー/チーム別タブと同じく「現在の開閉状態をデフォルトとして保存」で次回以降の開閉状態を保存でき、見出しの▲▼ボタンで表示順を入れ替えられるようにした（どちらもユーザーごとの設定です）',
@@ -8196,9 +8197,12 @@ const buildGrossProfitPeriodPresets = (now: Date = new Date()): { label: string;
     const m = now.getMonth();
     const fiscalStartYear = m >= 2 ? y : y - 1;
     const quarterStartMonth = Math.floor((m - 2 + 12) % 12 / 3) * 3 + 2 - (m < 2 ? 12 : 0);
+    // 賞与の査定期間: 6月賞与 = 前年12月〜5月、12月賞与 = 6月〜11月。12月に入ったら6月賞与は
+    // 次回分（今年12月〜翌5月）に切り替える（その月から次の査定期間が始まるため）。
+    const juneBonusEndYear = m === 11 ? y + 1 : y;
     return [
-        { label: '直近3ヶ月', start: new Date(y, m - 2, 1), end: new Date(y, m + 1, 0) },
-        { label: '今後3ヶ月', start: new Date(y, m, 1), end: new Date(y, m + 3, 0) },
+        { label: `6月賞与対象（${juneBonusEndYear - 1}年12月〜${juneBonusEndYear}年5月）`, start: new Date(juneBonusEndYear - 1, 11, 1), end: new Date(juneBonusEndYear, 5, 0) },
+        { label: `12月賞与対象（${y}年6月〜11月）`, start: new Date(y, 5, 1), end: new Date(y, 11, 0) },
         { label: '今四半期', start: new Date(y, quarterStartMonth, 1), end: new Date(y, quarterStartMonth + 3, 0) },
         { label: `今期（${fiscalStartYear}年3月〜${fiscalStartYear + 1}年2月）`, start: new Date(fiscalStartYear, 2, 1), end: new Date(fiscalStartYear + 1, 2, 0) },
         { label: `前期（${fiscalStartYear - 1}年3月〜${fiscalStartYear}年2月）`, start: new Date(fiscalStartYear - 1, 2, 1), end: new Date(fiscalStartYear, 2, 0) },
