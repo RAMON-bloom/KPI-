@@ -4310,6 +4310,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '全ユーザータブ・チーム別タブの「想定粗利」カードにも「内定承諾一覧（成約月ごと）」を追加。何月に誰（担当者・候補者・企業）が内定承諾したかを、選択中の期間または全期間で確認できます。成約月の変更は、自分の候補者と、ミドルとして代理編集できるメンバーの候補者に限り一覧上から行えます（それ以外は閲覧のみ）',
       '【不具合修正】想定粗利を「内定承諾」などの選考フェーズで絞り込んでも、正しい金額にならないことがある不具合を修正。複数社を受けている候補者は確度の評価だけで1社を選んで集計していたため、確度が未入力だと内定承諾した企業ではなく別の企業の選考で数えられていたのが原因。内定承諾の選考がある候補者は、必ずその選考で集計するようにした（内定承諾が無い場合も、お見送り・選考辞退より進行中の選考を優先します）',
       '【不具合修正】想定粗利の「選考フェーズで絞り込み」が、合計カードにしか効かず「メンバー別想定粗利」「月別想定粗利」「メンバー別×月別」の表には反映されていなかったのを修正（全ユーザー/チーム別タブ・個人実績タブ・パイプラインのチーム表示すべて）',
       '個人実績タブに「自分の想定粗利・内定承諾一覧」を追加。自分の候補者の想定粗利を、今月・前月/次月・任意の期間（「今期（3月〜翌2月）」などのワンクリック指定あり）で確認でき、複数月にまたがる期間では月別の内訳も表示します',
@@ -8366,6 +8367,145 @@ const formatYearMonthLabel = (yyyymm: string): string => {
 };
 
 /**
+ * 内定承諾一覧（成約月ごと）— 個人実績タブ・全ユーザー/チーム別タブ共通。内定承諾済みの選考を
+ * 成約月（=その選考の意思決定時期、未入力なら候補者の見込み月）ごとにまとめ、件数・想定紹介料・
+ * 想定粗利の小計を出す。成約月はcanEdit(ownerKey)がtrueの行だけその場で付け替えられる——付け替えると
+ * 想定粗利の集計月も同時に変わる（どちらも同じ意思決定時期を見ているため）。非表示（掘り起しリスト・
+ * アーカイブ）にした候補者も、想定粗利の集計と同じく含める。showOwnerを指定すると担当者列を出す。
+ */
+type AcceptedDealSource = { ownerKey: string; ownerLabel: string; candidates: Candidate[] };
+type AcceptedDealRow = {
+    ownerKey: string;
+    ownerLabel: string;
+    candidate: Candidate;
+    application: CompanyApplication;
+    dealMonth: string;
+    acceptedOn: string;
+    result: { revenue: number; cost: number; profit: number } | null;
+};
+const AcceptedDealsList: React.FC<{
+    sources: AcceptedDealSource[];
+    allMedia: MediaEntry[];
+    periodOverride: { start: Date; end: Date } | null;
+    periodLabel: string;
+    showOwner?: boolean;
+    canEdit: (ownerKey: string) => boolean;
+    onChangeDealMonth: (ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
+}> = ({ sources, allMedia, periodOverride, periodLabel, showOwner = false, canEdit, onChangeDealMonth }) => {
+    const [showAllAccepted, setShowAllAccepted] = useState(false);
+    const acceptedDeals = useMemo(() => {
+        const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
+        const rows: AcceptedDealRow[] = [];
+        sources.forEach(({ ownerKey, ownerLabel, candidates }) => {
+            candidates.forEach(candidate => {
+                candidate.applications.forEach(application => {
+                    if (application.isHidden || application.stage !== '内定承諾') return;
+                    if (!showAllAccepted && !isDecisionInPeriod(candidate, application, periodOverride)) return;
+                    rows.push({
+                        ownerKey,
+                        ownerLabel,
+                        candidate,
+                        application,
+                        dealMonth: getAcceptedDealMonth(candidate, application),
+                        acceptedOn: getAcceptedOnDate(application),
+                        result: computeApplicationGrossProfit(candidate, application, mediaFeeRateById),
+                    });
+                });
+            });
+        });
+        // 成約月の新しい順（未設定は末尾）、同じ月の中は内定承諾日の新しい順
+        rows.sort((a, b) => {
+            if (a.dealMonth !== b.dealMonth) {
+                if (!a.dealMonth) return 1;
+                if (!b.dealMonth) return -1;
+                return b.dealMonth.localeCompare(a.dealMonth);
+            }
+            return b.acceptedOn.localeCompare(a.acceptedOn);
+        });
+        return rows;
+    }, [sources, allMedia, periodOverride, showAllAccepted]);
+    const acceptedDealGroups = useMemo(() => {
+        const groups: { month: string; rows: AcceptedDealRow[] }[] = [];
+        acceptedDeals.forEach((row: AcceptedDealRow) => {
+            const last = groups[groups.length - 1];
+            if (last && last.month === row.dealMonth) last.rows.push(row);
+            else groups.push({ month: row.dealMonth, rows: [row] });
+        });
+        return groups;
+    }, [acceptedDeals]);
+    const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !canEdit(r.ownerKey));
+    const leadingColumns = showOwner ? 5 : 4;
+
+    return (
+        <>
+            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>内定承諾一覧（成約月ごと）</h3>
+            <div className="pipeline-sort-controls">
+                <button type="button" onClick={() => setShowAllAccepted(false)} className={!showAllAccepted ? 'active' : ''}>{periodLabel}の成約</button>
+                <button type="button" onClick={() => setShowAllAccepted(true)} className={showAllAccepted ? 'active' : ''}>全期間</button>
+            </div>
+            <p className="gross-profit-note">
+                成約月を変更すると、その選考の意思決定時期が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
+                {hasReadOnlyRows && ' 成約月を変更できるのは、自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみです。'}
+            </p>
+            {acceptedDealGroups.length === 0 ? (
+                <p className="no-data-message">{showAllAccepted ? '内定承諾の選考はまだありません。' : `${periodLabel}に成約した内定承諾の選考はありません。`}</p>
+            ) : (
+                <div className="all-users-table-container">
+                    <table className="weekly-summary-table">
+                        <thead>
+                            <tr>
+                                <th>成約月</th>
+                                {showOwner && <th>担当者</th>}
+                                <th>候補者</th>
+                                <th>企業</th>
+                                <th>内定承諾日</th>
+                                <th>想定紹介料</th>
+                                <th>想定粗利</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {acceptedDealGroups.map(group => {
+                                const groupRevenue = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.revenue || 0), 0);
+                                const groupProfit = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.profit || 0), 0);
+                                return (
+                                    <React.Fragment key={group.month || 'unset'}>
+                                        <tr style={{ fontWeight: 'bold' }}>
+                                            <td colSpan={leadingColumns}>{formatYearMonthLabel(group.month)}（{group.rows.length}件）</td>
+                                            <td>{formatManYen(groupRevenue)}</td>
+                                            <td>{formatManYen(groupProfit)}</td>
+                                        </tr>
+                                        {group.rows.map(({ ownerKey, ownerLabel, candidate, application, dealMonth, acceptedOn, result }) => (
+                                            <tr key={`${ownerKey}:${candidate.id}:${application.id}`}>
+                                                <td>
+                                                    {canEdit(ownerKey) ? (
+                                                        <input
+                                                            type="month"
+                                                            value={dealMonth}
+                                                            onChange={(e) => { if (e.target.value) onChangeDealMonth(ownerKey, candidate, application.id, e.target.value); }}
+                                                            aria-label={`${candidate.name}さん（${application.companyName}）の成約月`}
+                                                        />
+                                                    ) : formatYearMonthLabel(dealMonth)}
+                                                </td>
+                                                {showOwner && <td>{ownerLabel}</td>}
+                                                <td>{candidate.name}{candidate.isHidden && <small>（非表示）</small>}</td>
+                                                <td>{application.companyName}</td>
+                                                <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
+                                                <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
+                                                <td>{result ? formatManYen(result.profit) : '未入力'}</td>
+                                            </tr>
+                                        ))}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </>
+    );
+};
+
+/**
  * 個人実績タブの「自分の想定粗利・内定承諾一覧」。自分の候補者だけを対象に、全ユーザー/チーム別
  * タブの想定粗利カードと同じ期間指定（今月既定・前月/次月・任意期間・よく使う期間）で想定粗利を
  * 集計し、期間が複数月にまたがる場合は月別の内訳も出す。あわせて内定承諾済みの選考を成約月ごとに
@@ -8432,54 +8572,8 @@ const PersonalGrossProfitSection: React.FC<{
         }));
     }, [candidates, allMedia, periodOverride, stageFilters]);
 
-    // 内定承諾の一覧 — 非表示（掘り起しリスト・アーカイブ）にした候補者も、想定粗利の集計と同じく含める。
-    const [showAllAccepted, setShowAllAccepted] = useState(false);
-    type AcceptedDealRow = {
-        candidate: Candidate;
-        application: CompanyApplication;
-        dealMonth: string;
-        acceptedOn: string;
-        result: { revenue: number; cost: number; profit: number } | null;
-    };
-    const acceptedDeals = useMemo(() => {
-        const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
-        const rows: AcceptedDealRow[] = [];
-        candidates.forEach(candidate => {
-            candidate.applications.forEach(application => {
-                if (application.isHidden || application.stage !== '内定承諾') return;
-                if (!showAllAccepted && !isDecisionInPeriod(candidate, application, periodOverride)) return;
-                rows.push({
-                    candidate,
-                    application,
-                    dealMonth: getAcceptedDealMonth(candidate, application),
-                    acceptedOn: getAcceptedOnDate(application),
-                    result: computeApplicationGrossProfit(candidate, application, mediaFeeRateById),
-                });
-            });
-        });
-        // 成約月の新しい順（未設定は末尾）、同じ月の中は内定承諾日の新しい順
-        rows.sort((a, b) => {
-            if (a.dealMonth !== b.dealMonth) {
-                if (!a.dealMonth) return 1;
-                if (!b.dealMonth) return -1;
-                return b.dealMonth.localeCompare(a.dealMonth);
-            }
-            return b.acceptedOn.localeCompare(a.acceptedOn);
-        });
-        return rows;
-    }, [candidates, allMedia, periodOverride, showAllAccepted]);
-    const acceptedDealGroups = useMemo(() => {
-        const groups: { month: string; rows: AcceptedDealRow[] }[] = [];
-        acceptedDeals.forEach((row: AcceptedDealRow) => {
-            const last = groups[groups.length - 1];
-            if (last && last.month === row.dealMonth) last.rows.push(row);
-            else groups.push({ month: row.dealMonth, rows: [row] });
-        });
-        return groups;
-    }, [acceptedDeals]);
-
-    const handleChangeDealMonth = (candidate: Candidate, applicationId: string, yyyymm: string) => {
-        if (!yyyymm) return;
+    const acceptedDealSources = useMemo(() => [{ ownerKey: 'self', ownerLabel: '', candidates }], [candidates]);
+    const handleChangeDealMonth = (_ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
         onSaveCandidate({
             ...candidate,
             applications: candidate.applications.map(app =>
@@ -8545,64 +8639,14 @@ const PersonalGrossProfitSection: React.FC<{
                 </>
             )}
 
-            <h3 className="sub-section-title" style={{ marginTop: '1.5rem' }}>内定承諾一覧（成約月ごと）</h3>
-            <div className="pipeline-sort-controls">
-                <button type="button" onClick={() => setShowAllAccepted(false)} className={!showAllAccepted ? 'active' : ''}>{periodLabel}の成約</button>
-                <button type="button" onClick={() => setShowAllAccepted(true)} className={showAllAccepted ? 'active' : ''}>全期間</button>
-            </div>
-            <p className="gross-profit-note">
-                成約月を変更すると、その選考の意思決定時期が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
-            </p>
-            {acceptedDealGroups.length === 0 ? (
-                <p className="no-data-message">{showAllAccepted ? '内定承諾の選考はまだありません。' : `${periodLabel}に成約した内定承諾の選考はありません。`}</p>
-            ) : (
-                <div className="all-users-table-container">
-                    <table className="weekly-summary-table">
-                        <thead>
-                            <tr>
-                                <th>成約月</th>
-                                <th>候補者</th>
-                                <th>企業</th>
-                                <th>内定承諾日</th>
-                                <th>想定紹介料</th>
-                                <th>想定粗利</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {acceptedDealGroups.map(group => {
-                                const groupRevenue = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.revenue || 0), 0);
-                                const groupProfit = group.rows.reduce((acc: number, r: AcceptedDealRow) => acc + (r.result?.profit || 0), 0);
-                                return (
-                                    <React.Fragment key={group.month || 'unset'}>
-                                        <tr style={{ fontWeight: 'bold' }}>
-                                            <td colSpan={4}>{formatYearMonthLabel(group.month)}（{group.rows.length}件）</td>
-                                            <td>{formatManYen(groupRevenue)}</td>
-                                            <td>{formatManYen(groupProfit)}</td>
-                                        </tr>
-                                        {group.rows.map(({ candidate, application, dealMonth, acceptedOn, result }) => (
-                                            <tr key={`${candidate.id}:${application.id}`}>
-                                                <td>
-                                                    <input
-                                                        type="month"
-                                                        value={dealMonth}
-                                                        onChange={(e) => handleChangeDealMonth(candidate, application.id, e.target.value)}
-                                                        aria-label={`${candidate.name}さん（${application.companyName}）の成約月`}
-                                                    />
-                                                </td>
-                                                <td>{candidate.name}{candidate.isHidden && <small>（非表示）</small>}</td>
-                                                <td>{application.companyName}</td>
-                                                <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
-                                                <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
-                                                <td>{result ? formatManYen(result.profit) : '未入力'}</td>
-                                            </tr>
-                                        ))}
-                                    </React.Fragment>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+            <AcceptedDealsList
+                sources={acceptedDealSources}
+                allMedia={allMedia}
+                periodOverride={periodOverride}
+                periodLabel={periodLabel}
+                canEdit={() => true}
+                onChangeDealMonth={handleChangeDealMonth}
+            />
         </div>
     );
 };
@@ -13682,6 +13726,10 @@ const AllUsersDashboard: React.FC<{
   dowPeriodOverride: { start: Date; end: Date } | null;
   onPrevDowMonth: () => void;
   onNextDowMonth: () => void;
+  // 想定粗利カードの「内定承諾一覧」で成約月を編集できるか（ユーザーのメールアドレス単位）と、
+  // 編集時の保存処理。未指定なら閲覧のみ。
+  canEditAcceptedDealOwner?: (ownerEmail: string) => boolean;
+  onChangeAcceptedDealMonth?: (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
 }> = ({
   users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults,
   sectionOrder = DEFAULT_ALL_USERS_SECTION_ORDER, onMoveSection,
@@ -13690,6 +13738,7 @@ const AllUsersDashboard: React.FC<{
   progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
   grossProfitPeriodOverride: grossProfitPeriodOverrideProp, onPrevGrossProfitMonth, onNextGrossProfitMonth,
   dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
+  canEditAcceptedDealOwner, onChangeAcceptedDealMonth,
 }) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
   const handleSaveSectionDefaultsClick = () => {
@@ -13817,6 +13866,10 @@ const AllUsersDashboard: React.FC<{
   // メンバー別想定粗利 — 全体合計だけでなく個人単位でも確認できるように、ユーザーごとに同じ
   // computeGrossProfitByStageを回して合計行（お見送り・選考辞退・内定承諾後辞退を除く）だけ
   // 取り出す。showGrossProfitがfalse（全ユーザータブ）の間は計算自体を省略する。
+  const acceptedDealSources = useMemo(
+    () => users.map(user => ({ ownerKey: user, ownerLabel: allUsersData[user]?.displayName || user, candidates: allUsersData[user]?.candidates || [] })),
+    [users, allUsersData]
+  );
   // 想定粗利カードの「選考フェーズで絞り込み」— 合計カードだけでなく、メンバー別・月別の表にも効かせる。
   const [grossProfitStageFilters, setGrossProfitStageFilters] = useState<PipelineStage[]>([]);
   const perUserGrossProfitTotals = useMemo(() => {
@@ -14247,6 +14300,15 @@ const AllUsersDashboard: React.FC<{
               </tbody>
             </table>
           </div>
+          <AcceptedDealsList
+            sources={acceptedDealSources}
+            allMedia={allMedia}
+            periodOverride={grossProfitPeriodOverride}
+            periodLabel={grossProfitPeriodLabel}
+            showOwner
+            canEdit={(ownerKey) => !!onChangeAcceptedDealMonth && (canEditAcceptedDealOwner ? canEditAcceptedDealOwner(ownerKey) : false)}
+            onChangeDealMonth={(ownerKey, candidate, applicationId, yyyymm) => onChangeAcceptedDealMonth?.(ownerKey, candidate, applicationId, yyyymm)}
+          />
         </div>
       </section>
       )}
@@ -16609,6 +16671,26 @@ const App: React.FC = () => {
     });
   };
 
+  // 全ユーザー/チーム別タブの「内定承諾一覧」から成約月を付け替える — 自分の候補者は通常の保存
+  // （handleSaveCandidate）、ミドルが代理編集できるメンバーの候補者はpersistTeammateCandidateEditで
+  // 本人のデータへ書き込む。それ以外のメンバーの候補者は編集不可（閲覧のみ）。
+  const canEditAcceptedDealOwner = (ownerEmail: string): boolean => {
+    if (currentIdentity && normalizeEmail(ownerEmail) === normalizeEmail(currentIdentity.email)) return true;
+    return middleManagedMemberEmails.some(e => normalizeEmail(e) === normalizeEmail(ownerEmail));
+  };
+  const handleChangeAcceptedDealMonth = (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
+    const withMonth = (apps: CompanyApplication[]) =>
+      apps.map(app => (app.id === applicationId ? { ...app, expectedDecisionDate: `${yyyymm}-01` } : app));
+    if (currentIdentity && normalizeEmail(ownerEmail) === normalizeEmail(currentIdentity.email)) {
+      // 集約表示側のキャッシュは古い可能性があるため、手元の最新の自分のデータを基準に書き換える
+      const latest = currentUserData?.candidates.find(c => c.id === candidate.id) || candidate;
+      handleSaveCandidate({ ...latest, applications: withMonth(latest.applications) });
+      return;
+    }
+    if (!canEditAcceptedDealOwner(ownerEmail)) return;
+    persistTeammateCandidateEdit(ownerEmail, candidate.id, { applications: withMonth(candidate.applications) });
+  };
+
   // ミドルによる代理での候補者新規登録 — persistTeammateCandidateEdit と同じ
   // optimistic-local-update-then-fire-and-forget-Drive-write の形だが、既存候補者へのpatchでは
   // なく対象メンバーの候補者一覧に丸ごと新規追加する。computeStageAdvanceUpdate(undefined, ...)
@@ -18776,6 +18858,8 @@ const App: React.FC = () => {
                   dowPeriodOverride={dowPeriodOverride}
                   onPrevDowMonth={() => handleShiftDowMonth(-1)}
                   onNextDowMonth={() => handleShiftDowMonth(1)}
+                  canEditAcceptedDealOwner={canEditAcceptedDealOwner}
+                  onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
               />
             </>
           )
@@ -18895,6 +18979,8 @@ const App: React.FC = () => {
                   dowPeriodOverride={dowPeriodOverride}
                   onPrevDowMonth={() => handleShiftDowMonth(-1)}
                   onNextDowMonth={() => handleShiftDowMonth(1)}
+                  canEditAcceptedDealOwner={canEditAcceptedDealOwner}
+                  onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
               />
             )}
           </div>
