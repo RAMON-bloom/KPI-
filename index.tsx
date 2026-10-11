@@ -4386,6 +4386,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-11',
     items: [
+      '個人実績タブの「表示する媒体」「目標の期間換算」「月次目標設定」「週次目標設定」「日次目標設定」を、1つの「目標・表示媒体の設定」にまとめた。上で表示する媒体を選び、その下の「月次／週次／日次」タブを切り替えて目標を入力します。期間の換算（「この月次目標から週次・日次目標を換算して設定」など）と稼働日数・自動換算の設定も、各タブの上の1行から操作できます',
       '個人実績タブに「目標の期間換算」を追加。日次・週次・月次のいずれかの目標をもとに、稼働日数（月は既定で今月の平日数、週は既定で5日。各自で変更可）に応じて他の期間の目標をワンクリックで一括設定できます。「目標を入力したら他の期間も自動で換算する」をオンにすると、目標を入力した時点で同じ項目の他の期間の目標も自動で書き換わります',
       '個人実績タブに「表示する媒体」を追加。目標入力や進捗確認に使う媒体を各自で選べ、チェックを外した媒体は「本日の進捗」「週間サマリー」「媒体別 月次進捗」と月次・週次・日次の目標設定に表示されなくなります。チームの「使用する媒体」とは別の、本人だけの設定です（入力済みの実績・目標値は消えません）',
       '全ユーザータブ・チーム別タブの「想定粗利」カードにも「内定承諾一覧（成約月ごと）」を追加。何月に誰（担当者・候補者・企業）が内定承諾したかを、選択中の期間または全期間で確認できます。成約月の変更は、自分の候補者と、ミドルとして代理編集できるメンバーの候補者に限り一覧上から行えます（それ以外は閲覧のみ）',
@@ -14832,8 +14833,8 @@ const CustomPeriodReport: React.FC<CustomPeriodReportProps> = ({ entries, allMed
 type SectionVisibilityKeys = 
   | 'monthlyProgress' | 'monthlyPerformance' | 'monthOverMonthPerformance'
   | 'weeklySummary' | 'dayOfWeekRate' | 'mediaProgress' 
-  | 'monthlyTargetSettings' | 'weeklyTargetSettings' | 'dailyTargetSettings' | 'calendar' | 'history'
-  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit' | 'personalMediaSettings' | 'targetConversion'
+  | 'monthlyTargetSettings' | 'calendar' | 'history'
+  | 'dailyProgress' | 'customPeriodReport' | 'personalGrossProfit'
   | 'allUsersProgress' | 'allUsersDayOfWeekRate' | 'allUsersWeeklySummary' | 'allUsersMemberWeeklySummary' | 'allUsersGrossProfit'
   | 'allUsersMonthlyTrend';
 
@@ -15059,15 +15060,11 @@ const App: React.FC = () => {
     dayOfWeekRate: true,
     mediaProgress: true,
     monthlyTargetSettings: false,
-    weeklyTargetSettings: false,
-    dailyTargetSettings: false,
     calendar: true,
     dailyProgress: true,
     history: false,
     customPeriodReport: false,
     personalGrossProfit: false,
-    personalMediaSettings: false,
-    targetConversion: false,
     allUsersProgress: false,
     allUsersDayOfWeekRate: false,
     allUsersWeeklySummary: false,
@@ -16589,6 +16586,8 @@ const App: React.FC = () => {
         }
     };
 
+  // 「目標・表示媒体の設定」で表示中の期間タブ。
+  const [targetSettingsPeriod, setTargetSettingsPeriod] = useState<TargetPeriod>('monthly');
   // 目標の期間換算に使う稼働日数（未設定なら月=今月の平日数、週=5日）。
   const targetConversionDays = useMemo(() => ({
     perMonth: currentUserData?.targetConversion?.workDaysPerMonth || countWeekdaysInMonth(new Date()),
@@ -18643,102 +18642,6 @@ const App: React.FC = () => {
               </div>
             </section>
             
-            <section aria-labelledby="personal-media-settings-title">
-              <h2
-                id="personal-media-settings-title"
-                className="section-title collapsible-header"
-                onClick={() => toggleSection('personalMediaSettings')}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('personalMediaSettings'); } }}
-                role="button" tabIndex={0} aria-expanded={sectionVisibility.personalMediaSettings} aria-controls="personal-media-settings-content"
-              >
-                <span>表示する媒体（{currentUserData?.personalMediaIds ? `${personalMedia.length}/${activeMedia.length}媒体` : 'すべて'}）</span>
-                <span className={`toggle-icon ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>▼</span>
-              </h2>
-              <div id="personal-media-settings-content" className={`collapsible-content ${sectionVisibility.personalMediaSettings ? 'open' : ''}`}>
-                <p className="modal-description">
-                  個人実績タブの「本日の進捗」「週間サマリー」「媒体別 月次進捗」と各目標設定に表示する媒体を選べます。チェックを外した媒体は表示されなくなります（入力済みの実績・目標はそのまま残り、再度チェックすれば元通り表示されます）。チームの「使用する媒体」とは別の、あなただけの設定です。
-                </p>
-                <div className="comparison-user-checkbox-list">
-                  {activeMedia.map(m => (
-                    <label key={m.id} className="comparison-user-checkbox">
-                      <input
-                        type="checkbox"
-                        checked={personalMedia.some(pm => pm.id === m.id)}
-                        onChange={() => handleTogglePersonalMedia(m.id)}
-                      />
-                      {m.name}
-                    </label>
-                  ))}
-                </div>
-                {currentUserData?.personalMediaIds && (
-                  <button type="button" onClick={handleResetPersonalMedia} className="secondary-action-button" style={{ marginTop: '0.5rem' }}>
-                    すべての媒体を表示に戻す
-                  </button>
-                )}
-                {currentUserData?.personalMediaIds && personalMedia.length === 0 && (
-                  <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の進捗・目標欄は表示されません。</p>
-                )}
-              </div>
-            </section>
-
-            <section aria-labelledby="target-conversion-title">
-              <h2
-                id="target-conversion-title"
-                className="section-title collapsible-header"
-                onClick={() => toggleSection('targetConversion')}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('targetConversion'); } }}
-                role="button" tabIndex={0} aria-expanded={sectionVisibility.targetConversion} aria-controls="target-conversion-content"
-              >
-                <span>目標の期間換算（日次・週次・月次の一括設定）{isTargetAutoSyncEnabled ? '：自動換算オン' : ''}</span>
-                <span className={`toggle-icon ${sectionVisibility.targetConversion ? 'open' : ''}`}>▼</span>
-              </h2>
-              <div id="target-conversion-content" className={`collapsible-content ${sectionVisibility.targetConversion ? 'open' : ''}`}>
-                <p className="modal-description">
-                  いずれかの期間の目標をもとに、他の期間の目標を稼働日数に応じて換算して一括で設定できます（例: 日次20件 × 週5日 = 週次100件）。小さい期間へ割り戻す場合は切り上げます。対象は「表示する媒体」で選んでいる媒体の、各目標設定画面にある項目です（日次目標はスカウト数・返信数・有効返信数のみ）。
-                </p>
-                <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
-                  <label htmlFor="target-conversion-month-days">月の稼働日数</label>
-                  <input
-                    id="target-conversion-month-days"
-                    type="number"
-                    min="1"
-                    max="31"
-                    style={{ width: '5rem' }}
-                    value={currentUserData?.targetConversion?.workDaysPerMonth ?? ''}
-                    placeholder={String(countWeekdaysInMonth(new Date()))}
-                    onChange={(e) => handleUpdateTargetConversion({ workDaysPerMonth: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
-                  />
-                  <span>日（未入力なら今月の平日数 {countWeekdaysInMonth(new Date())}日）</span>
-                  <label htmlFor="target-conversion-week-days" style={{ marginLeft: '1rem' }}>週の稼働日数</label>
-                  <input
-                    id="target-conversion-week-days"
-                    type="number"
-                    min="1"
-                    max="7"
-                    style={{ width: '5rem' }}
-                    value={currentUserData?.targetConversion?.workDaysPerWeek ?? ''}
-                    placeholder="5"
-                    onChange={(e) => handleUpdateTargetConversion({ workDaysPerWeek: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
-                  />
-                  <span>日</span>
-                </div>
-                <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
-                  <span>一括設定:</span>
-                  <button type="button" onClick={() => handleBulkConvertTargets('monthly')} className="secondary-action-button">月次目標 → 週次・日次</button>
-                  <button type="button" onClick={() => handleBulkConvertTargets('weekly')} className="secondary-action-button">週次目標 → 月次・日次</button>
-                  <button type="button" onClick={() => handleBulkConvertTargets('daily')} className="secondary-action-button">日次目標 → 月次・週次</button>
-                </div>
-                <label className="comparison-user-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={isTargetAutoSyncEnabled}
-                    onChange={(e) => handleUpdateTargetConversion({ autoSync: e.target.checked })}
-                  />
-                  目標を入力したら、同じ項目の他の期間の目標も自動で換算して書き換える
-                </label>
-              </div>
-            </section>
-
             <section aria-labelledby="target-settings-title">
                 <h2
                     id="target-settings-title"
@@ -18750,11 +18653,89 @@ const App: React.FC = () => {
                     aria-expanded={sectionVisibility.monthlyTargetSettings}
                     aria-controls="target-settings-content"
                 >
-                    <span>月次目標設定</span>
+                    <span>目標・表示媒体の設定</span>
                     <span className={`toggle-icon ${sectionVisibility.monthlyTargetSettings ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="target-settings-content" className={`collapsible-content ${sectionVisibility.monthlyTargetSettings ? 'open' : ''}`}>
-                    <form className="modal-body" style={{padding:0}}>
+                    {/* ① 表示する媒体 — 個人実績タブの媒体別の表示と、下の目標入力欄の対象を決める */}
+                    <h3 className="sub-section-title">表示する媒体</h3>
+                    <div className="pipeline-sort-controls">
+                      {activeMedia.map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => handleTogglePersonalMedia(m.id)}
+                          className={personalMedia.some(pm => pm.id === m.id) ? 'active' : ''}
+                          aria-pressed={personalMedia.some(pm => pm.id === m.id)}
+                        >
+                          {m.name}
+                        </button>
+                      ))}
+                      {currentUserData?.personalMediaIds && (
+                        <button type="button" onClick={handleResetPersonalMedia} className="secondary-action-button">すべて表示</button>
+                      )}
+                    </div>
+                    <p className="gross-profit-note">
+                      選んだ媒体だけが進捗表示と目標入力に出ます（あなただけの設定。外しても入力済みの実績・目標は消えません）。
+                    </p>
+
+                    {/* ② 期間ごとの目標 — タブで1つずつ表示 */}
+                    <h3 className="sub-section-title" style={{ marginTop: '1.25rem' }}>目標</h3>
+                    <div className="pipeline-sort-controls" role="tablist">
+                      {(['monthly', 'weekly', 'daily'] as TargetPeriod[]).map(period => (
+                        <button
+                          key={period}
+                          type="button"
+                          role="tab"
+                          aria-selected={targetSettingsPeriod === period}
+                          onClick={() => setTargetSettingsPeriod(period)}
+                          className={targetSettingsPeriod === period ? 'active' : ''}
+                        >
+                          {TARGET_PERIOD_LABELS[period]}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
+                      <button type="button" onClick={() => handleBulkConvertTargets(targetSettingsPeriod)} className="secondary-action-button">
+                        この{TARGET_PERIOD_LABELS[targetSettingsPeriod]}目標から{(['monthly', 'weekly', 'daily'] as TargetPeriod[]).filter(p => p !== targetSettingsPeriod).map(p => TARGET_PERIOD_LABELS[p]).join('・')}目標を換算して設定
+                      </button>
+                      <label className="comparison-user-checkbox" style={{ margin: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={isTargetAutoSyncEnabled}
+                          onChange={(e) => handleUpdateTargetConversion({ autoSync: e.target.checked })}
+                        />
+                        入力時に他の期間も自動換算
+                      </label>
+                      <span>稼働日数 月</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="31"
+                        style={{ width: '4.5rem' }}
+                        aria-label="月の稼働日数"
+                        value={currentUserData?.targetConversion?.workDaysPerMonth ?? ''}
+                        placeholder={String(countWeekdaysInMonth(new Date()))}
+                        onChange={(e) => handleUpdateTargetConversion({ workDaysPerMonth: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
+                      />
+                      <span>日・週</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="7"
+                        style={{ width: '4.5rem' }}
+                        aria-label="週の稼働日数"
+                        value={currentUserData?.targetConversion?.workDaysPerWeek ?? ''}
+                        placeholder="5"
+                        onChange={(e) => handleUpdateTargetConversion({ workDaysPerWeek: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })}
+                      />
+                      <span>日</span>
+                    </div>
+                    {personalMedia.length === 0 && (
+                      <p className="gmail-scout-message">表示する媒体が選ばれていないため、媒体別の目標入力欄は表示されません。</p>
+                    )}
+                    {targetSettingsPeriod === 'monthly' && (
+<form className="modal-body" style={{padding:0}}>
                         <fieldset className="general-kpi-fieldset">
                           <legend className="sr-only">全体実績 目標</legend>
                           {(Object.keys(GENERAL_KPIS) as (keyof typeof GENERAL_KPIS)[]).map(key => (
@@ -18812,25 +18793,9 @@ const App: React.FC = () => {
                            </div>
                          </div>
                     </form>
-                </div>
-            </section>
-            
-            <section aria-labelledby="weekly-target-settings-title">
-                <h2
-                    id="weekly-target-settings-title"
-                    className="section-title collapsible-header"
-                    onClick={() => toggleSection('weeklyTargetSettings')}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('weeklyTargetSettings'); } }}
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={sectionVisibility.weeklyTargetSettings}
-                    aria-controls="weekly-target-settings-content"
-                >
-                    <span>週次目標設定</span>
-                    <span className={`toggle-icon ${sectionVisibility.weeklyTargetSettings ? 'open' : ''}`}>▼</span>
-                </h2>
-                <div id="weekly-target-settings-content" className={`collapsible-content ${sectionVisibility.weeklyTargetSettings ? 'open' : ''}`}>
-                    <form className="modal-body" style={{padding:0}}>
+                    )}
+                    {targetSettingsPeriod === 'weekly' && (
+<form className="modal-body" style={{padding:0}}>
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 週間目標</h3>
                            <p className="weekly-target-change-notice">
@@ -18876,25 +18841,9 @@ const App: React.FC = () => {
                            </div>
                          </div>
                     </form>
-                </div>
-            </section>
-            
-            <section aria-labelledby="daily-target-settings-title">
-                <h2
-                    id="daily-target-settings-title"
-                    className="section-title collapsible-header"
-                    onClick={() => toggleSection('dailyTargetSettings')}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSection('dailyTargetSettings'); } }}
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={sectionVisibility.dailyTargetSettings}
-                    aria-controls="daily-target-settings-content"
-                >
-                    <span>日次目標設定</span>
-                     <span className={`toggle-icon ${sectionVisibility.dailyTargetSettings ? 'open' : ''}`}>▼</span>
-                </h2>
-                <div id="daily-target-settings-content" className={`collapsible-content ${sectionVisibility.dailyTargetSettings ? 'open' : ''}`}>
-                    <form className="modal-body" style={{padding:0}}>
+                    )}
+                    {targetSettingsPeriod === 'daily' && (
+<form className="modal-body" style={{padding:0}}>
                          <div className="media-kpi-section">
                            <h3 className="sub-section-title">媒体別実績 日次目標</h3>
                            <div className="media-kpi-grid">
@@ -18930,6 +18879,7 @@ const App: React.FC = () => {
                            </div>
                          </div>
                     </form>
+                    )}
                 </div>
             </section>
           </>
