@@ -3389,6 +3389,10 @@ p.memo-content-text {
 .gross-profit-total-item.highlight strong {
   color: var(--success-color);
 }
+.gross-profit-total-item .gross-profit-total-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted-color);
+}
 .weekly-target-change-notice {
   background-color: #eaf6fb;
   border: 1px solid #bfe4ef;

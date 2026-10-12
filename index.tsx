@@ -4392,6 +4392,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-12',
     items: [
+      '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプライン共通）に「平均粗利（1件あたり）」を追加。絞り込み期間内で粗利を算出できた案件の平均を表示します。期間が2か月以上にまたがるときは「平均粗利（月あたり）」も表示し、メンバー別・月別の表にも1件あたりの平均粗利の列を追加した',
       'ヘッダーに「お知らせ」を追加。開発者からのお知らせ（メンテナンス予定・新機能の案内など）が投稿されると、次にアプリを開いたとき（開いたままのタブに戻ったときも）自動で表示されます。未読の件数は「お知らせ」ボタンに表示され、「確認しました」で既読になります',
     ],
   },
@@ -8377,6 +8378,10 @@ const buildGrossProfitPeriodPresets = (now: Date = new Date()): { label: string;
 };
 
 const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
+// 平均粗利（1件あたり）。粗利を算出できた案件（想定年収×fee料率、または固定報酬額が入力済み）の
+// 粗利合計をその件数で割る — 未入力の案件は粗利0として数えると平均が不当に下がるため分母から除く。
+const formatAverageGrossProfit = (t: { profit: number; estimableCount: number }): string =>
+    t.estimableCount > 0 ? formatManYen(t.profit / t.estimableCount) : '-';
 
 // 想定粗利の算出に足りない入力を、利用者向けの言葉で列挙する（足りていれば空配列）。
 const describeMissingGrossProfitInputs = (candidate: Candidate, application: CompanyApplication): string[] => {
@@ -8597,6 +8602,9 @@ const GrossProfitSummary: React.FC<{
         }), { count: 0, estimableCount: 0, revenue: 0, cost: 0, profit: 0 });
     }, [stageTotals, visibleStageTotals, selectedStageFilters]);
 
+    // 絞り込み期間が何か月にまたがるか（今月表示は1）。2か月以上のときだけ「月あたり」の平均粗利を出す。
+    const periodMonthCount = periodOverride ? splitPeriodIntoMonths(periodOverride).length : 1;
+
     // メンバー別想定粗利 — 全ユーザー/チーム別ダッシュボードのperUserGrossProfitTotalsと同じ
     // 「お見送り・選考辞退・内定承諾後辞退を除いた合計」を、メンバーごとに算出する。
     const memberBreakdownTotals = useMemo(() => {
@@ -8654,6 +8662,18 @@ const GrossProfitSummary: React.FC<{
                     <span>想定粗利（合計）</span>
                     <strong>{formatManYen(grandTotal.profit)}</strong>
                 </div>
+                <div className="gross-profit-total-item">
+                    <span>平均粗利（1件あたり）</span>
+                    <strong>{formatAverageGrossProfit(grandTotal)}</strong>
+                    <small className="gross-profit-total-sub">粗利を算出できた{grandTotal.estimableCount}件の平均</small>
+                </div>
+                {periodMonthCount >= 2 && (
+                    <div className="gross-profit-total-item">
+                        <span>平均粗利（月あたり）</span>
+                        <strong>{formatManYen(grandTotal.profit / periodMonthCount)}</strong>
+                        <small className="gross-profit-total-sub">{periodMonthCount}か月の平均</small>
+                    </div>
+                )}
             </div>
             {(grandTotal.count > grandTotal.estimableCount || showMissingOnly) && (
                 <div className="pipeline-sort-controls">
@@ -8737,6 +8757,7 @@ const GrossProfitSummary: React.FC<{
                                     <th>想定紹介料</th>
                                     <th>想定媒体手数料</th>
                                     <th>想定粗利</th>
+                                    <th>平均粗利（1件あたり）</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -8747,6 +8768,7 @@ const GrossProfitSummary: React.FC<{
                                         <td>{formatManYen(stat.revenue)}</td>
                                         <td>{formatManYen(stat.cost)}</td>
                                         <td>{formatManYen(stat.profit)}</td>
+                                        <td>{formatAverageGrossProfit(stat)}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -9074,6 +9096,7 @@ const PersonalGrossProfitSection: React.FC<{
                                     <th>想定紹介料</th>
                                     <th>想定媒体手数料</th>
                                     <th>想定粗利</th>
+                                    <th>平均粗利（1件あたり）</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -9084,6 +9107,7 @@ const PersonalGrossProfitSection: React.FC<{
                                         <td>{formatManYen(row.total.revenue)}</td>
                                         <td>{formatManYen(row.total.cost)}</td>
                                         <td>{formatManYen(row.total.profit)}</td>
+                                        <td>{formatAverageGrossProfit(row.total)}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -14727,6 +14751,7 @@ const AllUsersDashboard: React.FC<{
                       <th>想定紹介料</th>
                       <th>想定媒体手数料</th>
                       <th>想定粗利</th>
+                      <th>平均粗利（1件あたり）</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -14737,6 +14762,7 @@ const AllUsersDashboard: React.FC<{
                         <td>{formatManYen(row.total.revenue)}</td>
                         <td>{formatManYen(row.total.cost)}</td>
                         <td>{formatManYen(row.total.profit)}</td>
+                        <td>{formatAverageGrossProfit(row.total)}</td>
                       </tr>
                     ))}
                     <tr style={{ fontWeight: 'bold' }}>
@@ -14745,6 +14771,7 @@ const AllUsersDashboard: React.FC<{
                       <td>{formatManYen(perUserGrossProfitGrandTotal.revenue)}</td>
                       <td>{formatManYen(perUserGrossProfitGrandTotal.cost)}</td>
                       <td>{formatManYen(perUserGrossProfitGrandTotal.profit)}</td>
+                      <td>{formatAverageGrossProfit(perUserGrossProfitGrandTotal)}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -14798,6 +14825,7 @@ const AllUsersDashboard: React.FC<{
                   <th>想定紹介料</th>
                   <th>想定媒体手数料</th>
                   <th>想定粗利</th>
+                  <th>平均粗利（1件あたり）</th>
                 </tr>
               </thead>
               <tbody>
@@ -14808,10 +14836,11 @@ const AllUsersDashboard: React.FC<{
                     <td>{formatManYen(stat.revenue)}</td>
                     <td>{formatManYen(stat.cost)}</td>
                     <td>{formatManYen(stat.profit)}</td>
+                    <td>{formatAverageGrossProfit(stat)}</td>
                   </tr>
                 ))}
                 {perUserGrossProfitTotals.length === 0 ? (
-                  <tr><td colSpan={5}>表示するユーザーがいません。</td></tr>
+                  <tr><td colSpan={6}>表示するユーザーがいません。</td></tr>
                 ) : (
                   <tr style={{ fontWeight: 'bold' }}>
                     <td>合計</td>
@@ -14819,6 +14848,7 @@ const AllUsersDashboard: React.FC<{
                     <td>{formatManYen(perUserGrossProfitGrandTotal.revenue)}</td>
                     <td>{formatManYen(perUserGrossProfitGrandTotal.cost)}</td>
                     <td>{formatManYen(perUserGrossProfitGrandTotal.profit)}</td>
+                    <td>{formatAverageGrossProfit(perUserGrossProfitGrandTotal)}</td>
                   </tr>
                 )}
               </tbody>
