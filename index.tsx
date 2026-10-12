@@ -4392,6 +4392,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-12',
     items: [
+      '想定粗利の「内定承諾一覧（成約月ごと）」の各行に「編集」を追加。年収（想定年収・オファー年収）・報酬形態・fee料率・固定報酬額・媒体をその場で修正でき、内容は候補者パイプラインの同じ候補者情報にも反映されます（自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみ）',
       '想定粗利の「内定承諾一覧（成約月ごと）」に「年収」（オファー年収があればオファー年収、無ければ想定年収）と「料率／固定報酬」（fee料率の%、固定報酬の場合はその金額）の列を追加した',
       '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプライン共通）に「平均粗利（1件あたり）」を追加。絞り込み期間内で粗利を算出できた案件の平均を表示します。期間が2か月以上にまたがるときは「平均粗利（月あたり）」も表示し、メンバー別・月別の表にも1件あたりの平均粗利の列を追加した',
       'ヘッダーに「お知らせ」を追加。開発者からのお知らせ（メンテナンス予定・新機能の案内など）が投稿されると、次にアプリを開いたとき（開いたままのタブに戻ったときも）自動で表示されます。未読の件数は「お知らせ」ボタンに表示され、「確認しました」で既読になります',
@@ -8844,9 +8845,13 @@ const AcceptedDealsList: React.FC<{
     // 担当者単位ではなく候補者単位で編集可否が決まる場合に渡す（未指定ならcanEditで判定）。
     canEditRow?: (ownerKey: string, candidateId: string) => boolean;
     onChangeDealMonth: (ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
-}> = ({ sources, allMedia, periodOverride, periodLabel, showOwner = false, canEdit, canEditRow, onChangeDealMonth }) => {
+    // 年収・料率（固定報酬）・媒体をこの一覧から直接修正する保存先。想定粗利の各案件の「編集」と同じ
+    // GrossProfitEntryEditorを使い、保存内容は候補者データそのもの（＝候補者パイプラインの同じ項目）に入る。
+    onSaveCandidate?: (ownerKey: string, candidate: Candidate) => void;
+}> = ({ sources, allMedia, periodOverride, periodLabel, showOwner = false, canEdit, canEditRow, onChangeDealMonth, onSaveCandidate }) => {
     const isRowEditable = (ownerKey: string, candidateId: string) => (canEditRow ? canEditRow(ownerKey, candidateId) : canEdit(ownerKey));
     const [showAllAccepted, setShowAllAccepted] = useState(false);
+    const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
     const acceptedDeals = useMemo(() => {
         const mediaFeeRateById = new Map<string, number>(allMedia.map(m => [m.id, m.feeRate || 0] as [string, number]));
         const rows: AcceptedDealRow[] = [];
@@ -8889,6 +8894,7 @@ const AcceptedDealsList: React.FC<{
     }, [acceptedDeals]);
     const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !isRowEditable(r.ownerKey, r.candidate.id));
     const leadingColumns = showOwner ? 7 : 6;
+    const totalColumns = leadingColumns + 2;
 
     return (
         <>
@@ -8899,7 +8905,8 @@ const AcceptedDealsList: React.FC<{
             </div>
             <p className="gross-profit-note">
                 成約月を変更すると、その選考の意思決定時期が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
-                {hasReadOnlyRows && ' 成約月を変更できるのは、自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみです。'}
+                {onSaveCandidate && ' 「編集」から年収・料率（固定報酬）・媒体を修正でき、候補者パイプラインの同じ項目にも反映されます。'}
+                {hasReadOnlyRows && ' 成約月や年収・料率を変更できるのは、自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみです。'}
             </p>
             {acceptedDealGroups.length === 0 ? (
                 <p className="no-data-message">{showAllAccepted ? '内定承諾の選考はまだありません。' : `${periodLabel}に成約した内定承諾の選考はありません。`}</p>
@@ -8930,8 +8937,12 @@ const AcceptedDealsList: React.FC<{
                                             <td>{formatManYen(groupRevenue)}</td>
                                             <td>{formatManYen(groupProfit)}</td>
                                         </tr>
-                                        {group.rows.map(({ ownerKey, ownerLabel, candidate, application, dealMonth, acceptedOn, result }) => (
-                                            <tr key={`${ownerKey}:${candidate.id}:${application.id}`}>
+                                        {group.rows.map(({ ownerKey, ownerLabel, candidate, application, dealMonth, acceptedOn, result }) => {
+                                            const rowKey = `${ownerKey}:${candidate.id}:${application.id}`;
+                                            const canEditFees = !!onSaveCandidate && isRowEditable(ownerKey, candidate.id);
+                                            return (
+                                            <React.Fragment key={rowKey}>
+                                            <tr>
                                                 <td>
                                                     {isRowEditable(ownerKey, candidate.id) ? (
                                                         <input
@@ -8947,11 +8958,39 @@ const AcceptedDealsList: React.FC<{
                                                 <td>{application.companyName}</td>
                                                 <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
                                                 <td>{formatAcceptedDealSalary(candidate, application)}</td>
-                                                <td>{formatAcceptedDealFee(application)}</td>
+                                                <td>
+                                                    {formatAcceptedDealFee(application)}
+                                                    {canEditFees && (
+                                                        <button
+                                                            type="button"
+                                                            className="secondary-action-button"
+                                                            style={{ padding: '0.15rem 0.5rem', marginLeft: '0.5rem' }}
+                                                            onClick={() => setEditingRowKey(editingRowKey === rowKey ? null : rowKey)}
+                                                            aria-label={`${candidate.name}さん（${application.companyName}）の年収・料率を編集`}
+                                                        >
+                                                            {editingRowKey === rowKey ? '閉じる' : '編集'}
+                                                        </button>
+                                                    )}
+                                                </td>
                                                 <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
                                                 <td>{result ? formatManYen(result.profit) : '未入力'}</td>
                                             </tr>
-                                        ))}
+                                            {canEditFees && editingRowKey === rowKey && (
+                                                <tr>
+                                                    <td colSpan={totalColumns}>
+                                                        <GrossProfitEntryEditor
+                                                            candidate={candidate}
+                                                            application={application}
+                                                            allMedia={allMedia}
+                                                            onSave={(next) => onSaveCandidate!(ownerKey, next)}
+                                                            onClose={() => setEditingRowKey(null)}
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            </React.Fragment>
+                                            );
+                                        })}
                                     </React.Fragment>
                                 );
                             })}
@@ -9182,6 +9221,10 @@ const PersonalGrossProfitSection: React.FC<{
                 canEdit={(ownerKey) => canEditAcceptedRow(ownerKey)}
                 canEditRow={(ownerKey, candidateId) => canEditAcceptedRow(ownerKey, candidateId)}
                 onChangeDealMonth={handleChangeDealMonth}
+                onSaveCandidate={(_ownerKey, next) => {
+                    if (canEditCandidate && !canEditCandidate(next)) return;
+                    onSaveCandidate(next);
+                }}
             />
         </div>
     );
@@ -14882,6 +14925,7 @@ const AllUsersDashboard: React.FC<{
             showOwner
             canEdit={(ownerKey) => !!onChangeAcceptedDealMonth && (canEditAcceptedDealOwner ? canEditAcceptedDealOwner(ownerKey) : false)}
             onChangeDealMonth={(ownerKey, candidate, applicationId, yyyymm) => onChangeAcceptedDealMonth?.(ownerKey, candidate, applicationId, yyyymm)}
+            onSaveCandidate={onSaveAggregateCandidate ? (ownerKey, next) => onSaveAggregateCandidate({ ...next, ownerEmail: ownerKey }) : undefined}
           />
         </div>
       </section>
