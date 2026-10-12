@@ -4392,7 +4392,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-12',
     items: [
-      '想定粗利の「内定承諾一覧（成約月ごと）」の各行に「編集」を追加。年収（想定年収・オファー年収）・報酬形態・fee料率・固定報酬額・媒体をその場で修正でき、内容は候補者パイプラインの同じ候補者情報にも反映されます（自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみ）',
+      '想定粗利の「内定承諾一覧（成約月ごと）」の各行の右端に「編集」を追加。年収（想定年収・オファー年収）・報酬形態・fee料率・固定報酬額・媒体をその場で修正でき、内容は候補者パイプラインの同じ候補者情報にも反映されます（自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみ）',
       '想定粗利の「内定承諾一覧（成約月ごと）」に「年収」（オファー年収があればオファー年収、無ければ想定年収）と「料率／固定報酬」（fee料率の%、固定報酬の場合はその金額）の列を追加した',
       '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプライン共通）に「平均粗利（1件あたり）」を追加。絞り込み期間内で粗利を算出できた案件の平均を表示します。期間が2か月以上にまたがるときは「平均粗利（月あたり）」も表示し、メンバー別・月別の表にも1件あたりの平均粗利の列を追加した',
       'ヘッダーに「お知らせ」を追加。開発者からのお知らせ（メンテナンス予定・新機能の案内など）が投稿されると、次にアプリを開いたとき（開いたままのタブに戻ったときも）自動で表示されます。未読の件数は「お知らせ」ボタンに表示され、「確認しました」で既読になります',
@@ -8894,7 +8894,10 @@ const AcceptedDealsList: React.FC<{
     }, [acceptedDeals]);
     const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !isRowEditable(r.ownerKey, r.candidate.id));
     const leadingColumns = showOwner ? 7 : 6;
-    const totalColumns = leadingColumns + 2;
+    // 「編集」は行全体（年収・報酬形態・料率・固定報酬・媒体）を対象にするため、特定の項目のセルではなく
+    // 行の右端の専用列に置く。編集できる行が1つも無ければ列ごと出さない。
+    const showEditColumn = !!onSaveCandidate && acceptedDeals.some((r: AcceptedDealRow) => isRowEditable(r.ownerKey, r.candidate.id));
+    const totalColumns = leadingColumns + 2 + (showEditColumn ? 1 : 0);
 
     return (
         <>
@@ -8924,6 +8927,7 @@ const AcceptedDealsList: React.FC<{
                                 <th>料率／固定報酬</th>
                                 <th>想定紹介料</th>
                                 <th>想定粗利</th>
+                                {showEditColumn && <th aria-label="編集" />}
                             </tr>
                         </thead>
                         <tbody>
@@ -8936,6 +8940,7 @@ const AcceptedDealsList: React.FC<{
                                             <td colSpan={leadingColumns}>{formatYearMonthLabel(group.month)}（{group.rows.length}件）</td>
                                             <td>{formatManYen(groupRevenue)}</td>
                                             <td>{formatManYen(groupProfit)}</td>
+                                            {showEditColumn && <td />}
                                         </tr>
                                         {group.rows.map(({ ownerKey, ownerLabel, candidate, application, dealMonth, acceptedOn, result }) => {
                                             const rowKey = `${ownerKey}:${candidate.id}:${application.id}`;
@@ -8958,22 +8963,24 @@ const AcceptedDealsList: React.FC<{
                                                 <td>{application.companyName}</td>
                                                 <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
                                                 <td>{formatAcceptedDealSalary(candidate, application)}</td>
-                                                <td>
-                                                    {formatAcceptedDealFee(application)}
-                                                    {canEditFees && (
-                                                        <button
-                                                            type="button"
-                                                            className="secondary-action-button"
-                                                            style={{ padding: '0.15rem 0.5rem', marginLeft: '0.5rem' }}
-                                                            onClick={() => setEditingRowKey(editingRowKey === rowKey ? null : rowKey)}
-                                                            aria-label={`${candidate.name}さん（${application.companyName}）の年収・料率を編集`}
-                                                        >
-                                                            {editingRowKey === rowKey ? '閉じる' : '編集'}
-                                                        </button>
-                                                    )}
-                                                </td>
+                                                <td>{formatAcceptedDealFee(application)}</td>
                                                 <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
                                                 <td>{result ? formatManYen(result.profit) : '未入力'}</td>
+                                                {showEditColumn && (
+                                                    <td>
+                                                        {canEditFees && (
+                                                            <button
+                                                                type="button"
+                                                                className="secondary-action-button"
+                                                                style={{ padding: '0.15rem 0.5rem', whiteSpace: 'nowrap' }}
+                                                                onClick={() => setEditingRowKey(editingRowKey === rowKey ? null : rowKey)}
+                                                                aria-label={`${candidate.name}さん（${application.companyName}）の年収・料率・媒体を編集`}
+                                                            >
+                                                                {editingRowKey === rowKey ? '閉じる' : '編集'}
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                )}
                                             </tr>
                                             {canEditFees && editingRowKey === rowKey && (
                                                 <tr>
