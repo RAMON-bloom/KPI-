@@ -4392,6 +4392,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-12',
     items: [
+      '想定粗利の「内定承諾一覧（成約月ごと）」に「年収」（オファー年収があればオファー年収、無ければ想定年収）と「料率／固定報酬」（fee料率の%、固定報酬の場合はその金額）の列を追加した',
       '想定粗利（個人実績タブ・全ユーザー/チーム別タブ・候補者パイプライン共通）に「平均粗利（1件あたり）」を追加。絞り込み期間内で粗利を算出できた案件の平均を表示します。期間が2か月以上にまたがるときは「平均粗利（月あたり）」も表示し、メンバー別・月別の表にも1件あたりの平均粗利の列を追加した',
       'ヘッダーに「お知らせ」を追加。開発者からのお知らせ（メンテナンス予定・新機能の案内など）が投稿されると、次にアプリを開いたとき（開いたままのタブに戻ったときも）自動で表示されます。未読の件数は「お知らせ」ボタンに表示され、「確認しました」で既読になります',
     ],
@@ -8818,6 +8819,21 @@ type AcceptedDealRow = {
     acceptedOn: string;
     result: { revenue: number; cost: number; profit: number } | null;
 };
+// 内定承諾一覧の「年収」列 — 想定粗利の計算と同じく、オファー年収があればそれを、無ければ想定年収を出す。
+const formatAcceptedDealSalary = (candidate: Candidate, application: CompanyApplication): React.ReactNode => {
+    if (application.offerAmount) return <>{formatManYen(application.offerAmount)}<small>（オファー）</small></>;
+    if (candidate.expectedAnnualSalary) return <>{formatManYen(candidate.expectedAnnualSalary)}<small>（想定）</small></>;
+    return application.feeType === 'fixed' ? '—' : '未入力';
+};
+
+// 内定承諾一覧の「料率／固定報酬」列 — 報酬形態が固定報酬なら金額、料率ならfee料率（%）。
+const formatAcceptedDealFee = (application: CompanyApplication): string => {
+    if (application.feeType === 'fixed') {
+        return application.fixedFeeAmount === undefined || application.fixedFeeAmount === null ? '固定報酬（未入力）' : `固定報酬 ${formatManYen(application.fixedFeeAmount)}`;
+    }
+    return application.feeRate === undefined || application.feeRate === null ? '未入力' : `${application.feeRate}%`;
+};
+
 const AcceptedDealsList: React.FC<{
     sources: AcceptedDealSource[];
     allMedia: MediaEntry[];
@@ -8872,7 +8888,7 @@ const AcceptedDealsList: React.FC<{
         return groups;
     }, [acceptedDeals]);
     const hasReadOnlyRows = acceptedDeals.some((r: AcceptedDealRow) => !isRowEditable(r.ownerKey, r.candidate.id));
-    const leadingColumns = showOwner ? 5 : 4;
+    const leadingColumns = showOwner ? 7 : 6;
 
     return (
         <>
@@ -8897,6 +8913,8 @@ const AcceptedDealsList: React.FC<{
                                 <th>候補者</th>
                                 <th>企業</th>
                                 <th>内定承諾日</th>
+                                <th>年収</th>
+                                <th>料率／固定報酬</th>
                                 <th>想定紹介料</th>
                                 <th>想定粗利</th>
                             </tr>
@@ -8928,6 +8946,8 @@ const AcceptedDealsList: React.FC<{
                                                 <td>{candidate.name}{candidate.isHidden && <small>（非表示）</small>}</td>
                                                 <td>{application.companyName}</td>
                                                 <td>{acceptedOn ? new Date(acceptedOn + 'T00:00:00').toLocaleDateString('ja-JP') : '—'}</td>
+                                                <td>{formatAcceptedDealSalary(candidate, application)}</td>
+                                                <td>{formatAcceptedDealFee(application)}</td>
                                                 <td>{result ? formatManYen(result.revenue) : '未入力'}</td>
                                                 <td>{result ? formatManYen(result.profit) : '未入力'}</td>
                                             </tr>
