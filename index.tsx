@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, hasGrantedScope, GMAIL_READONLY_SCOPE, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup, loadAnnouncements, saveAnnouncements } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 
@@ -50,6 +50,8 @@ ChartJS.register(
 // Media (scouting source) management is restricted to this single account, regardless of who
 // happens to own the underlying Drive file — everyone else gets read-only access.
 const MEDIA_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
+// 「開発者からのお知らせ」を投稿・編集できるアカウント（共有ファイルの所有者）。
+const ANNOUNCEMENTS_ADMIN_EMAIL = 'gou.higashibara@bloom-firm.com';
 // The one account that can always create/edit teams and grant that ability to others (see
 // TeamsModal's permission section). Others gain edit access only via teamsAuthorizedEditors,
 // a list this admin manages, persisted alongside the teams themselves.
@@ -4388,6 +4390,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-12',
+    items: [
+      'ヘッダーに「お知らせ」を追加。開発者からのお知らせ（メンテナンス予定・新機能の案内など）が投稿されると、次にアプリを開いたとき（開いたままのタブに戻ったときも）自動で表示されます。未読の件数は「お知らせ」ボタンに表示され、「確認しました」で既読になります',
+    ],
+  },
+  {
     date: '2026-10-11',
     items: [
       '想定粗利の「よく使う期間」に「6月賞与対象（前年12月〜5月）」「12月賞与対象（6月〜11月）」を追加し、「直近3ヶ月」「今後3ヶ月」を削除した（全ユーザー/チーム別タブ・個人実績タブ・候補者パイプライン共通）',
@@ -4834,6 +4842,165 @@ const ChangelogModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
     </div>
   </div>
 );
+
+// 開発者からのお知らせ。管理者（ANNOUNCEMENTS_ADMIN_EMAIL）のDrive上の共有ファイル
+// （kpi-manager-announcements.json）に保存し、全員がログイン時に読み込む。更新履歴（APP_CHANGELOG）と
+// 違ってデプロイなしで即時に投稿・修正できる。既読管理は端末ごと（localStorage）。
+interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  important?: boolean;
+  createdAt: string; // ISO
+  updatedAt?: string; // ISO
+}
+
+interface AnnouncementsFile {
+  schemaVersion: 1;
+  announcements: Announcement[];
+}
+
+// ログイン時の自動表示は、この日数以内に投稿された未読のお知らせだけに限る（新しく使い始めた人に
+// 古いお知らせをまとめて出さないため）。「お知らせ」ボタンからは全件見られる。
+const ANNOUNCEMENT_AUTO_SHOW_DAYS = 30;
+const ANNOUNCEMENTS_READ_KEY_PREFIX = 'kpi-mgr-announcements-read:';
+
+const readAnnouncementReadIds = (email: string): string[] => {
+  try {
+    const raw = localStorage.getItem(ANNOUNCEMENTS_READ_KEY_PREFIX + email);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((v: unknown): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeAnnouncementReadIds = (email: string, ids: string[]): void => {
+  try {
+    localStorage.setItem(ANNOUNCEMENTS_READ_KEY_PREFIX + email, JSON.stringify(ids));
+  } catch {
+    // ignore
+  }
+};
+
+const AnnouncementsModal: React.FC<{
+  announcements: Announcement[];
+  unreadIds: Set<string>;
+  isDeveloper: boolean;
+  onSave: (next: Announcement[]) => Promise<void>;
+  onClose: () => void;
+}> = ({ announcements, unreadIds, isDeveloper, onSave, onClose }) => {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [important, setImportant] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setTitle('');
+    setBody('');
+    setImportant(false);
+  };
+
+  const save = (next: Announcement[], successMessage: string, afterSuccess?: () => void) => {
+    setIsSaving(true);
+    setSaveMessage(null);
+    onSave(next)
+      .then(() => {
+        afterSuccess?.();
+        setSaveMessage(successMessage);
+      })
+      .catch(() => setSaveMessage('保存に失敗しました。もう一度お試しください。'))
+      .finally(() => setIsSaving(false));
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedTitle = title.trim();
+    const trimmedBody = body.trim();
+    if (!trimmedTitle || isSaving) return;
+    const now = new Date().toISOString();
+    const next = editingId
+      ? announcements.map(a => (a.id === editingId ? { ...a, title: trimmedTitle, body: trimmedBody, important, updatedAt: now } : a))
+      : [{ id: `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, title: trimmedTitle, body: trimmedBody, important, createdAt: now }, ...announcements];
+    save(next, editingId ? '更新しました。' : '投稿しました。', resetForm);
+  };
+
+  const handleEdit = (a: Announcement) => {
+    setEditingId(a.id);
+    setTitle(a.title);
+    setBody(a.body);
+    setImportant(!!a.important);
+    setSaveMessage(null);
+  };
+
+  const handleDelete = (a: Announcement) => {
+    if (!window.confirm(`「${a.title}」を削除しますか？`)) return;
+    save(announcements.filter(x => x.id !== a.id), '削除しました。', () => { if (editingId === a.id) resetForm(); });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="announcements-modal-title">
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="announcements-modal-title">開発者からのお知らせ</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          {isDeveloper && (
+            <form onSubmit={handleSubmit} className="announcement-form">
+              <div className="form-group">
+                <label htmlFor="announcement-title">{editingId ? 'お知らせを編集' : '新しいお知らせを投稿'}（タイトル）</label>
+                <input id="announcement-title" type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="例：〇〇機能を追加しました" required />
+              </div>
+              <div className="form-group">
+                <label htmlFor="announcement-body">本文</label>
+                <textarea id="announcement-body" value={body} onChange={e => setBody(e.target.value)} rows={4} placeholder="利用者に伝えたい内容（改行はそのまま表示されます）" />
+              </div>
+              <label className="announcement-important-toggle">
+                <input type="checkbox" checked={important} onChange={e => setImportant(e.target.checked)} /> 重要（赤く強調して表示）
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem' }}>
+                <button type="submit" className="submit-button" disabled={isSaving || !title.trim()}>
+                  {isSaving ? '保存中...' : editingId ? '更新する' : '投稿する'}
+                </button>
+                {editingId && <button type="button" className="secondary-action-button" onClick={resetForm} disabled={isSaving}>編集をやめる</button>}
+                {saveMessage && <span className="feedback-save-message">{saveMessage}</span>}
+              </div>
+              <p className="form-helper-text" style={{ marginTop: '0.5rem' }}>投稿すると、各ユーザーが次にアプリを開いた（またはタブに戻った）ときにお知らせとして表示されます。</p>
+            </form>
+          )}
+          {announcements.length === 0 && <p className="no-data-message">現在お知らせはありません。</p>}
+          {announcements.map(a => (
+            <div key={a.id} className={`announcement-item${a.important ? ' important' : ''}${unreadIds.has(a.id) ? ' unread' : ''}`}>
+              <div className="announcement-item-header">
+                {unreadIds.has(a.id) && <span className="announcement-new-badge">NEW</span>}
+                {a.important && <span className="announcement-important-badge">重要</span>}
+                <span className="announcement-title">{a.title}</span>
+                <span className="announcement-date">
+                  {new Date(a.createdAt).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  {a.updatedAt && '（更新あり）'}
+                </span>
+                {isDeveloper && (
+                  <span className="announcement-actions">
+                    <button type="button" className="secondary-action-button" onClick={() => handleEdit(a)} disabled={isSaving}>編集</button>
+                    <button type="button" className="remove-file-button" onClick={() => handleDelete(a)} disabled={isSaving} aria-label="このお知らせを削除">&times;</button>
+                  </span>
+                )}
+              </div>
+              {a.body && <p className="announcement-body">{a.body}</p>}
+            </div>
+          ))}
+        </div>
+        <div className="announcement-modal-footer">
+          <button type="button" className="submit-button" onClick={onClose}>確認しました</button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // 「使い方」モーダルの本文データ。role別（メンバー/マネージャー）にセクションを分けて保持する
 // だけのプレーンなデータ — HelpModal側は単純にこれを見出し+箇条書きとして描画する。
@@ -15988,6 +16155,79 @@ const App: React.FC = () => {
     if (isMediaModalOpen) refreshMediaConfig();
   }, [isMediaModalOpen, refreshMediaConfig]);
 
+  // 開発者からのお知らせ。ログイン時に読み込み、未読があれば自動でモーダルを開く。開いたままの
+  // タブにも届くよう、タブに戻ってきたとき（前回の読み込みから一定時間経っていれば）読み直す。
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementsDriveFileId, setAnnouncementsDriveFileId] = useState<string | null>(null);
+  const [announcementReadIds, setAnnouncementReadIds] = useState<string[]>([]);
+  const [isAnnouncementsModalOpen, setIsAnnouncementsModalOpen] = useState(false);
+  // モーダルを開いた時点の未読（開いている間にNEWバッジが消えないよう固定して渡す）。
+  const [announcementUnreadSnapshot, setAnnouncementUnreadSnapshot] = useState<Set<string>>(new Set());
+  const announcementsLastFetchedAtRef = useRef(0);
+
+  const sortedAnnouncements = useMemo(
+    () => [...announcements].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [announcements]
+  );
+  const unreadAnnouncementIds = useMemo(() => {
+    const read = new Set(announcementReadIds);
+    return new Set(sortedAnnouncements.filter(a => !read.has(a.id)).map(a => a.id));
+  }, [sortedAnnouncements, announcementReadIds]);
+
+  const openAnnouncementsModal = useCallback((unread: Set<string>) => {
+    setAnnouncementUnreadSnapshot(unread);
+    setIsAnnouncementsModalOpen(true);
+  }, []);
+
+  const fetchAnnouncements = useCallback(async (email: string, autoOpen: boolean) => {
+    announcementsLastFetchedAtRef.current = Date.now();
+    try {
+      const result = await loadAnnouncements<AnnouncementsFile>(ANNOUNCEMENTS_ADMIN_EMAIL);
+      const list = Array.isArray(result.data?.announcements) ? result.data!.announcements : [];
+      setAnnouncements(list);
+      setAnnouncementsDriveFileId(result.driveFileId);
+      const read = new Set(readAnnouncementReadIds(email));
+      setAnnouncementReadIds([...read]);
+      if (!autoOpen) return;
+      const cutoff = Date.now() - ANNOUNCEMENT_AUTO_SHOW_DAYS * 24 * 60 * 60 * 1000;
+      const freshUnread = list.filter(a => !read.has(a.id) && new Date(a.createdAt).getTime() >= cutoff);
+      if (freshUnread.length > 0) openAnnouncementsModal(new Set(list.filter(a => !read.has(a.id)).map(a => a.id)));
+    } catch (error) {
+      console.error('Failed to load announcements from Drive', error);
+    }
+  }, [openAnnouncementsModal]);
+
+  useEffect(() => {
+    if (!currentIdentity || !isInitialized) return;
+    const email = currentIdentity.email;
+    fetchAnnouncements(email, true);
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - announcementsLastFetchedAtRef.current < 5 * 60 * 1000) return;
+      fetchAnnouncements(email, true);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [currentIdentity, isInitialized, fetchAnnouncements]);
+
+  // モーダルを閉じたら、表示していたお知らせをすべて既読にする。
+  const handleCloseAnnouncements = useCallback(() => {
+    setIsAnnouncementsModalOpen(false);
+    if (!currentIdentity) return;
+    const next = Array.from(new Set([...announcementReadIds, ...announcements.map(a => a.id)]));
+    setAnnouncementReadIds(next);
+    writeAnnouncementReadIds(currentIdentity.email, next);
+  }, [currentIdentity, announcementReadIds, announcements]);
+
+  const handleSaveAnnouncements = useCallback(async (next: Announcement[]) => {
+    if (!currentIdentity || currentIdentity.email !== ANNOUNCEMENTS_ADMIN_EMAIL) throw new Error('not allowed');
+    const payload: AnnouncementsFile = { schemaVersion: 1, announcements: next };
+    const fileId = await saveAnnouncements(announcementsDriveFileId, payload, currentIdentity.email);
+    setAnnouncementsDriveFileId(fileId);
+    setAnnouncements(next);
+  }, [currentIdentity, announcementsDriveFileId]);
+
+
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
@@ -18512,6 +18752,15 @@ const App: React.FC = () => {
           onRestoreTeamsConfigBackup={handleRestoreTeamsConfigBackup}
         />
       )}
+      {isAnnouncementsModalOpen && (
+        <AnnouncementsModal
+          announcements={sortedAnnouncements}
+          unreadIds={announcementUnreadSnapshot}
+          isDeveloper={currentIdentity?.email === ANNOUNCEMENTS_ADMIN_EMAIL}
+          onSave={handleSaveAnnouncements}
+          onClose={handleCloseAnnouncements}
+        />
+      )}
       {isChangelogModalOpen && (
         <ChangelogModal onClose={() => setIsChangelogModalOpen(false)} />
       )}
@@ -18691,6 +18940,13 @@ const App: React.FC = () => {
                 <option value="saturday">週の始まり: 土曜（個人設定）</option>
               </select>
             )}
+            <button
+              onClick={() => openAnnouncementsModal(unreadAnnouncementIds)}
+              className={`header-utility-button announcement-header-button${unreadAnnouncementIds.size > 0 ? ' has-unread' : ''}`}
+              title="開発者からのお知らせ"
+            >
+              お知らせ{unreadAnnouncementIds.size > 0 && <span className="announcement-unread-count">{unreadAnnouncementIds.size}</span>}
+            </button>
             <button onClick={() => setIsTeamsModalOpen(true)} className="header-utility-button">チーム管理</button>
             <button onClick={() => setIsMediaModalOpen(true)} className="header-utility-button">媒体管理</button>
             <button onClick={() => setIsHelpModalOpen(true)} className="header-utility-button">使い方</button>

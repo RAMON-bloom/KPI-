@@ -3,6 +3,7 @@ import { getCurrentSession, refreshTokenSilently } from './googleAuth';
 const DATA_FILE_NAME = 'kpi-manager-data.json';
 const TEAMS_FILE_NAME = 'kpi-manager-teams.json';
 const MEDIA_FILE_NAME = 'kpi-manager-media.json';
+const ANNOUNCEMENTS_FILE_NAME = 'kpi-manager-announcements.json';
 const APP_TAG = 'kpi-manager-v1';
 const ALLOWED_DOMAIN = 'bloom-firm.com';
 // Shared Drive folder (G:\共有ドライブ\3_BCA事業部\1_メインフォルダ\KPI管理君BU) that a daily
@@ -419,6 +420,21 @@ export async function findMediaConfigFile(adminEmail: string): Promise<DriveFile
 export async function createMediaConfigFile(content: unknown, creatorEmail: string): Promise<string> {
   const fileId = await createJsonFile(MEDIA_FILE_NAME, { app: APP_TAG, kind: 'media-config' }, { ownerEmail: creatorEmail }, content);
   await grantDomainPermission(fileId, 'writer');
+  return fileId;
+}
+
+/**
+ * Finds the shared「開発者からのお知らせ」file. Scoped to `adminEmail` (the only account allowed to
+ * post) for the same reason as findMediaConfigFile — everyone converges on the admin's file.
+ */
+export async function findAnnouncementsFile(adminEmail: string): Promise<DriveFileRef | null> {
+  return findSharedConfigFile(ANNOUNCEMENTS_FILE_NAME, adminEmail);
+}
+
+/** Creates the shared announcements file. Everyone in the domain only needs to read it. */
+export async function createAnnouncementsFile(content: unknown, creatorEmail: string): Promise<string> {
+  const fileId = await createJsonFile(ANNOUNCEMENTS_FILE_NAME, { app: APP_TAG, kind: 'announcements' }, { ownerEmail: creatorEmail }, content);
+  await grantDomainPermission(fileId, 'reader');
   return fileId;
 }
 

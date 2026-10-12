@@ -3775,3 +3775,92 @@ p.memo-content-text {
   color: var(--danger-color, #dc3545);
   font-weight: bold;
 }
+
+/* --- 開発者からのお知らせ --- */
+.header-controls .announcement-header-button.has-unread {
+  color: var(--danger-color);
+  border-color: var(--danger-color);
+  font-weight: 700;
+}
+.announcement-unread-count {
+  display: inline-block;
+  margin-left: 0.35rem;
+  min-width: 1.2rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background-color: var(--danger-color);
+  color: white;
+  font-size: 0.7rem;
+  line-height: 1.2rem;
+  text-align: center;
+}
+.announcement-form {
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--border-radius);
+  background-color: #f8f9fa;
+}
+.announcement-important-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+.announcement-item {
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--primary-color);
+  border-radius: var(--border-radius);
+}
+.announcement-item.important {
+  border-left-color: var(--danger-color);
+  background-color: #fff5f5;
+}
+.announcement-item-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.announcement-title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+.announcement-date {
+  font-size: 0.8rem;
+  color: var(--text-muted-color);
+}
+.announcement-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.announcement-actions .secondary-action-button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+}
+.announcement-new-badge,
+.announcement-important-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.25rem;
+  color: white;
+}
+.announcement-new-badge { background-color: var(--primary-color); }
+.announcement-important-badge { background-color: var(--danger-color); }
+.announcement-body {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 0.9rem;
+}
+.announcement-modal-footer {
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+}

@@ -1,4 +1,4 @@
-import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, findBackupFile, readBackupFileContent, writeBackupSnapshot, type DriveFileRef } from './googleDrive';
+import { findOwnDataFile, readFileContent, createOwnDataFile, updateFileContent, listTeammateDataFiles, findTeamsConfigFile, createTeamsConfigFile, findMediaConfigFile, createMediaConfigFile, findAnnouncementsFile, createAnnouncementsFile, ensureDomainPermission, listPermissions, grantIndividualPermission, revokePermission, findBackupFile, readBackupFileContent, writeBackupSnapshot, type DriveFileRef } from './googleDrive';
 
 const LOCAL_CACHE_PREFIX = 'kpiUserDataCache:';
 const DRIVE_FILE_ID_CACHE_PREFIX = 'kpiDriveFileId:';
@@ -812,4 +812,26 @@ export async function saveMediaConfig(
     return driveFileId;
   }
   return createMediaConfigFile(data, creatorEmail);
+}
+
+export interface AnnouncementsResult<T> {
+  data: T | null;
+  driveFileId: string | null;
+}
+
+/** Loads the shared「開発者からのお知らせ」file owned by `adminEmail`, if it has been created yet. */
+export async function loadAnnouncements<T = any>(adminEmail: string): Promise<AnnouncementsResult<T>> {
+  const existing = await findAnnouncementsFile(adminEmail);
+  if (!existing) return { data: null, driveFileId: null };
+  const content = await readFileContent<T>(existing.id);
+  return { data: content, driveFileId: existing.id };
+}
+
+/** Creates the announcements file on the admin's first post, or overwrites it afterwards. */
+export async function saveAnnouncements(driveFileId: string | null, data: unknown, creatorEmail: string): Promise<string> {
+  if (driveFileId) {
+    await updateFileContent(driveFileId, data);
+    return driveFileId;
+  }
+  return createAnnouncementsFile(data, creatorEmail);
 }
