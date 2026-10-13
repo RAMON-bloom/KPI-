@@ -1273,6 +1273,14 @@ section {
     background-color: var(--danger-color);
     color: white;
 }
+/* パイプラインの「完全削除」— 隣の「非表示（選考終了）」と見分けがつくよう、より濃い赤の枠線付きにする */
+.candidate-hard-delete-button {
+    background-color: #8b1a1a;
+    border: 1px solid #5c0f0f;
+}
+.candidate-hard-delete-button:hover {
+    background-color: #6e1414;
+}
 .secondary-action-button {
     background-color: var(--secondary-color);
     color: white;

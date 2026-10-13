@@ -277,10 +277,10 @@ function mergeEntriesByLatestId(a: any[] = [], b: any[] = []): any[] {
  * compared via `lastModifiedAt` — a candidate's own `id` never changes on edit the way an
  * entry's does, so it can't double as a timestamp; `lastModifiedAt` is bumped explicitly instead
  * by computeStageAdvanceUpdate and by every isHidden toggle, own or ミドル代理, see the
- * Candidate interface in index.tsx). Unlike entries, candidates are never hard-deleted (only
- * archived via isHidden — see the Candidate.revival/isHidden comments in index.tsx), so a plain
- * union of both sides by id is safe here too: it can only ever add a candidate neither side
- * would otherwise have dropped on purpose, never resurrect one that was deliberately removed.
+ * Candidate interface in index.tsx). Candidates are normally only archived via isHidden, but the
+ * パイプラインの「完全削除」 does hard-delete one — a plain union here would resurrect it from
+ * the other side's copy, so performSave filters the merged result by the union of both sides'
+ * deletedCandidateIds tombstones afterwards.
  */
 function mergeCandidatesByLatest(a: any[] = [], b: any[] = []): any[] {
   const byId = new Map<string, any>();
@@ -322,13 +322,25 @@ async function performSave(
       // fall through and write the local snapshot as before rather than blocking the rest of this
       // save on it.
       try {
-        const latest = await readFileContent<{ feedbackPosts?: unknown[]; entries?: any[]; candidates?: any[] }>(driveFileId);
+        const latest = await readFileContent<{ feedbackPosts?: unknown[]; entries?: any[]; candidates?: any[]; deletedCandidateIds?: string[] }>(driveFileId);
         if (latest && latest.feedbackPosts) payload = { ...payload, feedbackPosts: latest.feedbackPosts };
         if (latest && latest.entries) {
           payload = { ...payload, entries: mergeEntriesByLatestId(payload.entries as any[], latest.entries) };
         }
+        // 「完全削除」の墓標は両側の和集合を取り、マージ後の候補者から除外する — 和集合マージ
+        // （mergeCandidatesByLatest）だけだと、Drive側に残っている削除前のコピーから候補者が
+        // 復活してしまうため（UserData.deletedCandidateIds参照）。
+        const deletedIds = Array.from(new Set([
+          ...((payload.deletedCandidateIds as string[] | undefined) || []),
+          ...((latest && latest.deletedCandidateIds) || []),
+        ]));
+        if (deletedIds.length > 0) payload = { ...payload, deletedCandidateIds: deletedIds };
         if (latest && latest.candidates) {
           payload = { ...payload, candidates: mergeCandidatesByLatest(payload.candidates as any[], latest.candidates) };
+        }
+        if (deletedIds.length > 0) {
+          const deletedSet = new Set(deletedIds);
+          payload = { ...payload, candidates: ((payload.candidates as any[]) || []).filter(c => !deletedSet.has(c?.id)) };
         }
       } catch (readErr) {
         console.error('Failed to re-fetch feedbackPosts/entries/candidates before saving own data — writing local snapshot instead', readErr);

@@ -1077,6 +1077,11 @@ interface UserData {
   weeklyKpiTargetsUpdatedAt?: string;
   dailyKpiTargets: Record<KpiKey, number>;
   candidates: Candidate[];
+  // パイプラインの「完全削除」で消した候補者のID（削除の墓標）。Drive保存時の
+  // mergeCandidatesByLatest（services/dataSync.ts）は両側の候補者を和集合でマージするため、
+  // 単に配列から取り除くだけだとDrive側に残っている旧コピーから復活してしまう — ここに
+  // 載っているIDはマージ後・読み込み時（normalizeUserData）の両方で必ず除外する。
+  deletedCandidateIds?: string[];
   displayName?: string;
   // Automatically mirrors this user's own パイプラインカレンダー entries (applications'
   // scheduledDate) into their own Google Tasks default list on every save. Tracks the Google-
@@ -4389,6 +4394,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-10-13',
+    items: [
+      '候補者パイプラインの各候補者カードで、「非表示（選考終了）」の右に「完全削除」ボタンを追加。誤って重複登録してしまった候補者などを、確認ダイアログの後にパイプラインから完全に削除できます（元に戻せません。自分の候補者のみ対象で、これまでに加算されたKPI実績は変わりません）',
+    ],
+  },
   {
     date: '2026-10-12',
     items: [
@@ -11064,6 +11075,8 @@ const PipelineCandidateCard: React.FC<{
   onToggleShowHiddenApps: (checked: boolean) => void;
   onSave: (candidate: Candidate) => void;
   onToggleVisibility: (candidateId: string) => void;
+  // 「完全削除」（App側のhandleDeleteCandidate）— 本人の候補者のみ。ミドルの代理編集中は出さない。
+  onDeleteCandidate: (candidateId: string) => void;
   onToggleApplicationVisibility: (candidate: Candidate, applicationId: string) => void;
   onOpenRevivalModal: (candidate: Candidate) => void;
   onRemoveFromRevivalList: (candidate: Candidate) => void;
@@ -11082,7 +11095,7 @@ const PipelineCandidateCard: React.FC<{
   onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, isManagedByMiddle, visibilityFilter, isExpanded, showHiddenApps,
-  onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onToggleApplicationVisibility,
+  onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onDeleteCandidate, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
   onEditApplication,
@@ -11100,6 +11113,20 @@ const PipelineCandidateCard: React.FC<{
   // 変更した瞬間に設定されるが、後から日付を直接修正できるようにサマリからも編集可能にする。
   // 非表示（isHidden）の選考は対象外（pickBestApplicationPerCandidateの扱いと合わせる）。
   const acceptedApplication = c.applications.find(app => !app.isHidden && app.stage === '内定承諾');
+
+  // 「完全削除」ボタン — 誤登録（重複登録など）の取り消し用。本人の候補者のみ（ミドルの代理
+  // 編集では出さない）。元に戻せないため必ず確認ダイアログを挟む。
+  const handleDeleteClick = () => {
+    const ok = window.confirm(
+      `候補者「${c.name || '（氏名未入力）'}」をパイプラインから完全に削除します。\n` +
+      '選考状況・メモなどもすべて削除され、元に戻せません。\n' +
+      '（これまでに加算されたKPI実績は変わりません）\n\n本当に削除しますか？'
+    );
+    if (ok) onDeleteCandidate(c.id);
+  };
+  const deleteButton = !isManagedByMiddle ? (
+    <button onClick={handleDeleteClick} className="delete-user-button candidate-hard-delete-button" title="誤って重複登録した場合などに、この候補者をパイプラインから完全に削除します">完全削除</button>
+  ) : null;
 
   const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
     onSave({ ...c, [field]: value });
@@ -11454,6 +11481,7 @@ const PipelineCandidateCard: React.FC<{
                           <button onClick={() => onOpenRevivalModal(c)} className="edit-user-button">編集</button>
                           <button onClick={() => onRemoveFromRevivalList(c)} className="secondary-action-button">掘り起しリストから解除</button>
                           <button onClick={() => onMoveRevivalToHidden(c)} className="delete-user-button">非表示（選考終了）に登録</button>
+                          {deleteButton}
                       </>
                   ) : (
                       <>
@@ -11467,6 +11495,7 @@ const PipelineCandidateCard: React.FC<{
                           >
                               {visibilityFilter === 'hidden' ? '再表示' : '非表示（選考終了）'}
                           </button>
+                          {deleteButton}
                       </>
                   )}
               </div>
@@ -12240,6 +12269,7 @@ const CandidatePipelineView: React.FC<{
     allMedia: MediaEntry[];
     onSave: (candidate: Candidate) => void;
     onToggleVisibility: (candidateId: string) => void;
+    onDeleteCandidate: (candidateId: string) => void;
     currentUserEmail: string;
     scope: 'personal' | 'all_users' | 'team' | 'user';
     onScopeChange: (scope: 'personal' | 'all_users' | 'team' | 'user') => void;
@@ -12280,7 +12310,7 @@ const CandidatePipelineView: React.FC<{
     meetingForecast: MeetingForecastSettings | undefined;
     onUpdateMeetingForecast: (updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => void;
 }> = ({
-    candidates, allMedia, onSave, onToggleVisibility, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
+    candidates, allMedia, onSave, onToggleVisibility, onDeleteCandidate, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
@@ -13281,6 +13311,7 @@ const CandidatePipelineView: React.FC<{
                         onToggleShowHiddenApps={setShowHiddenApps}
                         onSave={saveCandidate}
                         onToggleVisibility={onToggleVisibility}
+                        onDeleteCandidate={onDeleteCandidate}
                         onToggleApplicationVisibility={handleToggleApplicationVisibility}
                         onOpenRevivalModal={handleOpenRevivalModal}
                         onRemoveFromRevivalList={handleRemoveFromRevivalList}
@@ -15846,7 +15877,12 @@ const App: React.FC = () => {
     // while untouched candidates stayed clean, which read as "some cards have the label, some
     // don't". Stripped here (self-heals anything already saved with the leak) and again at
     // the actual save point below (handleSaveCandidate) to stop it recurring.
-    candidates: (d.candidates || []).map(({ ownerEmail, ownerLabel, ...c }) => c),
+    candidates: (d.candidates || [])
+      .filter(c => !(d.deletedCandidateIds || []).includes(c.id))
+      .map(({ ownerEmail, ownerLabel, ...c }) => c),
+    // 完全削除した候補者の墓標 — 許可リストに無いと再読み込みで消え、次の保存時にDrive側の
+    // 旧コピーから候補者が復活してしまう（UserData.deletedCandidateIds参照）。
+    deletedCandidateIds: d.deletedCandidateIds,
     kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
     weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
     // 同じ理由: 週次目標の最終変更日時も許可リストに無いと保存直後は効いていても再読み込みで
@@ -18059,6 +18095,23 @@ const App: React.FC = () => {
       }
   };
 
+  // 「完全削除」— 重複登録などの誤登録を取り消すため、候補者をパイプラインから物理的に取り除く。
+  // 削除IDを墓標（deletedCandidateIds）に残すのは、Drive保存時の和集合マージで復活させないため。
+  // 過去にこの候補者の選考進捗で加算されたKPI実績は戻さない（実績は日付単位の集計で、候補者
+  // ごとの内訳を持っていないため）。
+  const handleDeleteCandidate = (candidateId: string) => {
+      const target = currentUserData?.candidates.find(c => c.id === candidateId);
+      setCurrentUserData(prevData => {
+          if (!prevData) return null;
+          return {
+              ...prevData,
+              candidates: prevData.candidates.filter(c => c.id !== candidateId),
+              deletedCandidateIds: Array.from(new Set([...(prevData.deletedCandidateIds || []), candidateId])),
+          };
+      });
+      if (target) queueCandidateTasksSync(target, null);
+  };
+
     // Extract data for child components from the single source of truth
     const { entries, kpiTargets, weeklyKpiTargets, dailyKpiTargets, candidates } = useMemo(() => ({
       entries: currentUserData?.entries || [],
@@ -19920,6 +19973,7 @@ const App: React.FC = () => {
                 allMedia={allMedia}
                 onSave={handleSaveCandidate}
                 onToggleVisibility={handleToggleCandidateVisibility}
+                onDeleteCandidate={handleDeleteCandidate}
                 currentUserEmail={currentIdentity?.email || ''}
                 scope={pipelineScope}
                 onScopeChange={setPipelineScope}
