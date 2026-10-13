@@ -16,7 +16,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, hasGrantedScope, GMAIL_READONLY_SCOPE, GoogleIdentity } from './services/googleAuth';
-import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup, loadAnnouncements, saveAnnouncements } from './services/dataSync';
+import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, deleteTeammateCandidate, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup, loadAnnouncements, saveAnnouncements } from './services/dataSync';
 import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 
@@ -4397,7 +4397,9 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-13',
     items: [
-      '候補者パイプラインの各候補者カードで、「非表示（選考終了）」の右に「完全削除」ボタンを追加。誤って重複登録してしまった候補者などを、確認ダイアログの後にパイプラインから完全に削除できます（元に戻せません。自分の候補者のみ対象で、これまでに加算されたKPI実績は変わりません）',
+      '候補者パイプラインの各候補者カードで、「非表示（選考終了）」の右に「完全削除」ボタンを追加。誤って重複登録してしまった候補者などを、確認ダイアログの後にパイプラインから完全に削除できます（元に戻せません。これまでに加算されたKPI実績は変わりません）',
+      'BP/ミドルは、代理編集できる所属チームメンバーの候補者も「完全削除」できるようにした',
+      '新規候補者の登録時、自分（代理登録の場合は登録先のメンバー）の候補者に同じ氏名の人が既にいれば、非表示・掘り起しリストの候補者も含めて確認ダイアログで知らせるようにした（全角/半角スペースの違いは無視。重複登録の防止のため）',
     ],
   },
   {
@@ -6519,7 +6521,12 @@ const CandidateModal: React.FC<{
     initialData?: Candidate | null;
     allMedia: MediaEntry[];
     currentUserEmail: string;
-}> = ({ onSave, onClose, initialData, allMedia, currentUserEmail }) => {
+    // 新規登録の登録先（ミドルの代理登録なら対象メンバー、未指定なら自分）と、その人の候補者として
+    // 手元で既に分かっている一覧 — 「同じ人の中での重複登録」チェックに使う（Driveの最新データと
+    // 突き合わせるが、直前の登録がまだDriveへ保存されていない場合もここで拾えるように）。
+    ownerEmail?: string;
+    ownerCandidates?: Candidate[];
+}> = ({ onSave, onClose, initialData, allMedia, currentUserEmail, ownerEmail, ownerCandidates = [] }) => {
     const activeMedia = allMedia.filter(m => !m.isArchived);
     const defaultCandidate: Candidate = {
         id: initialData?.id || generateCandidateId(),
@@ -7096,15 +7103,50 @@ const CandidateModal: React.FC<{
         let candidateToSave = candidate;
         // 重複判定は新規登録時のみ（編集時は対象外）。氏名＋現職企業が一致する候補者を他ユーザーが
         // 既に登録していないか、Driveから全ユーザー分を都度取得して確認する。
+        // あわせて、登録先本人（ownerKey）の候補者に同じ氏名が既にいないかも確認する — 本人内の
+        // 重複は現職企業が違っても（入力ゆれ・転職後の再登録など）同一人物の可能性が高いため、
+        // 氏名だけで判定し、非表示（選考終了・掘り起し）の候補者も対象に含める。
         if (!initialData) {
+            const ownerKey = ownerEmail || currentUserEmail;
+            const normalizedName = normalizeForDuplicateMatch(candidate.name);
             setIsCheckingDuplicate(true);
+            let teammates: Awaited<ReturnType<typeof loadAllTeammatesData<UserData>>> = [];
             try {
-                const teammates = await loadAllTeammatesData<UserData>();
-                const normalizedName = normalizeForDuplicateMatch(candidate.name);
+                teammates = await loadAllTeammatesData<UserData>();
+            } catch (err) {
+                console.error('重複候補者チェックに失敗しました', err);
+            }
+            const ownerDriveCandidates = teammates.find(t => normalizeEmail(t.email) === normalizeEmail(ownerKey))?.data.candidates || [];
+            const ownerDeletedIds = new Set(teammates.find(t => normalizeEmail(t.email) === normalizeEmail(ownerKey))?.data.deletedCandidateIds || []);
+            const ownerKnownById = new Map<string, Candidate>();
+            [...ownerDriveCandidates, ...ownerCandidates].forEach(c => {
+                if (!ownerDeletedIds.has(c.id)) ownerKnownById.set(c.id, c);
+            });
+            const selfMatches = Array.from(ownerKnownById.values()).filter(c =>
+                normalizedName && normalizeForDuplicateMatch(c.name) === normalizedName
+            );
+            if (selfMatches.length > 0) {
+                const describe = (c: Candidate) => {
+                    const status = c.revival ? '掘り起しリスト' : c.isHidden ? '非表示（選考終了）' : '表示中';
+                    const registered = c.createdAt ? `・登録日 ${new Date(c.createdAt).toLocaleDateString('ja-JP')}` : '';
+                    return `・${c.name}（${c.currentCompany || '現職未入力'}／${status}${registered}）`;
+                };
+                const whose = ownerEmail && normalizeEmail(ownerEmail) !== normalizeEmail(currentUserEmail) ? '登録先のメンバーの候補者に' : 'あなたの候補者に';
+                const shouldProceed = window.confirm(
+                    `${whose}、同じ氏名の候補者が既に登録されています。\n\n` +
+                    `${selfMatches.map(describe).join('\n')}\n\n` +
+                    '重複登録の可能性があります。既存の候補者は「非表示（選考終了）のみ」等の表示切り替えで確認できます。\n\nこのまま新規登録しますか？'
+                );
+                if (!shouldProceed) {
+                    setIsCheckingDuplicate(false);
+                    return;
+                }
+            }
+            try {
                 const normalizedCompany = normalizeForDuplicateMatch(candidate.currentCompany);
                 const matches: { ownerEmail: string; ownerLabel: string }[] = [];
                 teammates.forEach(({ email, data }) => {
-                    if (normalizeEmail(email) === normalizeEmail(currentUserEmail)) return;
+                    if (normalizeEmail(email) === normalizeEmail(ownerKey)) return;
                     (data.candidates || []).forEach(other => {
                         if (
                             normalizedName &&
@@ -11075,8 +11117,9 @@ const PipelineCandidateCard: React.FC<{
   onToggleShowHiddenApps: (checked: boolean) => void;
   onSave: (candidate: Candidate) => void;
   onToggleVisibility: (candidateId: string) => void;
-  // 「完全削除」（App側のhandleDeleteCandidate）— 本人の候補者のみ。ミドルの代理編集中は出さない。
-  onDeleteCandidate: (candidateId: string) => void;
+  // 「完全削除」— 本人の候補者はApp側のhandleDeleteCandidate、ミドルの代理編集中は
+  // persistTeammateCandidateDeleteへ、親（CandidatePipelineView.deleteCandidate）が振り分ける。
+  onDeleteCandidate: (candidate: Candidate) => void;
   onToggleApplicationVisibility: (candidate: Candidate, applicationId: string) => void;
   onOpenRevivalModal: (candidate: Candidate) => void;
   onRemoveFromRevivalList: (candidate: Candidate) => void;
@@ -11114,19 +11157,19 @@ const PipelineCandidateCard: React.FC<{
   // 非表示（isHidden）の選考は対象外（pickBestApplicationPerCandidateの扱いと合わせる）。
   const acceptedApplication = c.applications.find(app => !app.isHidden && app.stage === '内定承諾');
 
-  // 「完全削除」ボタン — 誤登録（重複登録など）の取り消し用。本人の候補者のみ（ミドルの代理
-  // 編集では出さない）。元に戻せないため必ず確認ダイアログを挟む。
+  // 「完全削除」ボタン — 誤登録（重複登録など）の取り消し用。本人、または代理編集できるミドルが
+  // 使える（candidateIsOwnのときだけ操作ボタン群ごと描画される）。元に戻せないため必ず確認を挟む。
   const handleDeleteClick = () => {
     const ok = window.confirm(
       `候補者「${c.name || '（氏名未入力）'}」をパイプラインから完全に削除します。\n` +
       '選考状況・メモなどもすべて削除され、元に戻せません。\n' +
       '（これまでに加算されたKPI実績は変わりません）\n\n本当に削除しますか？'
     );
-    if (ok) onDeleteCandidate(c.id);
+    if (ok) onDeleteCandidate(c);
   };
-  const deleteButton = !isManagedByMiddle ? (
+  const deleteButton = (
     <button onClick={handleDeleteClick} className="delete-user-button candidate-hard-delete-button" title="誤って重複登録した場合などに、この候補者をパイプラインから完全に削除します">完全削除</button>
-  ) : null;
+  );
 
   const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
     onSave({ ...c, [field]: value });
@@ -12294,6 +12337,7 @@ const CandidatePipelineView: React.FC<{
     isCurrentUserMiddle: boolean;
     middleManagedMemberEmails: string[];
     onSaveManagedCandidate: (targetEmail: string, candidateId: string, patch: Partial<Candidate>) => void;
+    onDeleteManagedCandidate: (targetEmail: string, candidateId: string) => void;
     // ミドルが「ユーザー別」スコープで選択中のチームメンバーに代わって新規候補者を登録する際の
     // 保存先。既存候補者の代理編集(onSaveManagedCandidate)とは別経路 — 差分パッチではなく
     // 候補者オブジェクトを丸ごと渡す。
@@ -12313,7 +12357,7 @@ const CandidatePipelineView: React.FC<{
     candidates, allMedia, onSave, onToggleVisibility, onDeleteCandidate, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
-    isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate,
+    isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate, onDeleteManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters, weekStartsOn,
     meetingForecast, onUpdateMeetingForecast,
 }) => {
@@ -12344,6 +12388,17 @@ const CandidatePipelineView: React.FC<{
         });
         if (Object.keys(patch).length === 0) return;
         onSaveManagedCandidate(ownerEmail, sanitized.id, patch);
+    };
+    // 「完全削除」の振り分け — saveCandidateと同じく、自分の候補者は本人用、ミドルが代理編集できる
+    // メンバーの候補者は対象メンバーのDriveファイルへ。それ以外は何もしない。
+    const deleteCandidate = (candidate: Candidate) => {
+        if (isOwn(candidate)) {
+            onDeleteCandidate(candidate.id);
+            return;
+        }
+        if (candidate.ownerEmail && isManagedByMiddle(candidate)) {
+            onDeleteManagedCandidate(candidate.ownerEmail, candidate.id);
+        }
     };
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
@@ -12886,6 +12941,8 @@ const CandidatePipelineView: React.FC<{
                   initialData={editingCandidate}
                   allMedia={allMedia}
                   currentUserEmail={currentUserEmail}
+                  ownerEmail={addTargetEmail || currentUserEmail}
+                  ownerCandidates={addTargetEmail ? candidates.filter(c => c.ownerEmail === addTargetEmail) : candidates.filter(isOwn)}
               />
             )}
             
@@ -13311,7 +13368,7 @@ const CandidatePipelineView: React.FC<{
                         onToggleShowHiddenApps={setShowHiddenApps}
                         onSave={saveCandidate}
                         onToggleVisibility={onToggleVisibility}
-                        onDeleteCandidate={onDeleteCandidate}
+                        onDeleteCandidate={deleteCandidate}
                         onToggleApplicationVisibility={handleToggleApplicationVisibility}
                         onOpenRevivalModal={handleOpenRevivalModal}
                         onRemoveFromRevivalList={handleRemoveFromRevivalList}
@@ -17518,6 +17575,34 @@ const App: React.FC = () => {
     });
   };
 
+  // ミドルによる代理での候補者「完全削除」— persistTeammateCandidateEditと同じく、手元の集約
+  // キャッシュを楽観的に更新してから対象メンバーのDriveファイルへ書き込む（deleteTeammateCandidate
+  // が最新データを再取得し、墓標deletedCandidateIdsも残す）。Googleタスクは本人のセッションでしか
+  // 消せないため触らない（本人の次回「今すぐ同期」等で孤立タスクとして掃除される）。
+  const persistTeammateCandidateDelete = (targetEmail: string, candidateId: string) => {
+    setAllUsersData(prev => {
+      const target = prev[targetEmail];
+      if (!target) return prev;
+      return {
+        ...prev,
+        [targetEmail]: {
+          ...target,
+          candidates: target.candidates.filter(c => c.id !== candidateId),
+          deletedCandidateIds: Array.from(new Set([...(target.deletedCandidateIds || []), candidateId])),
+        },
+      };
+    });
+    const targetFileId = driveFileIdByEmail[targetEmail];
+    if (!targetFileId) {
+      alert('対象メンバーのデータファイルが見つかりませんでした。');
+      return;
+    }
+    deleteTeammateCandidate<UserData>(targetFileId, candidateId).catch(err => {
+      console.error('Failed to delete candidate from teammate Drive file', err);
+      alert(`候補者の削除に失敗しました: ${describeTeammateDriveWriteError(err)}`);
+    });
+  };
+
   // 全ユーザー/チーム別タブの「内定承諾一覧」から成約月を付け替える — 自分の候補者は通常の保存
   // （handleSaveCandidate）、ミドルが代理編集できるメンバーの候補者はpersistTeammateCandidateEditで
   // 本人のデータへ書き込む。それ以外のメンバーの候補者は編集不可（閲覧のみ）。
@@ -19992,6 +20077,7 @@ const App: React.FC = () => {
                 isCurrentUserMiddle={isCurrentUserMiddle}
                 middleManagedMemberEmails={middleManagedMemberEmails}
                 onSaveManagedCandidate={persistTeammateCandidateEdit}
+                onDeleteManagedCandidate={persistTeammateCandidateDelete}
                 onAddManagedCandidate={persistTeammateCandidateAdd}
                 defaultStageFilters={currentUserData?.pipelineStageFilterDefaults}
                 onSaveDefaultStageFilters={handleSavePipelineStageFilterDefaults}

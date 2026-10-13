@@ -594,6 +594,27 @@ export async function overwriteTeammateCandidateVisibility<T extends { candidate
 }
 
 /**
+ * ミドルによる代理での候補者「完全削除」: fetches the target teammate's LATEST data (same
+ * re-fetch-before-write pattern as the other overwriteTeammate* functions), drops the candidate
+ * and records its id in deletedCandidateIds — the tombstone the teammate's own performSave honors,
+ * so their next save (merging their possibly-stale local copy back in) doesn't resurrect it.
+ * Requires direct 'writer' access to this fileId (see syncIndividualWriterPermissions).
+ */
+export async function deleteTeammateCandidate<T extends { candidates: any[]; deletedCandidateIds?: string[] } = any>(
+  driveFileId: string,
+  candidateId: string
+): Promise<T> {
+  const latest = await readFileContent<T>(driveFileId);
+  const updated = {
+    ...latest,
+    candidates: (latest.candidates || []).filter((c: any) => c.id !== candidateId),
+    deletedCandidateIds: Array.from(new Set([...(latest.deletedCandidateIds || []), candidateId])),
+  };
+  await updateFileContent(driveFileId, updated);
+  return updated;
+}
+
+/**
  * ミドルによる代理での候補者パイプライン全項目編集: fetches the target teammate's LATEST data
  * (same re-fetch-before-write pattern as the other overwriteTeammate* functions above), re-derives
  * the patched candidate AND any KPI actuals it triggers (recommendationRecorded/exitRecorded/
