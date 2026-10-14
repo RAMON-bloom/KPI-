@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '候補者カードの氏名の右に「ブラインドレジュメ」ボタンを追加した。パイプラインに登録されているその候補者1名分の情報から、氏名・連絡先を伏せたブラインドレジュメを作成し、内容を確認・修正してPDFに出力できます（推薦先の企業名・求人内容は任意。空欄なら特定の企業に寄せない汎用の内容になります）',
       '類似経歴リサーチの実行中に「キャンセル」ボタンを表示し、途中で中止できるようにした（集計表まで出ている場合はそのまま残ります）。実行中でも画面を閉じられるようにした',
       '類似経歴リサーチで、リサーチ対象の候補者本人が「経歴が似ている候補者」に出てしまうことがある不具合を修正した（他のメンバーが同じ人を登録している場合なども、氏名・電話番号・メールアドレスが一致すれば本人として除外します）',
       '候補者カードの「類似経歴リサーチ」ボタンを、候補者氏名のすぐ右隣に寄せて表示するようにした',
@@ -8207,6 +8208,194 @@ const BlindResumeProgress: React.FC<{ message: string; eta: BlindResumeEta | nul
 const toLocalIsoDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+const linesToArray = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
+
+/** ブラインドレジュメの本文（AI生成結果）の編集欄。複数名の作成画面と、候補者カードからの1名分の作成で共用。 */
+const BlindResumeContentEditor: React.FC<{
+  content: BlindResumeContent;
+  onChange: (update: (prev: BlindResumeContent) => BlindResumeContent) => void;
+  // 表紙を付けない1名分の出力では「表紙の適合ポイント」を使わないので出さない。
+  showCoverPoint?: boolean;
+}> = ({ content, onChange, showCoverPoint = true }) => {
+  const patch = (p: Partial<BlindResumeContent>) => onChange(prev => ({ ...prev, ...p }));
+  const updateCareer = (index: number, p: Partial<BlindCareer>) =>
+    onChange(prev => ({ ...prev, careers: prev.careers.map((c, i) => (i === index ? { ...c, ...p } : c)) }));
+  return (
+    <>
+      <label>推奨ポジション（空欄ならPDFに載せません）<input type="text" value={content.recommendedPosition} onChange={e => patch({ recommendedPosition: e.target.value })} /></label>
+      <label>キャッチ<input type="text" value={content.headline} onChange={e => patch({ headline: e.target.value })} /></label>
+      {showCoverPoint && <label>表紙の適合ポイント<input type="text" value={content.coverPoint} onChange={e => patch({ coverPoint: e.target.value })} /></label>}
+      <label>推薦ポイント（1行に1つ）<textarea rows={3} value={content.matchPoints.join('\n')} onChange={e => patch({ matchPoints: linesToArray(e.target.value) })} /></label>
+      <label>職務要約<textarea rows={4} value={content.careerSummary} onChange={e => patch({ careerSummary: e.target.value })} /></label>
+      <div className="blind-resume-careers">
+        <span className="blind-resume-label">職務経歴</span>
+        {content.careers.map((career, ci) => (
+          <div key={ci} className="blind-resume-career">
+            <div className="blind-resume-row">
+              <input type="text" value={career.company} onChange={e => updateCareer(ci, { company: e.target.value })} placeholder="企業名" aria-label="企業名" />
+              <input type="text" value={career.period} onChange={e => updateCareer(ci, { period: e.target.value })} placeholder="在籍期間" aria-label="在籍期間" />
+              <input type="text" value={career.role} onChange={e => updateCareer(ci, { role: e.target.value })} placeholder="部署・役職" aria-label="部署・役職" />
+              <button type="button" className="blind-resume-remove" onClick={() => onChange(prev => ({ ...prev, careers: prev.careers.filter((_, i) => i !== ci) }))} aria-label="この職歴を削除">&times;</button>
+            </div>
+            <textarea rows={3} value={career.description} onChange={e => updateCareer(ci, { description: e.target.value })} placeholder="業務内容・実績" aria-label="業務内容・実績" />
+          </div>
+        ))}
+        <button type="button" className="secondary-action-button" onClick={() => onChange(prev => ({ ...prev, careers: [...prev.careers, { period: '', company: '', role: '', description: '' }] }))}>＋ 職歴を追加</button>
+      </div>
+      <label>活かせる経験・スキル（1行に1つ）<textarea rows={4} value={content.skills.join('\n')} onChange={e => patch({ skills: linesToArray(e.target.value) })} /></label>
+    </>
+  );
+};
+
+const blindResumeFileTitle = (companyName: string, today: string, extra = '') =>
+  ['ブラインドレジュメ', companyName.trim().replace(/[\\/:*?"<>|\s]+/g, ''), extra, today.replace(/-/g, '')].filter(Boolean).join('_');
+
+/** 印刷用HTMLを新しいタブで開いて印刷ダイアログを出す（「送信先: PDFに保存」でPDFにする）。 */
+const openBlindResumePrintWindow = (html: string) => {
+  const win = window.open('', '_blank');
+  if (!win) {
+    alert('ポップアップがブロックされました。ブラウザのアドレスバー右側からこのサイトのポップアップを許可して、もう一度お試しください。');
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  // フォント・レイアウトの確定を待ってから印刷ダイアログを開く。
+  setTimeout(() => { win.focus(); win.print(); }, 400);
+};
+
+/**
+ * 候補者カードの「ブラインドレジュメ」ボタンから、その1名分のブラインドレジュメをPDFにする。
+ * マッチングは行わず、推薦先・求人内容は任意（空なら特定の企業に寄せない汎用の内容にする）。
+ * Geminiに氏名・連絡先を渡さないのは複数名の作成と同じ（generateBlindResume側で伏せる）。
+ */
+const SingleBlindResumeModal: React.FC<{
+  candidate: Candidate;
+  currentUserEmail: string;
+  onClose: () => void;
+}> = ({ candidate, currentUserEmail, onClose }) => {
+  const [companyName, setCompanyName] = useState('');
+  const [positionTitle, setPositionTitle] = useState('');
+  const [jobText, setJobText] = useState('');
+  const [displayOptions, setDisplayOptions] = useState<BlindDisplayOptions>({ showCurrentSalary: true, showDesiredSalary: true, showJoinTiming: true });
+  const [content, setContent] = useState<BlindResumeContent | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const hasProfile = !!(candidate.summary?.trim() || candidate.jobType || candidate.currentCompany
+    || candidate.interviewSummary?.trim() || candidate.interviewMemo?.trim()
+    || (candidate.memos || []).some(m => m.content?.trim()));
+
+  const handleGenerate = async () => {
+    if (content && !window.confirm('いまの内容（手で直した部分を含む）を破棄して作り直します。よろしいですか？')) return;
+    setErrorMessage('');
+    setIsBusy(true);
+    try {
+      const company = companyName.trim();
+      const position = positionTitle.trim();
+      const job = jobText.trim();
+      const jobParts: JobContentPart[] = company || position || job
+        ? [{ text: [
+            company ? `■推薦先企業: ${company}` : '',
+            position ? `■ポジション: ${position}` : '',
+            job ? `■求人情報:\n${job}` : '',
+          ].filter(Boolean).join('\n') }]
+        : [];
+      const result = await generateBlindResume({
+        entry: { candidate, ownerEmail: candidate.ownerEmail || currentUserEmail, ownerLabel: candidate.ownerLabel || '', status: '' },
+        jobParts,
+        companyName: company,
+        recommendedPosition: position,
+      });
+      setContent(result);
+    } catch (err) {
+      console.error('ブラインドレジュメの生成に失敗しました', err);
+      setErrorMessage(`作成中にエラーが発生しました: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const leaks = useMemo(() => (content ? findLeakedPersonalInfo(content, candidate) : []), [content, candidate]);
+
+  const handleExportPdf = () => {
+    if (!content) return;
+    if (leaks.length > 0 && !window.confirm('氏名・連絡先らしき文字列が残っています（赤字の警告を参照）。このままPDFを出力しますか？')) return;
+    const today = toLocalIsoDate(new Date());
+    openBlindResumePrintWindow(renderBlindResumeHtml({
+      companyName: companyName.trim(),
+      positionTitle: positionTitle.trim(),
+      createdDate: today,
+      items: [{ label: 'A', candidate, content }],
+      options: displayOptions,
+      // ファイル名は社外に出るので氏名ではなく職種で区別する。
+      documentTitle: blindResumeFileTitle(companyName, today, (candidate.jobType || '').replace(/[\\/:*?"<>|\s]+/g, '')),
+      includeCover: false,
+    }));
+  };
+
+  const handleClose = () => {
+    if (content && !window.confirm('作成したブラインドレジュメの内容は保存されません。閉じてよろしいですか？')) return;
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={() => { if (!isBusy) handleClose(); }}>
+      <div className="modal-content similar-career-modal single-blind-resume-modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="single-blind-resume-title">
+        <div className="modal-header">
+          <h3 id="single-blind-resume-title">{candidate.name || '（氏名未入力）'}さん - ブラインドレジュメ作成</h3>
+          <button onClick={handleClose} className="close-button" aria-label="閉じる" disabled={isBusy}>&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="field-hint">
+            この候補者の登録情報（経歴概要・面談メモなど）から、氏名・連絡先を伏せたブラインドレジュメを1枚作り、PDFに出力します。
+            AI（Gemini）には氏名・電話番号・メールアドレスを伏せた情報だけを送ります。推薦先・求人内容は任意です（空欄なら特定の企業に寄せない汎用の内容になります）。
+          </p>
+          {!hasProfile && (
+            <div className="similar-career-warning">経歴概要・職種・現職・面談メモがいずれも未登録のため、内容の薄いレジュメになります。カードの詳細から経歴を登録してからの作成をおすすめします。</div>
+          )}
+          {errorMessage && <p className="blind-resume-error">{errorMessage}</p>}
+          <div className="blind-resume-form">
+            <div className="blind-resume-row">
+              <label>推薦先の企業名（任意）
+                <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="例: 株式会社〇〇" disabled={isBusy} />
+              </label>
+              <label>ポジション名（任意）
+                <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
+              </label>
+            </div>
+            <label>求人内容（任意 — 貼り付けると推薦ポイントを求人要件に合わせて書きます）
+              <textarea rows={content ? 2 : 5} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件 など" disabled={isBusy} />
+            </label>
+            <fieldset className="blind-resume-options">
+              <legend>PDFに載せる項目（年齢・学歴・現職・職歴は常に記載。氏名・連絡先は載りません）</legend>
+              <label><input type="checkbox" checked={displayOptions.showCurrentSalary} onChange={e => setDisplayOptions(o => ({ ...o, showCurrentSalary: e.target.checked }))} /> 現年収</label>
+              <label><input type="checkbox" checked={displayOptions.showDesiredSalary} onChange={e => setDisplayOptions(o => ({ ...o, showDesiredSalary: e.target.checked }))} /> 希望年収</label>
+              <label><input type="checkbox" checked={displayOptions.showJoinTiming} onChange={e => setDisplayOptions(o => ({ ...o, showJoinTiming: e.target.checked }))} /> 入社希望時期</label>
+            </fieldset>
+          </div>
+          {content && (
+            <div className="blind-resume-card single-blind-resume-editor">
+              <div className="blind-resume-card-header"><h4>内容の確認・修正</h4></div>
+              <p className="field-hint">AIが作成した内容です。事実と違う点や社外に出せない表現がないか確認し、必要に応じて直してから「PDFを出力」を押してください。印刷画面で「送信先: PDFに保存」を選ぶとPDFとして保存できます。</p>
+              {leaks.length > 0 && <p className="blind-resume-error">個人情報が残っている可能性があります: {leaks.join('、')}</p>}
+              <BlindResumeContentEditor content={content} onChange={update => setContent(prev => (prev ? update(prev) : prev))} showCoverPoint={false} />
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          {isBusy && <span className="blind-resume-estimate">ブラインドレジュメを作成しています…（通常20〜40秒ほど）</span>}
+          <button type="button" className="cancel-button" onClick={handleClose} disabled={isBusy}>閉じる</button>
+          <button type="button" className={content ? 'secondary-action-button' : 'submit-button'} onClick={handleGenerate} disabled={isBusy}>
+            {isBusy ? '作成中…' : content ? '作り直す' : 'ブラインドレジュメを作成'}
+          </button>
+          {content && <button type="button" className="submit-button" onClick={handleExportPdf} disabled={isBusy}>PDFを出力</button>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const BlindResumeView: React.FC<{
   currentUserEmail: string;
   currentUserLabel: string;
@@ -8537,31 +8726,6 @@ const BlindResumeView: React.FC<{
     }
   };
 
-  const updateContent = (key: string, patch: Partial<BlindResumeContent>) => {
-    setGenerated(prev => (prev[key] ? { ...prev, [key]: { ...prev[key], ...patch } } : prev));
-  };
-  const updateCareer = (key: string, index: number, patch: Partial<BlindCareer>) => {
-    setGenerated(prev => {
-      const cur = prev[key];
-      if (!cur) return prev;
-      return { ...prev, [key]: { ...cur, careers: cur.careers.map((c, i) => (i === index ? { ...c, ...patch } : c)) } };
-    });
-  };
-  const removeCareer = (key: string, index: number) => {
-    setGenerated(prev => {
-      const cur = prev[key];
-      if (!cur) return prev;
-      return { ...prev, [key]: { ...cur, careers: cur.careers.filter((_, i) => i !== index) } };
-    });
-  };
-  const addCareer = (key: string) => {
-    setGenerated(prev => {
-      const cur = prev[key];
-      if (!cur) return prev;
-      return { ...prev, [key]: { ...cur, careers: [...cur.careers, { period: '', company: '', role: '', description: '' }] } };
-    });
-  };
-
   const editKeys = orderedSelectedKeys.filter(k => generated[k]);
   const leaksByKey = useMemo(() => {
     const result: Record<string, string[]> = {};
@@ -8577,25 +8741,14 @@ const BlindResumeView: React.FC<{
     const leaked = editKeys.filter(k => leaksByKey[k]?.length);
     if (leaked.length > 0 && !window.confirm('氏名・連絡先らしき文字列が残っている候補者があります（赤字の警告を参照）。このままPDFを出力しますか？')) return;
     const today = toLocalIsoDate(new Date());
-    const documentTitle = `ブラインドレジュメ_${companyName.trim().replace(/[\\/:*?"<>|\s]+/g, '')}_${today.replace(/-/g, '')}`;
-    const html = renderBlindResumeHtml({
+    openBlindResumePrintWindow(renderBlindResumeHtml({
       companyName: companyName.trim(),
       positionTitle: positionTitle.trim(),
       createdDate: today,
       items: editKeys.map((k, i) => ({ label: blindLabel(i), candidate: poolByKey.get(k)!.candidate, content: generated[k] })),
       options: displayOptions,
-      documentTitle,
-    });
-    const win = window.open('', '_blank');
-    if (!win) {
-      alert('ポップアップがブロックされました。ブラウザのアドレスバー右側からこのサイトのポップアップを許可して、もう一度お試しください。');
-      return;
-    }
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
-    // フォント・レイアウトの確定を待ってから印刷ダイアログを開く（「送信先: PDFに保存」で保存）。
-    setTimeout(() => { win.focus(); win.print(); }, 400);
+      documentTitle: blindResumeFileTitle(companyName, today),
+    }));
   };
 
   const scopeDescription = (() => {
@@ -8612,7 +8765,6 @@ const BlindResumeView: React.FC<{
   const generateTargetCount = orderedSelectedKeys.filter(k => !generated[k]).length;
   const generateEstimate = generateTargetCount > 0 ? estimateGeneratePlan(generateTargetCount).totalSec : null;
 
-  const linesToArray = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
   // 入力内容・候補者の選択・作成途中のレジュメをすべて破棄して、1. の入力画面から始め直す。
   const handleReset = () => {
     const message = isBusy
@@ -8818,27 +8970,10 @@ const BlindResumeView: React.FC<{
                       </button>
                     </div>
                     {leaks.length > 0 && <p className="blind-resume-error">個人情報が残っている可能性があります: {leaks.join('、')}</p>}
-                    <label>推奨ポジション（空欄ならPDFに載せません）<input type="text" value={content.recommendedPosition} onChange={e => updateContent(key, { recommendedPosition: e.target.value })} /></label>
-                    <label>キャッチ<input type="text" value={content.headline} onChange={e => updateContent(key, { headline: e.target.value })} /></label>
-                    <label>表紙の適合ポイント<input type="text" value={content.coverPoint} onChange={e => updateContent(key, { coverPoint: e.target.value })} /></label>
-                    <label>推薦ポイント（1行に1つ）<textarea rows={3} value={content.matchPoints.join('\n')} onChange={e => updateContent(key, { matchPoints: linesToArray(e.target.value) })} /></label>
-                    <label>職務要約<textarea rows={4} value={content.careerSummary} onChange={e => updateContent(key, { careerSummary: e.target.value })} /></label>
-                    <div className="blind-resume-careers">
-                      <span className="blind-resume-label">職務経歴</span>
-                      {content.careers.map((career, ci) => (
-                        <div key={ci} className="blind-resume-career">
-                          <div className="blind-resume-row">
-                            <input type="text" value={career.company} onChange={e => updateCareer(key, ci, { company: e.target.value })} placeholder="企業名" aria-label="企業名" />
-                            <input type="text" value={career.period} onChange={e => updateCareer(key, ci, { period: e.target.value })} placeholder="在籍期間" aria-label="在籍期間" />
-                            <input type="text" value={career.role} onChange={e => updateCareer(key, ci, { role: e.target.value })} placeholder="部署・役職" aria-label="部署・役職" />
-                            <button type="button" className="blind-resume-remove" onClick={() => removeCareer(key, ci)} aria-label="この職歴を削除">&times;</button>
-                          </div>
-                          <textarea rows={3} value={career.description} onChange={e => updateCareer(key, ci, { description: e.target.value })} placeholder="業務内容・実績" aria-label="業務内容・実績" />
-                        </div>
-                      ))}
-                      <button type="button" className="secondary-action-button" onClick={() => addCareer(key)}>＋ 職歴を追加</button>
-                    </div>
-                    <label>活かせる経験・スキル（1行に1つ）<textarea rows={4} value={content.skills.join('\n')} onChange={e => updateContent(key, { skills: linesToArray(e.target.value) })} /></label>
+                    <BlindResumeContentEditor
+                      content={content}
+                      onChange={update => setGenerated(prev => (prev[key] ? { ...prev, [key]: update(prev[key]) } : prev))}
+                    />
                   </div>
                 );
               })}
@@ -12286,12 +12421,14 @@ const PipelineCandidateCard: React.FC<{
   onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
   // 「類似経歴の過去事例をリサーチ」— 親（CandidatePipelineView）がSimilarCareerResearchModalを開く。
   onOpenSimilarResearch: (candidate: Candidate) => void;
+  // 「ブラインドレジュメ」— 親（CandidatePipelineView）がSingleBlindResumeModalを開く。
+  onOpenBlindResume: (candidate: Candidate) => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, isManagedByMiddle, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onDeleteCandidate, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
-  onEditApplication, onOpenSimilarResearch,
+  onEditApplication, onOpenSimilarResearch, onOpenBlindResume,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   // c.sourceはMediaEntry.id（例: 名前が日本語だけの媒体だと'media'のような機械的なスラッグに
@@ -12630,6 +12767,14 @@ const PipelineCandidateCard: React.FC<{
               title="社内の過去データから経歴が似ている候補者を探し、どの企業に応募してどんな結果になったかを調べます"
           >
               🔍 類似経歴リサーチ
+          </button>
+          <button
+              type="button"
+              className="similar-career-launch-button similar-career-launch-inline blind-resume-launch-inline"
+              onClick={() => onOpenBlindResume(c)}
+              title="この候補者の登録情報から、氏名・連絡先を伏せたブラインドレジュメを1名分作ってPDFに出力します"
+          >
+              📄 ブラインドレジュメ
           </button>
           {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
           {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
@@ -13564,6 +13709,7 @@ const CandidatePipelineView: React.FC<{
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
     // 類似経歴リサーチの対象（モーダル表示中）と、新規登録直後にリサーチを促すバナーの対象。
     const [similarResearchCandidate, setSimilarResearchCandidate] = useState<Candidate | null>(null);
+    const [blindResumeCandidate, setBlindResumeCandidate] = useState<Candidate | null>(null);
     const [justRegisteredCandidate, setJustRegisteredCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [csvExportPattern, setCsvExportPattern] = useState<CsvExportPattern>('current');
@@ -14100,6 +14246,13 @@ const CandidatePipelineView: React.FC<{
                   onClose={() => setSimilarResearchCandidate(null)}
               />
             )}
+            {blindResumeCandidate && (
+              <SingleBlindResumeModal
+                  candidate={blindResumeCandidate}
+                  currentUserEmail={currentUserEmail}
+                  onClose={() => setBlindResumeCandidate(null)}
+              />
+            )}
             {justRegisteredCandidate && (
               <div className="similar-career-banner" role="status">
                   <span>「{justRegisteredCandidate.name || '（氏名未入力）'}」さんを登録しました。似た経歴の人が過去にどんな企業に応募し、どんな結果になったかを調べられます。</span>
@@ -14568,6 +14721,7 @@ const CandidatePipelineView: React.FC<{
                         onToggleContactReveal={() => toggleContactReveal(c.id)}
                         onEditApplication={handleOpenApplicationModal}
                         onOpenSimilarResearch={setSimilarResearchCandidate}
+                        onOpenBlindResume={setBlindResumeCandidate}
                     />
                 )) : (
                     candidates.length === 0 ? (

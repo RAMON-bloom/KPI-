@@ -426,8 +426,13 @@ export const generateBlindResume = async (params: {
   const c = entry.candidate;
   const summary = redactPersonalInfo((c.summary || '').trim(), c);
   const notes = redactPersonalInfo(collectNotes(c), c);
+  // 推薦先も求人内容も無い場合（候補者カードから1名分だけ作るとき）は、特定の企業に寄せない
+  // 汎用のブラインドレジュメにする。
+  const hasTarget = !!companyName || jobParts.length > 0;
   const instruction = [
-    `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」（求人情報または企業情報は上記）へ候補者を匿名で推薦するための「ブラインドレジュメ」の本文を作成してください。`,
+    hasTarget
+      ? `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」（求人情報または企業情報は上記）へ候補者を匿名で推薦するための「ブラインドレジュメ」の本文を作成してください。`
+      : 'あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業を特定せず、複数の企業へ候補者を匿名で打診するときに使える汎用の「ブラインドレジュメ」の本文を作成してください。',
     recommendedPosition ? `推薦するポジション: ${recommendedPosition}（このポジションへの適合が伝わるように書く）` : '',
     '',
     '■候補者の登録情報',
@@ -441,7 +446,9 @@ export const generateBlindResume = async (params: {
     '- 面談で聞いた転職理由の私的・ネガティブな事情、他社の選考状況、年収交渉の内情、担当者の所感（懸念点）は書かない。企業に提出する推薦資料として適切な表現にする。',
     '- 在籍企業名・職種・学歴はそのまま書いてよい。',
     '- careersは新しい順。descriptionは担当業務・実績を2〜4文で具体的に。',
-    '- matchPointsは推薦先の求人要件と結び付けた適合ポイントを3つ（各60字程度）。',
+    hasTarget
+      ? '- matchPointsは推薦先の求人要件と結び付けた適合ポイントを3つ（各60字程度）。'
+      : '- matchPointsは企業にとっての候補者の強み・アピールポイントを3つ（各60字程度）。',
     '- headlineは候補者を一言で表すキャッチ（30字程度）、coverPointは表紙の一覧に載せる適合ポイントの要約（50字程度）。',
   ].filter(s => s !== '').join('\n');
   const generateStartedAt = Date.now();
@@ -536,8 +543,10 @@ export const renderBlindResumeHtml = (params: {
   items: BlindResumeDocItem[];
   options: BlindDisplayOptions;
   documentTitle: string;
+  // false: 表紙を付けず候補者のページだけにする（候補者カードから1名分だけ出力するとき）。
+  includeCover?: boolean;
 }): string => {
-  const { companyName, positionTitle, createdDate, items, options, documentTitle } = params;
+  const { companyName, positionTitle, createdDate, items, options, documentTitle, includeCover = true } = params;
   const [y, mo, d] = createdDate.split('-');
   const dateLabel = `${y}年${Number(mo)}月${Number(d)}日`;
   const salaryCell = (v?: number) => (v ? `${v}万円` : '—');
@@ -575,10 +584,15 @@ export const renderBlindResumeHtml = (params: {
           </div>`).join('')
       : '<p class="muted">（登録情報なし）</p>';
     const list = (arr: string[]) => (arr.length ? `<ul>${arr.map(s => `<li>${esc(s)}</li>`).join('')}</ul>` : '<p class="muted">（登録情報なし）</p>');
+    const title = includeCover ? `候補者${esc(label)}` : 'ブラインドレジュメ';
+    const destination = !includeCover && companyName
+      ? `<p class="to-inline">${esc(companyName)} 御中${positionTitle ? `　／　対象ポジション: ${esc(positionTitle)}` : ''}</p>`
+      : '';
     return `
     <section class="page">
-      <div class="page-tag">候補者${esc(label)}（ブラインド）</div>
-      <h2>候補者${esc(label)}</h2>
+      <div class="page-tag">${includeCover ? `候補者${esc(label)}（ブラインド）` : `作成日: ${dateLabel}`}</div>
+      <h2>${title}</h2>
+      ${destination}
       ${content.headline ? `<p class="headline">${esc(content.headline)}</p>` : ''}
       <div class="facts">${factCells}</div>
       <h3>推薦ポイント</h3>
@@ -589,6 +603,7 @@ export const renderBlindResumeHtml = (params: {
       ${careers}
       <h3>活かせる経験・スキル</h3>
       ${list(content.skills)}
+      ${includeCover ? '' : '<p class="note">※ 個人情報保護のため、氏名・連絡先等の個人を特定できる情報は記載しておりません。</p>'}
     </section>`;
   }).join('');
 
@@ -604,7 +619,8 @@ export const renderBlindResumeHtml = (params: {
   .cover h1 { font-size: 20pt; margin: 18mm 0 4mm; letter-spacing: 0.05em; }
   .cover .to { font-size: 13pt; margin: 0 0 2mm; }
   .cover .meta { color: #6b7280; margin-bottom: 8mm; }
-  .cover .note { font-size: 9pt; color: #6b7280; margin-top: 6mm; }
+  .note { font-size: 9pt; color: #6b7280; margin-top: 6mm; }
+  .to-inline { margin: 0 0 2mm; color: #374151; }
   table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
   th, td { border: 1px solid #d1d5db; padding: 5px 7px; vertical-align: top; text-align: left; }
   th { background: #eef2f7; white-space: nowrap; }
@@ -629,7 +645,7 @@ export const renderBlindResumeHtml = (params: {
   .muted { color: #9ca3af; margin: 0; }
 </style></head>
 <body>
-  <section class="page cover">
+  ${includeCover ? `<section class="page cover">
     <h1>候補者のご推薦（ブラインドレジュメ）</h1>
     <p class="to">${esc(companyName || '')}${companyName ? ' 御中' : ''}</p>
     <p class="meta">${positionTitle ? `対象ポジション: ${esc(positionTitle)}　／　` : ''}作成日: ${dateLabel}　／　ご推薦人数: ${items.length}名</p>
@@ -638,7 +654,7 @@ export const renderBlindResumeHtml = (params: {
       <tbody>${coverRows}</tbody>
     </table>
     <p class="note">※ 個人情報保護のため、氏名・連絡先等の個人を特定できる情報は記載しておりません。ご興味をお持ちいただけた候補者がいらっしゃいましたら、候補者記号（例: 候補者A）でお知らせください。</p>
-  </section>
+  </section>` : ''}
   ${pages}
 </body></html>`;
 };
