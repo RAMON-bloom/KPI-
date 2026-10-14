@@ -3932,3 +3932,8 @@ p.memo-content-text {
 @media (max-width: 640px) {
   .blind-resume-match-table th:nth-child(4), .blind-resume-match-table td:nth-child(4) { display: none; }
 }
+.blind-resume-phases .blind-resume-phase-list { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1rem; }
+.blind-resume-phases .blind-resume-phase-list label { flex-direction: row; align-items: center; font-weight: normal; }
+.blind-resume-link-button { background: none; border: none; color: var(--primary-color); cursor: pointer; padding: 0; font-size: 0.85rem; text-decoration: underline; }
+.blind-resume-link-button:disabled { color: var(--text-muted-color); cursor: default; }
+.blind-resume-phase-cell { white-space: nowrap; }

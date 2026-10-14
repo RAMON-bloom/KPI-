@@ -4398,6 +4398,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ブラインドレジュメ作成で、対象にする候補者を「選考中・応募前・内定承諾・見送り・辞退・掘り起し・非表示」のフェーズで絞り込めるようにした（複数選択可。選んだフェーズのいずれかに該当する候補者が対象で、フェーズごとの人数と対象人数をその場で表示します）',
       'ブラインドレジュメ作成を、候補者パイプライン内のボタンから、「個人実績」「全ユーザー」「チーム別」「候補者パイプライン」と並ぶ独立したタブ「ブラインドレジュメ」に移した。他のタブを見に行っても入力内容・作成途中のレジュメは残ります',
       'ブラインドレジュメ作成で、求人内容を空欄のままでも作成できるようにした。その場合は企業名（とポジション名）からWeb検索で企業情報・採用ニーズを調べ、一般的にマッチ度が高そうな候補者を提案します（調べた内容と出典は候補者一覧の上で確認できます）。あわせて、候補者ごとに「推奨ポジション」を提案し、表紙と各候補者のページに載せるようにした（編集画面で修正・削除できます）',
       '候補者パイプラインに「ブラインドレジュメ作成」を追加。推薦先の企業名と求人内容（テキスト貼り付け、または求人票のPDF/Wordファイル）を入れると、AIが登録済みの候補者からマッチしそうな人をマッチ度順に提案します。対象範囲は「自分／チーム／事業部（F+・AC）／全ユーザー」から選べ、選考中の候補者に加えて見送り・辞退・掘り起し・非表示の候補者も対象です。選んだ候補者ごとにAIが匿名のレジュメ（推薦ポイント・職務要約・職務経歴・スキル）を作成し、内容を確認・修正したうえで、表紙付きの1つのPDFとして保存できます（氏名・電話番号・メールアドレスは載りません）',
@@ -8127,20 +8128,29 @@ const PipelineDateScheduleModal: React.FC<{
 
 
 // ブラインドレジュメ作成（候補者パイプライン上部のボタンから開く）。推薦先の求人に合いそうな
-// 候補者を、対象範囲（自分／チーム／事業部／全ユーザー）の全候補者——選考中に加え見送り・辞退・
-// 掘り起し・非表示も含む——からAIで探し、選んだ人数分のブラインドレジュメを表紙付きの1つの
+// 候補者を、対象範囲（自分／チーム／事業部／全ユーザー）と対象フェーズ（選考中・見送り・辞退・
+// 掘り起し・非表示など、複数選択可）で絞った候補者からAIで探し、選んだ人数分のブラインドレジュメを表紙付きの1つの
 // PDF（ブラウザの印刷→PDFに保存）にする。ロジック本体はservices/blindResume.ts。
 type BlindResumeScope = 'self' | 'team' | 'department' | 'all';
 
-const blindResumeCandidateStatus = (c: Candidate): string => {
-  if (c.revival) return '掘り起し';
-  if (c.isHidden) return '非表示（選考終了）';
+// レジュメ作成対象を絞り込むフェーズ。1人の候補者が複数に該当しうる（例: 非表示かつ見送り、
+// A社は選考中でB社は辞退）ので排他的な1つのステータスではなく「該当するフェーズの集合」で持ち、
+// 絞り込みは選んだフェーズのいずれかに該当すれば対象（OR）とする。
+const BLIND_RESUME_PHASES = ['選考中', '応募前', '内定承諾', '見送り', '辞退', '掘り起し', '非表示'] as const;
+type BlindResumePhase = typeof BLIND_RESUME_PHASES[number];
+
+const blindResumeCandidatePhases = (c: Candidate): BlindResumePhase[] => {
   const apps = c.applications || [];
-  if (apps.some(a => !a.isHidden && ACTIVE_PIPELINE_STAGES.includes(a.stage))) return '選考中';
-  if (apps.some(a => a.stage === '内定承諾')) return '内定承諾';
-  if (apps.some(a => a.stage === 'お見送り')) return '見送り';
-  if (apps.some(a => a.stage === '選考辞退' || a.stage === '内定承諾後辞退')) return '辞退';
-  return '応募前';
+  const phases: BlindResumePhase[] = [];
+  // 非表示・掘り起しの候補者は選考を終えている扱い — 古い応募が進行中のまま残っていても選考中にしない。
+  if (!c.isHidden && !c.revival && apps.some(a => !a.isHidden && ACTIVE_PIPELINE_STAGES.includes(a.stage))) phases.push('選考中');
+  if (apps.length === 0) phases.push('応募前');
+  if (apps.some(a => a.stage === '内定承諾')) phases.push('内定承諾');
+  if (apps.some(a => a.stage === 'お見送り')) phases.push('見送り');
+  if (apps.some(a => a.stage === '選考辞退' || a.stage === '内定承諾後辞退')) phases.push('辞退');
+  if (c.revival) phases.push('掘り起し');
+  if (c.isHidden) phases.push('非表示');
+  return phases;
 };
 
 const toLocalIsoDate = (d: Date) =>
@@ -8212,14 +8222,24 @@ const BlindResumeView: React.FC<{
     return list;
   }, [teammates]);
 
-  const buildPool = useCallback(async (): Promise<BlindPoolEntry[]> => {
-    const ownDeleted = new Set(ownDeletedCandidateIds);
-    const ownEntries: BlindPoolEntry[] = ownCandidates
-      .filter(c => !ownDeleted.has(c.id))
-      .map(c => ({ candidate: c, ownerEmail: currentUserEmail, ownerLabel: currentUserLabel, status: blindResumeCandidateStatus(c) }));
-    if (scope === 'self') return ownEntries;
+  const [selectedPhases, setSelectedPhases] = useState<BlindResumePhase[]>([...BLIND_RESUME_PHASES]);
+  const togglePhase = (phase: BlindResumePhase) => {
+    setSelectedPhases(prev => (prev.includes(phase) ? prev.filter(p => p !== phase) : [...prev, phase]));
+  };
 
-    const all = await ensureTeammates();
+  const toEntry = (c: Candidate, ownerEmail: string, ownerLabel: string): BlindPoolEntry & { phases: BlindResumePhase[] } => {
+    const phases = blindResumeCandidatePhases(c);
+    return { candidate: c, ownerEmail, ownerLabel, status: phases.join('・') || '—', phases };
+  };
+
+  // 対象範囲に入る候補者（フェーズの絞り込み前）。自分以外のデータが未読込ならnull。
+  const scopeEntries = useCallback((all: { email: string; data: UserData }[] | null) => {
+    const ownDeleted = new Set(ownDeletedCandidateIds);
+    const ownEntries = ownCandidates
+      .filter(c => !ownDeleted.has(c.id))
+      .map(c => toEntry(c, currentUserEmail, currentUserLabel));
+    if (scope === 'self') return ownEntries;
+    if (!all) return null;
     const resolveKey = (email: string) => normalizeEmail(email);
     let inScope: (email: string) => boolean;
     if (scope === 'team') {
@@ -8232,7 +8252,7 @@ const BlindResumeView: React.FC<{
     } else {
       inScope = () => true;
     }
-    const entries: BlindPoolEntry[] = [];
+    const entries: ReturnType<typeof toEntry>[] = [];
     const selfKey = resolveKey(currentUserEmail);
     // 自分の候補者はDrive上のコピーではなく、このブラウザの最新データを使う。
     if (inScope(currentUserEmail)) entries.push(...ownEntries);
@@ -8242,11 +8262,35 @@ const BlindResumeView: React.FC<{
       const ownerLabel = data.displayName || email;
       (data.candidates || []).forEach(c => {
         if (deleted.has(c.id)) return;
-        entries.push({ candidate: c, ownerEmail: email, ownerLabel, status: blindResumeCandidateStatus(c) });
+        entries.push(toEntry(c, email, ownerLabel));
       });
     });
     return entries;
-  }, [scope, teamId, department, teams, memberDepartments, ownCandidates, ownDeletedCandidateIds, currentUserEmail, currentUserLabel, ensureTeammates]);
+  }, [scope, teamId, department, teams, memberDepartments, ownCandidates, ownDeletedCandidateIds, currentUserEmail, currentUserLabel]);
+
+  const matchesPhaseFilter = useCallback(
+    (e: { phases: BlindResumePhase[] }) => e.phases.some(p => selectedPhases.includes(p)),
+    [selectedPhases]
+  );
+
+  // 自分以外が対象範囲のときは、件数をその場で見せるために先にDriveから読み込んでおく。
+  useEffect(() => {
+    if (scope === 'self' || teammates) return;
+    ensureTeammates().catch(err => console.error('チームメンバーの候補者データの読み込みに失敗しました', err));
+  }, [scope, teammates, ensureTeammates]);
+
+  const phaseCounts = useMemo(() => {
+    const entries = scopeEntries(teammates);
+    if (!entries) return null;
+    const byPhase = Object.fromEntries(BLIND_RESUME_PHASES.map(p => [p, 0])) as Record<BlindResumePhase, number>;
+    entries.forEach(e => e.phases.forEach(p => { byPhase[p]++; }));
+    return { total: entries.length, matched: entries.filter(matchesPhaseFilter).length, byPhase };
+  }, [scopeEntries, teammates, matchesPhaseFilter]);
+
+  const buildPool = useCallback(async (): Promise<BlindPoolEntry[]> => {
+    const all = scope === 'self' ? null : await ensureTeammates();
+    return (scopeEntries(all) || []).filter(matchesPhaseFilter);
+  }, [scope, ensureTeammates, scopeEntries, matchesPhaseFilter]);
 
   const [pool, setPool] = useState<BlindPoolEntry[]>([]);
   const poolByKey = useMemo(() => new Map(pool.map(e => [poolKey(e), e])), [pool]);
@@ -8274,12 +8318,13 @@ const BlindResumeView: React.FC<{
   const handleSearch = async () => {
     if (!companyName.trim()) { alert('推薦先の企業名を入力してください。'); return; }
     if (scope === 'team' && !teamId) { alert('チームを選択してください。'); return; }
+    if (selectedPhases.length === 0) { alert('対象とするフェーズを1つ以上選択してください。'); return; }
     setErrorMessage('');
     try {
       setBusyMessage('候補者データを読み込んでいます…');
       const builtPool = await buildPool();
       if (builtPool.length === 0) {
-        setErrorMessage('対象範囲に候補者が登録されていません。');
+        setErrorMessage('選択した対象範囲・フェーズに該当する候補者がいません。');
         return;
       }
       setPool(builtPool);
@@ -8528,9 +8573,28 @@ const BlindResumeView: React.FC<{
                       </select>
                     )}
                   </div>
-                  <p className="field-hint">{scopeDescription}（選考中に加え、見送り・辞退・掘り起し・非表示の候補者も対象）</p>
+                  <p className="field-hint">{scopeDescription}</p>
                 </fieldset>
               </div>
+              <fieldset className="blind-resume-phases">
+                <legend>対象フェーズ（選んだフェーズのいずれかに該当する候補者が対象）</legend>
+                <div className="blind-resume-phase-list">
+                  {BLIND_RESUME_PHASES.map(phase => (
+                    <label key={phase}>
+                      <input type="checkbox" checked={selectedPhases.includes(phase)} onChange={() => togglePhase(phase)} disabled={isBusy} />
+                      {' '}{phase}{phaseCounts ? `（${phaseCounts.byPhase[phase]}）` : ''}
+                    </label>
+                  ))}
+                  <button type="button" className="blind-resume-link-button" onClick={() => setSelectedPhases([...BLIND_RESUME_PHASES])} disabled={isBusy}>すべて選択</button>
+                  <button type="button" className="blind-resume-link-button" onClick={() => setSelectedPhases([])} disabled={isBusy}>すべて解除</button>
+                </div>
+                <p className="field-hint">
+                  {phaseCounts
+                    ? `対象: ${phaseCounts.matched}名（対象範囲の全${phaseCounts.total}名中）`
+                    : '候補者データを読み込んでいます…'}
+                  　※1人が複数のフェーズに該当することがあります（例: 非表示かつ見送り）。応募前＝応募企業の登録が無い候補者
+                </p>
+              </fieldset>
               <fieldset className="blind-resume-options">
                 <legend>PDFに載せる項目（年齢・学歴・現職・職歴は常に記載。氏名・連絡先は載りません）</legend>
                 <label><input type="checkbox" checked={displayOptions.showCurrentSalary} onChange={e => setDisplayOptions(o => ({ ...o, showCurrentSalary: e.target.checked }))} /> 現年収</label>
@@ -8579,7 +8643,7 @@ const BlindResumeView: React.FC<{
                             {applied && <div className="blind-resume-applied">この企業に応募歴あり（{applied}）</div>}
                           </td>
                           <td>{entry.ownerLabel}</td>
-                          <td>{entry.status}</td>
+                          <td className="blind-resume-phase-cell">{entry.status}</td>
                           <td>{c.age ? `${c.age}歳` : '—'}<div className="sub-text">{c.currentCompany || '現職未入力'}{c.jobType ? ` ／ ${c.jobType}` : ''}</div></td>
                           <td>{m.recommendedPosition || '—'}</td>
                           <td>{m.reason}{m.concern && <div className="blind-resume-concern">懸念: {m.concern}</div>}</td>
