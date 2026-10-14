@@ -28,6 +28,7 @@ const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタン�
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPlan, estimateGeneratePlan, GENERATE_CONCURRENCY, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
+import { findSimilarCandidates, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4398,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '候補者パイプラインに「類似経歴の過去事例をリサーチ」を追加した。候補者カードの詳細、または新規登録した直後に表示されるボタンから、社内の過去・現在の候補者の中で経歴が似ている人を探し、その人たちがどの企業に応募してどんな選考結果（書類通過・内定・見送り・辞退）になったかを企業別に集計します。あわせてAIが、通過・見送りの傾向や応募をおすすめできる企業・注意が必要な企業を整理します',
       'ブラインドレジュメ作成の各ステップ（求人と対象範囲／候補者を選ぶ／内容確認・PDF出力）に「最初からやり直す」ボタンを追加した。入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初の画面から始め直せます（処理中でも中断してやり直せます）',
       'ブラインドレジュメ作成で、「〇名の候補者を求人と照合しています…」などの処理中の表示を、ボタンの上ではなくボタンの左側（同じ行）に出すようにした',
       'ブラインドレジュメ作成で、「候補者を探す」「ブラインドレジュメを作成」の横に推定所要時間を表示し、処理中は残り時間のカウントダウンと進捗バーを表示するようにした（実際にかかった時間を記録して、使うほど見積もりが正確になります）',
@@ -11805,6 +11807,283 @@ const MemoExpandButton: React.FC<{
  * correctly run through computeStageAdvanceUpdate (KPI actuals, exitedFromStage/stageHistory,
  * Google Tasks sync) exactly as they did when only possible via the modal.
  */
+// ---- 類似経歴リサーチ ----
+// 候補者カードの詳細、または新規登録直後のバナーから開く。社内の過去データから経歴が似ている
+// 候補者を探し、その人たちがどの企業に応募してどんな選考結果になったかを集計・分析する。
+// ロジックは services/similarCareer.ts。
+
+// 他メンバーの候補者データはDriveから読むと時間がかかるため、短時間はモーダルを開き直しても使い回す。
+let similarCareerTeammatesCache: { at: number; data: { email: string; data: UserData }[] } | null = null;
+const SIMILAR_CAREER_CACHE_MS = 5 * 60 * 1000;
+
+const OUTCOME_BADGE_CLASS: Record<OutcomeKind, string> = {
+  offer: 'offer', declined: 'declined', withdrawn: 'withdrawn', in_progress: 'in-progress', not_started: 'not-started',
+};
+
+const SimilarCareerResearchModal: React.FC<{
+  candidate: Candidate;
+  currentUserEmail: string;
+  ownCandidates: Candidate[];
+  onClose: () => void;
+}> = ({ candidate: target, currentUserEmail, ownCandidates, onClose }) => {
+  const [scope, setScope] = useState<'all' | 'self'>('all');
+  const [wantedCount, setWantedCount] = useState(15);
+  const [teammates, setTeammates] = useState<{ email: string; data: UserData }[] | null>(
+    similarCareerTeammatesCache && Date.now() - similarCareerTeammatesCache.at < SIMILAR_CAREER_CACHE_MS ? similarCareerTeammatesCache.data : null
+  );
+  const [loadError, setLoadError] = useState('');
+  const [busyMessage, setBusyMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [result, setResult] = useState<{
+    similar: { entry: SimilarPoolEntry; match: SimilarMatch }[];
+    companyStats: CompanyStat[];
+    analysis: SimilarAnalysis | null;
+    analysisError: string;
+    poolSize: number;
+  } | null>(null);
+  const [showAllCompanies, setShowAllCompanies] = useState(false);
+  const isBusy = !!busyMessage;
+  const targetOwner = target.ownerEmail || currentUserEmail;
+  const targetKey = `${normalizeEmail(targetOwner)}::${target.id}`;
+
+  useEffect(() => {
+    if (scope !== 'all' || teammates) return;
+    let cancelled = false;
+    loadAllTeammatesData<UserData>()
+      .then(loaded => {
+        const data = loaded.map(t => ({ email: t.email, data: t.data }));
+        similarCareerTeammatesCache = { at: Date.now(), data };
+        if (!cancelled) setTeammates(data);
+      })
+      .catch(err => {
+        console.error('チームメンバーの候補者データの読み込みに失敗しました', err);
+        if (!cancelled) setLoadError('他のメンバーの候補者データを読み込めませんでした。「自分の候補者のみ」で実行できます。');
+      });
+    return () => { cancelled = true; };
+  }, [scope, teammates]);
+
+  // 選考企業の記録がある候補者だけを対象にする（結果が無い人は参考にならないため）。対象候補者本人は除く。
+  const pool = useMemo((): SimilarPoolEntry[] | null => {
+    const entries: SimilarPoolEntry[] = [];
+    const selfKey = normalizeEmail(currentUserEmail);
+    const add = (c: Candidate, email: string, label: string) => {
+      if (`${normalizeEmail(email)}::${c.id}` === targetKey) return;
+      if (usableApplications(c).length === 0) return;
+      entries.push({ candidate: c, ownerEmail: email, ownerLabel: label });
+    };
+    // 自分の候補者はDrive上のコピーではなく、このブラウザの最新データを使う。
+    ownCandidates.forEach(c => add(c, currentUserEmail, '自分'));
+    if (scope === 'self') return entries;
+    if (!teammates) return null;
+    teammates.forEach(({ email, data }) => {
+      if (normalizeEmail(email) === selfKey) return;
+      const deleted = new Set(data.deletedCandidateIds || []);
+      const label = data.displayName || email;
+      (data.candidates || []).forEach(c => { if (!deleted.has(c.id)) add(c, email, label); });
+    });
+    return entries;
+  }, [scope, teammates, ownCandidates, currentUserEmail, targetKey]);
+
+  const profileReady = hasEnoughProfile(target);
+
+  const handleRun = async () => {
+    if (!pool) return;
+    if (pool.length === 0) { setErrorMessage('選考企業の記録がある候補者が見つかりませんでした。対象範囲を広げてお試しください。'); return; }
+    setErrorMessage('');
+    setResult(null);
+    setShowAllCompanies(false);
+    try {
+      const matches = await findSimilarCandidates({ target, pool, wantedCount, onProgress: setBusyMessage });
+      if (matches.length === 0) {
+        setErrorMessage('経歴が似ている候補者が見つかりませんでした。経歴概要や職種を登録すると精度が上がります。');
+        return;
+      }
+      const byKey = new Map<string, SimilarPoolEntry>(pool.map(e => [similarKey(e), e] as [string, SimilarPoolEntry]));
+      const similar = matches.filter(m => byKey.has(m.key)).map(m => ({ entry: byKey.get(m.key)!, match: m }));
+      const companyStats = aggregateByCompany(similar.map(s => s.entry), normalizeCompanyName);
+      setResult({ similar, companyStats, analysis: null, analysisError: '', poolSize: pool.length });
+      setBusyMessage(`似ている${similar.length}名の選考結果から傾向を分析しています…`);
+      try {
+        const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats });
+        setResult(prev => (prev ? { ...prev, analysis } : prev));
+      } catch (err) {
+        console.error('類似経歴の傾向分析に失敗しました', err);
+        setResult(prev => (prev ? { ...prev, analysisError: '傾向の分析に失敗しました（下の集計結果はそのままご覧いただけます）。' } : prev));
+      }
+    } catch (err) {
+      console.error('類似経歴リサーチに失敗しました', err);
+      setErrorMessage(`リサーチに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMessage('');
+    }
+  };
+
+  const companyRows = result ? (showAllCompanies ? result.companyStats : result.companyStats.slice(0, 15)) : [];
+  const indexByKey = useMemo(
+    () => new Map((result?.similar || []).map((s, i) => [similarKey(s.entry), i + 1])),
+    [result]
+  );
+
+  return (
+    <div className="modal-overlay" onClick={() => { if (!isBusy) onClose(); }}>
+      <div className="modal-content similar-career-modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="similar-career-title">
+        <div className="modal-header">
+          <h3 id="similar-career-title">{target.name || '（氏名未入力）'}さん - 類似経歴の過去事例リサーチ</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる" disabled={isBusy}>&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-description">
+            社内に登録されている過去・現在の候補者から経歴が似ている人を探し、どの企業に応募してどんな選考結果になったかを集計します。
+            AI（Gemini）には氏名・電話番号・メールアドレスを伏せた経歴情報だけを送ります。
+          </p>
+          <div className="similar-career-target">
+            <strong>対象候補者:</strong>{' '}
+            {[target.age ? `${target.age}歳` : '', target.jobType, target.currentCompany, target.currentSalary ? `現年収${target.currentSalary}万円` : '']
+              .filter(Boolean).join(' / ') || '（基本情報未登録）'}
+          </div>
+          {!profileReady && (
+            <div className="similar-career-warning">
+              経歴概要・職種・現職・面談メモがいずれも未登録のため、似ている人を判定できません。カードの詳細から経歴を登録してからお試しください。
+            </div>
+          )}
+          <div className="similar-career-controls">
+            <label>
+              対象範囲
+              <select value={scope} onChange={e => setScope(e.target.value as 'all' | 'self')} disabled={isBusy}>
+                <option value="all">全ユーザーの候補者</option>
+                <option value="self">自分の候補者のみ</option>
+              </select>
+            </label>
+            <label>
+              似ている人の人数
+              <select value={wantedCount} onChange={e => setWantedCount(Number(e.target.value))} disabled={isBusy}>
+                {[10, 15, 20, 30].map(n => <option key={n} value={n}>最大{n}名</option>)}
+              </select>
+            </label>
+            <span className="similar-career-pool-count">
+              {pool ? `選考記録のある候補者: ${pool.length}名` : (loadError || '候補者データを読み込み中…')}
+            </span>
+            <button
+              type="button"
+              className="submit-button"
+              onClick={handleRun}
+              disabled={isBusy || !pool || !profileReady}
+            >
+              {result ? 'もう一度リサーチ' : 'リサーチ開始'}
+            </button>
+          </div>
+          {isBusy && <div className="blind-resume-busy" role="status" aria-live="polite">{busyMessage}</div>}
+          {errorMessage && <div className="similar-career-error">{errorMessage}</div>}
+
+          {result && (
+            <div className="similar-career-result">
+              <h4>傾向の分析</h4>
+              {result.analysis ? (
+                <div className="similar-career-analysis">
+                  <p>{result.analysis.overview}</p>
+                  <div className="similar-career-columns">
+                    <div>
+                      <h5>通過・内定につながった要因</h5>
+                      {result.analysis.passingFactors.length ? <ul>{result.analysis.passingFactors.map((s, i) => <li key={i}>{s}</li>)}</ul> : <p className="muted">該当なし</p>}
+                    </div>
+                    <div>
+                      <h5>見送り・辞退につながった要因</h5>
+                      {result.analysis.riskFactors.length ? <ul>{result.analysis.riskFactors.map((s, i) => <li key={i}>{s}</li>)}</ul> : <p className="muted">該当なし</p>}
+                    </div>
+                  </div>
+                  <div className="similar-career-columns">
+                    <div>
+                      <h5>応募をおすすめできる企業</h5>
+                      {result.analysis.recommendedCompanies.length
+                        ? <ul>{result.analysis.recommendedCompanies.map((x, i) => <li key={i}><strong>{x.companyName}</strong>: {x.reason}</li>)}</ul>
+                        : <p className="muted">該当なし</p>}
+                    </div>
+                    <div>
+                      <h5>注意が必要な企業</h5>
+                      {result.analysis.cautionCompanies.length
+                        ? <ul>{result.analysis.cautionCompanies.map((x, i) => <li key={i}><strong>{x.companyName}</strong>: {x.reason}</li>)}</ul>
+                        : <p className="muted">該当なし</p>}
+                    </div>
+                  </div>
+                  {result.analysis.advice && <p className="similar-career-advice"><strong>アドバイス:</strong> {result.analysis.advice}</p>}
+                  <p className="similar-career-note">※ 社内データ{result.poolSize}名のうち似ている{result.similar.length}名の実績に基づくAIの整理です。件数が少ない企業は参考程度にご覧ください。</p>
+                </div>
+              ) : result.analysisError ? (
+                <div className="similar-career-error">{result.analysisError}</div>
+              ) : (
+                <p className="muted">分析中…</p>
+              )}
+
+              <h4>企業別の選考結果（似ている{result.similar.length}名の応募実績）</h4>
+              <div className="similar-career-table-wrap">
+                <table className="similar-career-table">
+                  <thead>
+                    <tr><th>企業名</th><th>応募</th><th>書類通過</th><th>内定</th><th>見送り</th><th>辞退</th><th>選考中・応募前</th><th>応募した類似者</th></tr>
+                  </thead>
+                  <tbody>
+                    {companyRows.map(s => (
+                      <tr key={s.companyName}>
+                        <td>{s.companyName}</td>
+                        <td>{s.applicants}</td>
+                        <td>{s.passedDocument}</td>
+                        <td className={s.offers ? 'pos' : ''}>{s.offers}</td>
+                        <td className={s.declined ? 'neg' : ''}>{s.declined}</td>
+                        <td>{s.withdrawn}</td>
+                        <td>{s.inProgress}</td>
+                        <td className="similar-career-refs">{s.candidateKeys.map(k => `#${indexByKey.get(k)}`).join(' ')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {result.companyStats.length > 15 && (
+                <button type="button" className="secondary-action-button" onClick={() => setShowAllCompanies(v => !v)}>
+                  {showAllCompanies ? '上位15社だけ表示' : `すべての企業を表示（${result.companyStats.length}社）`}
+                </button>
+              )}
+
+              <h4>経歴が似ている候補者</h4>
+              <ol className="similar-career-people">
+                {result.similar.map(({ entry, match }, i) => {
+                  const c = entry.candidate;
+                  return (
+                    <li key={similarKey(entry)}>
+                      <div className="similar-career-person-head">
+                        <span className="similar-career-index">#{i + 1}</span>
+                        <span className="similar-career-score">類似度 {match.score}</span>
+                        <span className="similar-career-name">{c.name || '（氏名未入力）'}</span>
+                        <span className="similar-career-owner">担当: {entry.ownerLabel}</span>
+                      </div>
+                      <div className="similar-career-person-facts">
+                        {[c.age ? `${c.age}歳` : '', c.jobType, c.currentCompany, c.currentSalary ? `現年収${c.currentSalary}万円` : '']
+                          .filter(Boolean).join(' / ') || '（基本情報未登録）'}
+                      </div>
+                      <div className="similar-career-reason">{match.reason}</div>
+                      <div className="similar-career-apps">
+                        {usableApplications(c).map(app => {
+                          const o = classifyApplication(app);
+                          return (
+                            <span key={app.id} className={`similar-career-app ${OUTCOME_BADGE_CLASS[o.kind]}`} title={app.memo || undefined}>
+                              {app.companyName}: {o.label}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" onClick={onClose} className="cancel-button" disabled={isBusy}>閉じる</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PipelineCandidateCard: React.FC<{
   candidate: Candidate;
   allMedia: MediaEntry[];
@@ -11840,12 +12119,14 @@ const PipelineCandidateCard: React.FC<{
   // カード上部の選考状況バッジをクリックした時に、その選考の全項目（次アクション・予定日時・
   // fee・確度・メモ等）を編集できるApplicationModalを開く。
   onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
+  // 「類似経歴の過去事例をリサーチ」— 親（CandidatePipelineView）がSimilarCareerResearchModalを開く。
+  onOpenSimilarResearch: (candidate: Candidate) => void;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, isManagedByMiddle, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onDeleteCandidate, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
-  onEditApplication,
+  onEditApplication, onOpenSimilarResearch,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   // c.sourceはMediaEntry.id（例: 名前が日本語だけの媒体だと'media'のような機械的なスラッグに
@@ -12470,6 +12751,16 @@ const PipelineCandidateCard: React.FC<{
       </div>
       <div className={`candidate-detail-content ${isExpanded ? 'open' : ''}`}>
           <div className="candidate-detail-view">
+              <div className="similar-career-launch">
+                  <button
+                      type="button"
+                      className="similar-career-launch-button"
+                      onClick={() => onOpenSimilarResearch(c)}
+                      title="社内の過去データから経歴が似ている候補者を探し、どの企業に応募してどんな結果になったかを調べます"
+                  >
+                      🔍 類似経歴の過去事例をリサーチ
+                  </button>
+              </div>
               <div className="candidate-info-section">
                 <div className="candidate-info-item">
                     <span className="info-label">現職企業名</span>
@@ -13106,6 +13397,9 @@ const CandidatePipelineView: React.FC<{
     };
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
+    // 類似経歴リサーチの対象（モーダル表示中）と、新規登録直後にリサーチを促すバナーの対象。
+    const [similarResearchCandidate, setSimilarResearchCandidate] = useState<Candidate | null>(null);
+    const [justRegisteredCandidate, setJustRegisteredCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [csvExportPattern, setCsvExportPattern] = useState<CsvExportPattern>('current');
     // 'active' = normal pipeline candidates; 'revival' = 掘り起しリスト entries specifically;
@@ -13632,6 +13926,27 @@ const CandidatePipelineView: React.FC<{
 
     return (
         <section className="pipeline-container" aria-labelledby="pipeline-title">
+            {similarResearchCandidate && (
+              <SimilarCareerResearchModal
+                  candidate={similarResearchCandidate}
+                  currentUserEmail={currentUserEmail}
+                  ownCandidates={candidates.filter(isOwn)}
+                  onClose={() => setSimilarResearchCandidate(null)}
+              />
+            )}
+            {justRegisteredCandidate && (
+              <div className="similar-career-banner" role="status">
+                  <span>「{justRegisteredCandidate.name || '（氏名未入力）'}」さんを登録しました。似た経歴の人が過去にどんな企業に応募し、どんな結果になったかを調べられます。</span>
+                  <button
+                      type="button"
+                      className="similar-career-launch-button"
+                      onClick={() => { setSimilarResearchCandidate(justRegisteredCandidate); setJustRegisteredCandidate(null); }}
+                  >
+                      🔍 類似経歴の過去事例をリサーチ
+                  </button>
+                  <button type="button" className="close-button" aria-label="閉じる" onClick={() => setJustRegisteredCandidate(null)}>&times;</button>
+              </div>
+            )}
             {isModalOpen && (
               <CandidateModal
                   onSave={(candidateData) => {
@@ -13639,6 +13954,10 @@ const CandidatePipelineView: React.FC<{
                           onAddManagedCandidate(addTargetEmail, candidateData);
                       } else {
                           onSave(candidateData);
+                      }
+                      // 新規登録の直後は、類似経歴リサーチへの導線をバナーで出す。
+                      if (!editingCandidate) {
+                          setJustRegisteredCandidate(addTargetEmail ? { ...candidateData, ownerEmail: addTargetEmail } : candidateData);
                       }
                   }}
                   onClose={() => { setIsModalOpen(false); setAddTargetEmail(null); }}
@@ -14082,6 +14401,7 @@ const CandidatePipelineView: React.FC<{
                         isContactRevealed={isContactRevealed(c.id)}
                         onToggleContactReveal={() => toggleContactReveal(c.id)}
                         onEditApplication={handleOpenApplicationModal}
+                        onOpenSimilarResearch={setSimilarResearchCandidate}
                     />
                 )) : (
                     candidates.length === 0 ? (

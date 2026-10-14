@@ -3958,3 +3958,58 @@ p.memo-content-text {
 .blind-resume-estimate { color: var(--text-muted-color); font-size: 0.85rem; order: 1; }
 .blind-resume-page-footer .blind-resume-busy { order: 1; }
 .blind-resume-page-footer .submit-button { order: 2; }
+
+/* --- 類似経歴リサーチ --- */
+.similar-career-launch { display: flex; justify-content: flex-end; margin-bottom: 0.75rem; }
+.similar-career-launch-button {
+  background: #f0f7ff; border: 1px solid #b6d4fe; color: var(--primary-color-dark);
+  padding: 0.4rem 0.8rem; border-radius: var(--border-radius); font-size: 0.9rem; cursor: pointer; white-space: nowrap;
+}
+.similar-career-launch-button:hover { background: #dbeafe; }
+.similar-career-banner {
+  display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+  background: #f0f7ff; border: 1px solid #b6d4fe; border-radius: var(--border-radius);
+  padding: 0.6rem 0.9rem; margin-bottom: 1rem;
+}
+.similar-career-banner > span { flex: 1 1 320px; }
+.similar-career-banner .close-button { padding: 0 0.25rem; font-size: 1.4rem; }
+.modal-content.similar-career-modal { max-width: 1000px; }
+.similar-career-target { background: #f8f9fa; border-radius: var(--border-radius); padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; }
+.similar-career-warning { background: #fff8e1; border: 1px solid #ffe08a; padding: 0.5rem 0.75rem; border-radius: var(--border-radius); margin-bottom: 0.75rem; }
+.similar-career-error { background: #fdecea; border: 1px solid #f5c2c7; color: #842029; padding: 0.5rem 0.75rem; border-radius: var(--border-radius); margin-bottom: 0.75rem; }
+.similar-career-controls { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.similar-career-controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-muted-color); }
+.similar-career-controls select { padding: 0.35rem 0.5rem; }
+.similar-career-pool-count { font-size: 0.85rem; color: var(--text-muted-color); flex: 1 1 180px; }
+.similar-career-result h4 { margin: 1.25rem 0 0.5rem; padding-left: 0.5rem; border-left: 4px solid var(--primary-color); }
+.similar-career-result h5 { margin: 0.75rem 0 0.25rem; font-size: 0.9rem; }
+.similar-career-result ul { margin: 0; padding-left: 1.2rem; }
+.similar-career-result .muted { color: var(--text-muted-color); margin: 0; }
+.similar-career-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 640px) { .similar-career-columns { grid-template-columns: 1fr; } }
+.similar-career-advice { background: #f0f7ff; padding: 0.5rem 0.75rem; border-radius: var(--border-radius); margin-top: 0.75rem; }
+.similar-career-note { font-size: 0.8rem; color: var(--text-muted-color); }
+.similar-career-table-wrap { overflow-x: auto; }
+.similar-career-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.similar-career-table th, .similar-career-table td { border: 1px solid var(--border-color); padding: 0.35rem 0.5rem; text-align: center; }
+.similar-career-table th { background: #f1f5f9; white-space: nowrap; }
+.similar-career-table td:first-child { text-align: left; }
+.similar-career-table td.pos { color: #15803d; font-weight: bold; }
+.similar-career-table td.neg { color: #b91c1c; font-weight: bold; }
+.similar-career-table td.similar-career-refs { text-align: left; color: var(--text-muted-color); }
+.similar-career-people { padding-left: 0; list-style: none; margin: 0; }
+.similar-career-people li { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.6rem 0.75rem; margin-bottom: 0.5rem; }
+.similar-career-person-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.similar-career-index { font-weight: bold; color: var(--primary-color-dark); }
+.similar-career-score { font-size: 0.8rem; background: #e0ecff; color: var(--primary-color-dark); padding: 0 0.4rem; border-radius: 999px; }
+.similar-career-name { font-weight: bold; }
+.similar-career-owner { font-size: 0.8rem; color: var(--text-muted-color); }
+.similar-career-person-facts { font-size: 0.85rem; color: var(--text-muted-color); margin-top: 0.15rem; }
+.similar-career-reason { font-size: 0.85rem; margin-top: 0.15rem; }
+.similar-career-apps { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.4rem; }
+.similar-career-app { font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid; }
+.similar-career-app.offer { background: #dcfce7; border-color: #86efac; color: #166534; }
+.similar-career-app.declined { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+.similar-career-app.withdrawn { background: #f3f4f6; border-color: #d1d5db; color: #4b5563; }
+.similar-career-app.in-progress { background: #e0ecff; border-color: #b6d4fe; color: var(--primary-color-dark); }
+.similar-career-app.not-started { background: #fff; border-color: #e5e7eb; color: #6b7280; }
