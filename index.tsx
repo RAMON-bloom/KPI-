@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '類似経歴リサーチで、リサーチ対象の候補者本人が「経歴が似ている候補者」に出てしまうことがある不具合を修正した（他のメンバーが同じ人を登録している場合なども、氏名・電話番号・メールアドレスが一致すれば本人として除外します）',
       '候補者カードの「類似経歴リサーチ」ボタンを、候補者氏名のすぐ右隣に寄せて表示するようにした',
       '類似経歴リサーチのボタンを候補者カードの氏名の右側に移動した。あわせて「重視する共通点」をフリーワードで入力できるようにした（例: SaaS, マネジメント経験。クイックではキーワードが一致する人を優先し、AI判定では文章での指定も読み取ります）',
       '類似経歴の過去事例リサーチに「クイック」判定を追加した（AIを使わず職種・経歴・年齢・年収の近さで数秒で似ている人を選び、集計表をすぐ表示します。傾向の分析だけ後からAIが追加します）。あわせて対象範囲に事業部（F+・AC）を、似ている人の人数に「最大5名」を追加した',
@@ -11868,8 +11869,19 @@ const SimilarCareerResearchModal: React.FC<{
   } | null>(null);
   const [showAllCompanies, setShowAllCompanies] = useState(false);
   const isBusy = !!busyMessage;
-  const targetOwner = target.ownerEmail || currentUserEmail;
-  const targetKey = `${normalizeEmail(targetOwner)}::${target.id}`;
+  // 対象候補者本人かどうか。登録者＋IDの一致だけでは、同じ人を別のメンバーが登録している場合
+  // （重複登録・再登録）や、自分のDriveファイルが別の登録者として読み込まれた場合に本人が
+  // 「似ている人」として出てしまうため、ID・氏名・電話番号・メールアドレスのいずれかが一致すれば本人とみなす。
+  const isTargetPerson = useMemo(() => {
+    const name = normalizeForDuplicateMatch(target.name);
+    const phone = (target.phoneNumber || '').replace(/\D/g, '');
+    const email = (target.email || '').trim().toLowerCase();
+    return (c: Candidate) =>
+      c.id === target.id
+      || (!!name && normalizeForDuplicateMatch(c.name) === name)
+      || (phone.length >= 10 && (c.phoneNumber || '').replace(/\D/g, '') === phone)
+      || (!!email && (c.email || '').trim().toLowerCase() === email);
+  }, [target.id, target.name, target.phoneNumber, target.email]);
 
   useEffect(() => {
     if (scope === 'self' || teammates) return;
@@ -11891,9 +11903,13 @@ const SimilarCareerResearchModal: React.FC<{
   const pool = useMemo((): SimilarPoolEntry[] | null => {
     const entries: SimilarPoolEntry[] = [];
     const selfKey = normalizeEmail(currentUserEmail);
+    // 同じ候補者（同じID）がDrive上のコピー等で二重に読み込まれても1人として扱う。自分の候補者を先に足すので、
+    // 自分のデータは常にこのブラウザの最新版が残る。
+    const seenIds = new Set<string>();
     const add = (c: Candidate, email: string, label: string) => {
-      if (`${normalizeEmail(email)}::${c.id}` === targetKey) return;
+      if (isTargetPerson(c) || seenIds.has(c.id)) return;
       if (usableApplications(c).length === 0) return;
+      seenIds.add(c.id);
       entries.push({ candidate: c, ownerEmail: email, ownerLabel: label });
     };
     const deptByEmail = new Map(Object.entries(memberDepartments).map(([e, d]) => [normalizeEmail(e), d]));
@@ -11910,7 +11926,7 @@ const SimilarCareerResearchModal: React.FC<{
       (data.candidates || []).forEach(c => { if (!deleted.has(c.id)) add(c, email, label); });
     });
     return entries;
-  }, [scope, teammates, ownCandidates, currentUserEmail, targetKey, memberDepartments]);
+  }, [scope, teammates, ownCandidates, currentUserEmail, isTargetPerson, memberDepartments]);
 
   const profileReady = hasEnoughProfile(target);
 
