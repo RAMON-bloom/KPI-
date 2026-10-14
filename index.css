@@ -4078,3 +4078,96 @@ p.memo-content-text {
   font-size: 0.75em;
   text-decoration: underline;
 }
+.interview-prep-insights {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed #dee2e6;
+}
+.interview-prep-subtitle {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #495057;
+  margin-bottom: 0.25rem;
+}
+.interview-prep-docs ul {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+}
+.interview-prep-docs li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+.interview-prep-link-button {
+  padding: 0.15rem 0.5rem;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.interview-prep-link-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.interview-prep-stats {
+  margin: 0.25rem 0;
+  font-size: 0.85rem;
+}
+.interview-prep-knowledge summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.interview-prep-knowledge-item pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0.35rem 0 0.6rem;
+  padding: 0.5rem;
+  background: #f8f9fa;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.8rem;
+}
+.mail-result-suggestions {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #f0c36d;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+.mail-result-suggestions-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.mail-result-suggestions ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.mail-result-suggestions li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid #f3e3c3;
+  font-size: 0.85rem;
+}
+.mail-result-reason {
+  flex-basis: 100%;
+  margin: 0;
+}
+.mail-result-actions {
+  display: inline-flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}

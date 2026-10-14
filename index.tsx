@@ -31,6 +31,7 @@ import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPl
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
+import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -4403,6 +4404,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '候補者パイプラインの上部に「メールで届いた選考結果」を表示するようにした。面接対策ジェネレーターが企業からのメールで読み取った選考結果（通過・不採用・辞退・内定）のうち、こちらの選考状況にまだ反映されていないものが一覧で出ます。「反映する」を押すと結果を入れた状態で選考情報が開くので、内容を確認して保存してください（「無視」で一覧から消せます）',
+      '選考情報の「面接対策資料」欄に、自分のドライブにある面接対策ジェネレーターの資料（同じ企業のもの）を表示し、「この選考に紐づける」で資料URLを1クリックで登録できるようにした。あわせて、ジェネレーターに記録されているその企業・フェーズの過去の通過実績と、企業ナレッジ（面接で聞かれたこと・傾向）も表示します',
       '選考情報の編集画面に「面接対策資料」欄を追加した。「面接対策ジェネレーターで作る」を押すと、面接対策ジェネレーターが開き、その候補者の面談メモがクリップボードにコピーされます（生成画面の面談メモ欄に貼り付けて使えます）。作った資料のURLを貼っておくと、候補者カードの選考バッジに「対策資料」リンクが出て、すぐ開けます',
       '面接（カジュアル面談・1次〜最終面接・オファー面談）の予定をGoogleタスクに登録するとき、タスクのメモに面接対策資料へのリンク（未作成なら作成画面へのリンク）を添えるようにした',
       'ヘッダーのタブ名「ブラインドレジュメ作成」を「ブラインドレジュメ収集」に変更した',
@@ -7936,12 +7939,34 @@ const ApplicationModal: React.FC<{
  * 入りで開き、面談メモをクリップボードにコピーする（生成画面の面談メモ欄に貼り付ける用）。
  * 作った資料のURLはここに貼っておけば、カードやGoogleタスクから開ける。
  */
+/** 面接対策ジェネレーターのデータ（スプレッドシート＋自分のドライブの資料）を読む。10分キャッシュ。 */
+const useInterviewPrepData = () => {
+    const [state, setState] = useState<{ data: InterviewPrepData | null; error: string; loading: boolean }>({ data: null, error: '', loading: true });
+    const load = useCallback((force: boolean) => {
+        setState(prev => ({ ...prev, loading: true }));
+        loadInterviewPrepData(force)
+            .then(data => setState({ data, error: '', loading: false }))
+            .catch(err => setState({
+                data: null,
+                error: err instanceof InterviewPrepAccessError ? err.message : '面接対策ジェネレーターのデータを読み込めませんでした。',
+                loading: false,
+            }));
+    }, []);
+    useEffect(() => { load(false); }, [load]);
+    return { ...state, reload: () => load(true) };
+};
+
 const InterviewPrepSection: React.FC<{
     candidate: Candidate;
     application: CompanyApplication;
     onUrlChange: (url: string) => void;
 }> = ({ candidate, application, onUrlChange }) => {
     const [copyMessage, setCopyMessage] = useState('');
+    const prep = useInterviewPrepData();
+    const companyName = application.companyName.trim();
+    const stats = prep.data && companyName ? getPhaseStats(prep.data, companyName, application.stage) : null;
+    const knowledge = prep.data && companyName ? getKnowledge(prep.data, companyName, application.stage) : [];
+    const docs = prep.data && companyName ? findDocsForApplication(prep.data, companyName, application.stage).slice(0, 5) : [];
     const memoText = useMemo(() => buildInterviewMemoText(sortMemosChronologically(candidate.memos || [])), [candidate.memos]);
     const url = application.interviewPrepDocUrl || '';
     const isValidUrl = /^https?:\/\//.test(url.trim());
@@ -7984,6 +8009,98 @@ const InterviewPrepSection: React.FC<{
                     ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
                     : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
             </p>
+            {companyName && (
+                <div className="interview-prep-insights">
+                    {prep.loading && <p className="interview-prep-hint">面接対策ジェネレーターのデータを読み込み中...</p>}
+                    {(prep.error || prep.data?.sheetsError) && <p className="interview-prep-hint">{prep.error || prep.data?.sheetsError}</p>}
+                    {docs.length > 0 && (
+                        <div className="interview-prep-docs">
+                            <div className="interview-prep-subtitle">ドライブにある{companyName}の面接対策資料</div>
+                            <ul>
+                                {docs.map(d => (
+                                    <li key={d.id}>
+                                        <a href={d.url} target="_blank" rel="noopener noreferrer">{d.phase}{d.position ? `・${d.position}` : ''}（{d.date || d.createdTime.slice(0, 10)}作成）</a>
+                                        {url.trim() !== d.url && (
+                                            <button type="button" className="interview-prep-link-button" onClick={() => onUrlChange(d.url)}>この選考に紐づける</button>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    {stats && (stats.passed + stats.rejected + stats.other) > 0 && (
+                        <p className="interview-prep-stats">
+                            ジェネレーターに記録された{companyName}の{application.stage}：通過 {stats.passed}件／不採用 {stats.rejected}件
+                            {stats.rate !== null && `（通過率 ${Math.round(stats.rate * 100)}%）`}
+                        </p>
+                    )}
+                    {knowledge.length > 0 && (
+                        <details className="interview-prep-knowledge">
+                            <summary>{application.stage}で聞かれたこと・傾向（企業ナレッジ {knowledge.length}件）</summary>
+                            {knowledge.map((k, i) => (
+                                <div key={i} className="interview-prep-knowledge-item">
+                                    {k.position && <div className="interview-prep-subtitle">{k.position}</div>}
+                                    <pre>{k.content}</pre>
+                                </div>
+                            ))}
+                        </details>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
+/**
+ * 面接対策ジェネレーターが企業からのメールで読み取った選考結果のうち、kpi-mgrの選考がまだ
+ * そのフェーズで止まっているもの（＝反映漏れの可能性）を一覧で出す。「反映する」は結果を
+ * 先に入れた状態で選考情報モーダルを開くだけで、保存するかどうかは担当者が決める。
+ */
+const DISMISSED_PROPOSALS_KEY = 'kpi-mgr-dismissed-mail-proposals';
+const readDismissedProposals = (): Set<string> => {
+    try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_PROPOSALS_KEY) || '[]')); } catch { return new Set(); }
+};
+const MailResultSuggestionsPanel: React.FC<{
+    candidates: Candidate[];
+    onApply: (suggestion: ResultSuggestion) => void;
+}> = ({ candidates, onApply }) => {
+    const prep = useInterviewPrepData();
+    const [dismissed, setDismissed] = useState<Set<string>>(readDismissedProposals);
+    const suggestions = useMemo(
+        () => (prep.data ? findResultSuggestions(prep.data, candidates) : []).filter(sg => !dismissed.has(sg.proposal.id)),
+        [prep.data, candidates, dismissed],
+    );
+    if (suggestions.length === 0) return null;
+    const dismiss = (id: string) => {
+        setDismissed(prev => {
+            const next = new Set(prev).add(id);
+            try { localStorage.setItem(DISMISSED_PROPOSALS_KEY, JSON.stringify([...next])); } catch { /* 保存できなくても表示上は消す */ }
+            return next;
+        });
+    };
+    return (
+        <div className="mail-result-suggestions">
+            <div className="mail-result-suggestions-header">
+                <strong>メールで届いた選考結果（{suggestions.length}件）</strong>
+                <span className="interview-prep-hint">面接対策ジェネレーターが企業からのメールで読み取った結果のうち、まだこちらに反映されていないものです。</span>
+                <button type="button" className="interview-prep-link-button" onClick={prep.reload} disabled={prep.loading}>{prep.loading ? '読み込み中...' : '再読み込み'}</button>
+            </div>
+            <ul>
+                {suggestions.map(sg => (
+                    <li key={sg.proposal.id}>
+                        <span className="mail-result-text">
+                            {sg.candidateName}さん／{sg.companyName}：{sg.proposal.phase}「{sg.proposal.result}」
+                            （{sg.proposal.createdAt.slice(0, 10)}{sg.proposal.confidence && sg.proposal.confidence !== 'high' ? `・確度${sg.proposal.confidence}` : ''}）
+                            → {sg.suggestedStage}
+                        </span>
+                        {sg.proposal.reason && <span className="interview-prep-hint mail-result-reason">{sg.proposal.reason}</span>}
+                        <span className="mail-result-actions">
+                            <button type="button" className="interview-prep-generate-button" onClick={() => onApply(sg)}>反映する</button>
+                            <button type="button" className="interview-prep-link-button" onClick={() => dismiss(sg.proposal.id)}>無視</button>
+                        </span>
+                    </li>
+                ))}
+            </ul>
         </div>
     );
 };
@@ -13753,6 +13870,7 @@ const CandidatePipelineView: React.FC<{
     meetingForecast, onUpdateMeetingForecast, memberDepartments,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
+    const ownCandidatesForSuggestions = useMemo(() => candidates.filter(isOwn), [candidates, currentUserEmail]);
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
     // かどうか。isOwnとは独立した判定 — 両方falseなら誰も編集できない、両方trueにはならない
     // （ownerEmailが自分ならisOwnがtrueになるため）。
@@ -14426,6 +14544,16 @@ const CandidatePipelineView: React.FC<{
                      <button onClick={handleExportCSV} className="export-button">CSV出力</button>
                 </div>
             </div>
+
+            <MailResultSuggestionsPanel
+                candidates={ownCandidatesForSuggestions}
+                onApply={(sg) => {
+                    const candidate = candidates.find(c => c.id === sg.candidateId && isOwn(c));
+                    const app = candidate?.applications.find(a => a.id === sg.applicationId);
+                    if (!candidate || !app) return;
+                    handleOpenApplicationModal(candidate, { ...app, stage: sg.suggestedStage as PipelineStage });
+                }}
+            />
 
             <div className="view-switcher" style={{ marginBottom: '1rem' }}>
                 <button onClick={() => onScopeChange('personal')} disabled={scope === 'personal'}>自分</button>
