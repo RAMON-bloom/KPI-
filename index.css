@@ -4024,3 +4024,8 @@ p.memo-content-text {
 .candidate-card-header .candidate-name-input { flex-grow: 0; }
 .candidate-card-header .candidate-name-input { width: 14em; }
 .candidate-card-header .similar-career-launch-inline { margin-left: -0.5rem; margin-right: auto; }
+.blind-resume-job-input { display: flex; flex-direction: column; gap: 0.5rem; border-radius: var(--border-radius); transition: background-color 0.2s, box-shadow 0.2s; }
+.blind-resume-job-input.is-drag-active { background-color: #eef5ff; box-shadow: 0 0 0 2px var(--primary-color); }
+.blind-resume-drop-zone { padding: 1rem; font-size: 0.9rem; }
+.blind-resume-job-input.is-drag-active .blind-resume-drop-zone { border-color: var(--primary-color); color: var(--primary-color-dark); background-color: #fff; }
+.blind-resume-drop-zone[aria-disabled="true"] { cursor: default; opacity: 0.6; }

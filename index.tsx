@@ -4406,6 +4406,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者パイプラインに「類似経歴の過去事例をリサーチ」を追加した。候補者カードの詳細、または新規登録した直後に表示されるボタンから、社内の過去・現在の候補者の中で経歴が似ている人を探し、その人たちがどの企業に応募してどんな選考結果（書類通過・内定・見送り・辞退）になったかを企業別に集計します。あわせてAIが、通過・見送りの傾向や応募をおすすめできる企業・注意が必要な企業を整理します',
       'ブラインドレジュメ作成の各ステップ（求人と対象範囲／候補者を選ぶ／内容確認・PDF出力）に「最初からやり直す」ボタンを追加した。入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初の画面から始め直せます（処理中でも中断してやり直せます）',
       'ブラインドレジュメ作成で、「〇名の候補者を求人と照合しています…」などの処理中の表示を、ボタンの上ではなくボタンの左側（同じ行）に出すようにした',
+      'ブラインドレジュメ作成で、求人票ファイル（PDF/Word）をドラッグ＆ドロップでも追加できるようにした（求人内容のテキスト欄・ドロップ枠のどちらに落としてもOK、複数可）',
       'ブラインドレジュメ作成で、「候補者を探す」「ブラインドレジュメを作成」の横に推定所要時間を表示し、処理中は残り時間のカウントダウンと進捗バーを表示するようにした（実際にかかった時間を記録して、使うほど見積もりが正確になります）',
       'ヘッダーのタブ名を「ブラインドレジュメ作成」に変更し、見つけやすいよう薄い緑の背景にした',
       'ブラインドレジュメ作成で、対象にする候補者を「選考中・応募前・内定承諾・見送り・辞退・掘り起し・非表示」のフェーズで絞り込めるようにした（複数選択可。選んだフェーズのいずれかに該当する候補者が対象で、フェーズごとの人数と対象人数をその場で表示します）',
@@ -8361,6 +8362,37 @@ const BlindResumeView: React.FC<{
   const [pool, setPool] = useState<BlindPoolEntry[]>([]);
   const poolByKey = useMemo(() => new Map(pool.map(e => [poolKey(e), e])), [pool]);
 
+  // 求人票ファイルのドラッグ＆ドロップ。求人内容の欄（テキスト欄・ドロップ枠）のどこに落としても
+  // 受け付ける。子要素をまたぐたびにdragenter/dragleaveが交互に発火して枠の強調がちらつくため、
+  // 入った回数を数えて0に戻ったときだけ解除する。ファイル以外（選択した文字列など）のドラッグは
+  // 横取りせず、テキスト欄への通常のドロップをそのまま活かす。
+  const [jobDragActive, setJobDragActive] = useState(false);
+  const jobDragDepthRef = useRef(0);
+  const isFileDrag = (e: React.DragEvent) => Array.from(e.dataTransfer.types || []).includes('Files');
+  const handleJobDragEnter = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    jobDragDepthRef.current++;
+    if (!isBusy) setJobDragActive(true);
+  };
+  const handleJobDragOver = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = isBusy ? 'none' : 'copy';
+  };
+  const handleJobDragLeave = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
+    jobDragDepthRef.current = Math.max(0, jobDragDepthRef.current - 1);
+    if (jobDragDepthRef.current === 0) setJobDragActive(false);
+  };
+  const handleJobDrop = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    jobDragDepthRef.current = 0;
+    setJobDragActive(false);
+    if (!isBusy) handleAddJobFiles(e.dataTransfer.files);
+  };
+
   const handleAddJobFiles = (files: FileList | null) => {
     if (!files) return;
     const accepted: File[] = [];
@@ -8627,18 +8659,37 @@ const BlindResumeView: React.FC<{
                   <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
                 </label>
               </div>
-              <label><span>求人内容（任意 — 求人票のテキストを貼り付け、またはファイルを添付）</span>
-                <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など。空欄の場合は、企業名（とポジション名）からWeb検索で企業情報を調べ、一般的にマッチしそうな候補者と推奨ポジションを提案します" disabled={isBusy} />
-              </label>
-              <div className="blind-resume-files">
-                <button type="button" className="secondary-action-button" onClick={() => fileInputRef.current?.click()} disabled={isBusy}>求人票ファイルを添付（PDF/Word）</button>
+              <div
+                className={`blind-resume-job-input ${jobDragActive ? 'is-drag-active' : ''}`}
+                onDragEnter={handleJobDragEnter}
+                onDragOver={handleJobDragOver}
+                onDragLeave={handleJobDragLeave}
+                onDrop={handleJobDrop}
+              >
+                <label><span>求人内容（任意 — 求人票のテキストを貼り付け、またはファイルをドラッグ＆ドロップ／選択）</span>
+                  <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など。空欄の場合は、企業名（とポジション名）からWeb検索で企業情報を調べ、一般的にマッチしそうな候補者と推奨ポジションを提案します" disabled={isBusy} />
+                </label>
+                <div
+                  className="drop-zone blind-resume-drop-zone"
+                  role="button"
+                  tabIndex={isBusy ? -1 : 0}
+                  aria-disabled={isBusy}
+                  onClick={() => { if (!isBusy) fileInputRef.current?.click(); }}
+                  onKeyDown={e => { if (!isBusy && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); fileInputRef.current?.click(); } }}
+                >
+                  {jobDragActive ? 'ここにドロップして求人票を追加' : '求人票ファイル（PDF/Word、複数可）をここにドラッグ＆ドロップ、またはクリックして選択'}
+                </div>
                 <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx" multiple style={{ display: 'none' }} onChange={e => { handleAddJobFiles(e.target.files); e.target.value = ''; }} />
-                {jobFiles.map(f => (
-                  <span key={f.name} className="blind-resume-file-chip">
-                    {f.name}
-                    <button type="button" onClick={() => setJobFiles(prev => prev.filter(p => p !== f))} aria-label={`${f.name}を外す`} disabled={isBusy}>&times;</button>
-                  </span>
-                ))}
+                {jobFiles.length > 0 && (
+                  <div className="blind-resume-files">
+                    {jobFiles.map(f => (
+                      <span key={f.name} className="blind-resume-file-chip">
+                        {f.name}
+                        <button type="button" onClick={() => setJobFiles(prev => prev.filter(p => p !== f))} aria-label={`${f.name}を外す`} disabled={isBusy}>&times;</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
               <label>追加条件（任意）
                 <input type="text" value={extraConditions} onChange={e => setExtraConditions(e.target.value)} placeholder="例: 35歳まで、首都圏在住、マネジメント経験必須" disabled={isBusy} />
