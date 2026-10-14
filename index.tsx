@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ヘッダーのタブ名「ブラインドレジュメ作成」を「ブラインドレジュメ収集」に変更した',
       '候補者カードの氏名の右に「ブラインドレジュメ」ボタンを追加した。パイプラインに登録されているその候補者1名分の情報から、氏名・連絡先を伏せたブラインドレジュメを作成し、内容を確認・修正してPDFに出力できます（推薦先の企業名・求人内容は任意。空欄なら特定の企業に寄せない汎用の内容になります）',
       '類似経歴リサーチの実行中に「キャンセル」ボタンを表示し、途中で中止できるようにした（集計表まで出ている場合はそのまま残ります）。実行中でも画面を閉じられるようにした',
       '類似経歴リサーチで、リサーチ対象の候補者本人が「経歴が似ている候補者」に出てしまうことがある不具合を修正した（他のメンバーが同じ人を登録している場合なども、氏名・電話番号・メールアドレスが一致すれば本人として除外します）',
@@ -20456,7 +20457,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
-            <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'} className="view-switcher-blind-resume">ブラインドレジュメ作成</button>
+            <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'} className="view-switcher-blind-resume">ブラインドレジュメ収集</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
