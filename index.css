@@ -3876,3 +3876,52 @@ p.memo-content-text {
   display: flex;
   justify-content: flex-end;
 }
+
+/* --- ブラインドレジュメ作成 --- */
+.modal-content.blind-resume-modal { max-width: 1080px; }
+.blind-resume-steps { display: flex; gap: 0.5rem; list-style: none; padding: 0; margin: 0 0 1rem; flex-wrap: wrap; }
+.blind-resume-steps li { padding: 0.25rem 0.75rem; border-radius: 999px; background: var(--border-color); color: var(--text-muted-color); font-size: 0.85rem; }
+.blind-resume-steps li.is-current { background: var(--primary-color); color: #fff; font-weight: 600; }
+.blind-resume-busy { background: #eef5ff; border: 1px solid #b6d4fe; color: var(--primary-color-dark); padding: 0.6rem 0.9rem; border-radius: var(--border-radius); margin-bottom: 1rem; }
+.blind-resume-error { color: var(--danger-color); background: #fdf0f1; border: 1px solid #f5c2c7; padding: 0.5rem 0.75rem; border-radius: var(--border-radius); margin: 0 0 0.75rem; }
+.blind-resume-form, .blind-resume-card { display: flex; flex-direction: column; gap: 0.75rem; }
+.blind-resume-modal label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 600; font-size: 0.9rem; }
+.blind-resume-modal input[type="text"], .blind-resume-modal input[type="number"], .blind-resume-modal textarea, .blind-resume-modal select { font: inherit; font-weight: normal; padding: 0.45rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; width: 100%; }
+.blind-resume-modal textarea { resize: vertical; }
+.blind-resume-row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start; }
+.blind-resume-row > label, .blind-resume-row > input { flex: 1 1 200px; }
+.blind-resume-row > fieldset { flex: 3 1 360px; }
+.blind-resume-modal fieldset { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.5rem 0.75rem; margin: 0; }
+.blind-resume-modal legend { font-weight: 600; font-size: 0.9rem; padding: 0 0.25rem; }
+.blind-resume-scope .view-switcher { margin: 0; flex-wrap: wrap; }
+.blind-resume-scope .view-switcher select { width: auto; }
+.blind-resume-options { display: flex; flex-wrap: wrap; gap: 1rem; }
+.blind-resume-options label { flex-direction: row; align-items: center; font-weight: normal; }
+.blind-resume-modal .required-mark { color: var(--danger-color); margin-left: 0.2rem; }
+.blind-resume-modal .field-hint { color: var(--text-muted-color); font-size: 0.85rem; font-weight: normal; margin: 0.25rem 0 0.75rem; }
+.blind-resume-modal .sub-text { color: var(--text-muted-color); font-size: 0.8rem; font-weight: normal; }
+.blind-resume-files { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.blind-resume-file-chip { display: inline-flex; align-items: center; gap: 0.25rem; background: var(--border-color); border-radius: 999px; padding: 0.15rem 0.35rem 0.15rem 0.7rem; font-size: 0.85rem; }
+.blind-resume-file-chip button { background: none; border: none; cursor: pointer; font-size: 1rem; padding: 0 0.25rem; color: var(--text-muted-color); }
+.blind-resume-match-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.blind-resume-match-table th, .blind-resume-match-table td { border-bottom: 1px solid var(--border-color); padding: 0.5rem; text-align: left; vertical-align: top; }
+.blind-resume-match-table th { white-space: nowrap; background: #f8f9fa; }
+.blind-resume-match-table tbody tr { cursor: pointer; }
+.blind-resume-match-table tbody tr.is-selected { background: #eef5ff; }
+.blind-resume-score { display: inline-block; min-width: 2.5rem; text-align: center; font-weight: 700; border-radius: 0.375rem; padding: 0.1rem 0.4rem; }
+.blind-resume-score.is-high { background: #d1e7dd; color: #0f5132; }
+.blind-resume-score.is-mid { background: #fff3cd; color: #664d03; }
+.blind-resume-score.is-low { background: #e9ecef; color: #495057; }
+.blind-resume-applied { color: #b35c00; font-size: 0.8rem; margin-top: 0.2rem; }
+.blind-resume-concern { color: var(--text-muted-color); font-size: 0.8rem; margin-top: 0.2rem; }
+.blind-resume-editor { display: flex; flex-direction: column; gap: 1.25rem; }
+.blind-resume-card { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 1rem; }
+.blind-resume-card-header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.blind-resume-card-header h4 { margin: 0; }
+.blind-resume-label { font-weight: 600; font-size: 0.9rem; }
+.blind-resume-careers { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+.blind-resume-career { width: 100%; display: flex; flex-direction: column; gap: 0.35rem; background: #f8f9fa; border-radius: 0.375rem; padding: 0.5rem; }
+.blind-resume-remove { background: none; border: 1px solid #ced4da; border-radius: 0.375rem; cursor: pointer; padding: 0.3rem 0.6rem; color: var(--danger-color); flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .blind-resume-match-table th:nth-child(4), .blind-resume-match-table td:nth-child(4) { display: none; }
+}

@@ -27,6 +27,7 @@ const GMAIL_SCOPE_UNCHECKED_MESSAGE = 'Gmailの読み取り権限が付与され
 const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。`;
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
+import { matchCandidates, generateBlindResume, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4395,6 +4396,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-14',
+    items: [
+      '候補者パイプラインに「ブラインドレジュメ作成」を追加。推薦先の企業名と求人内容（テキスト貼り付け、または求人票のPDF/Wordファイル）を入れると、AIが登録済みの候補者からマッチしそうな人をマッチ度順に提案します。対象範囲は「自分／チーム／事業部（F+・AC）／全ユーザー」から選べ、選考中の候補者に加えて見送り・辞退・掘り起し・非表示の候補者も対象です。選んだ候補者ごとにAIが匿名のレジュメ（推薦ポイント・職務要約・職務経歴・スキル）を作成し、内容を確認・修正したうえで、表紙付きの1つのPDFとして保存できます（氏名・電話番号・メールアドレスは載りません）',
+    ],
+  },
+  {
     date: '2026-10-13',
     items: [
       '候補者パイプラインの各候補者カードで、「非表示（選考終了）」の右に「完全削除」ボタンを追加。誤って重複登録してしまった候補者などを、確認ダイアログの後にパイプラインから完全に削除できます（元に戻せません。これまでに加算されたKPI実績は変わりません）',
@@ -8116,6 +8123,503 @@ const PipelineDateScheduleModal: React.FC<{
     );
 };
 
+
+// ブラインドレジュメ作成（候補者パイプライン上部のボタンから開く）。推薦先の求人に合いそうな
+// 候補者を、対象範囲（自分／チーム／事業部／全ユーザー）の全候補者——選考中に加え見送り・辞退・
+// 掘り起し・非表示も含む——からAIで探し、選んだ人数分のブラインドレジュメを表紙付きの1つの
+// PDF（ブラウザの印刷→PDFに保存）にする。ロジック本体はservices/blindResume.ts。
+type BlindResumeScope = 'self' | 'team' | 'department' | 'all';
+
+const blindResumeCandidateStatus = (c: Candidate): string => {
+  if (c.revival) return '掘り起し';
+  if (c.isHidden) return '非表示（選考終了）';
+  const apps = c.applications || [];
+  if (apps.some(a => !a.isHidden && ACTIVE_PIPELINE_STAGES.includes(a.stage))) return '選考中';
+  if (apps.some(a => a.stage === '内定承諾')) return '内定承諾';
+  if (apps.some(a => a.stage === 'お見送り')) return '見送り';
+  if (apps.some(a => a.stage === '選考辞退' || a.stage === '内定承諾後辞退')) return '辞退';
+  return '応募前';
+};
+
+const toLocalIsoDate = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const BlindResumeModal: React.FC<{
+  onClose: () => void;
+  currentUserEmail: string;
+  currentUserLabel: string;
+  ownCandidates: Candidate[];
+  ownDeletedCandidateIds: string[];
+  teams: Team[];
+  memberDepartments: Record<string, Department>;
+}> = ({ onClose, currentUserEmail, currentUserLabel, ownCandidates, ownDeletedCandidateIds, teams, memberDepartments }) => {
+  const myTeams = useMemo(
+    () => teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === normalizeEmail(currentUserEmail))),
+    [teams, currentUserEmail]
+  );
+  const myDepartment = useMemo(() => {
+    const key = Object.keys(memberDepartments).find(e => normalizeEmail(e) === normalizeEmail(currentUserEmail));
+    return key ? memberDepartments[key] : undefined;
+  }, [memberDepartments, currentUserEmail]);
+
+  const [step, setStep] = useState<'input' | 'select' | 'edit'>('input');
+  const [companyName, setCompanyName] = useState('');
+  const [positionTitle, setPositionTitle] = useState('');
+  const [jobText, setJobText] = useState('');
+  const [jobFiles, setJobFiles] = useState<File[]>([]);
+  const [extraConditions, setExtraConditions] = useState('');
+  const [wantedCount, setWantedCount] = useState(3);
+  const [scope, setScope] = useState<BlindResumeScope>('self');
+  const [teamId, setTeamId] = useState<string>(myTeams[0]?.id || teams[0]?.id || '');
+  const [department, setDepartment] = useState<Department>(myDepartment || 'F+');
+  const [displayOptions, setDisplayOptions] = useState<BlindDisplayOptions>({ showCurrentSalary: true, showDesiredSalary: true, showJoinTiming: true });
+
+  const [teammates, setTeammates] = useState<{ email: string; data: UserData }[] | null>(null);
+  const [busyMessage, setBusyMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [matches, setMatches] = useState<MatchResult[]>([]);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [generated, setGenerated] = useState<Record<string, BlindResumeContent>>({});
+  const [regeneratingKey, setRegeneratingKey] = useState<string | null>(null);
+  const jobPartsRef = useRef<JobContentPart[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  const isBusy = !!busyMessage;
+
+  // ステップを切り替えたら、前のステップのスクロール位置を引き継がず先頭から表示する。
+  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [step]);
+
+  // 自分以外の候補者はDriveの共有データから都度読み込む（他メンバーの最新の登録内容を使うため）。
+  const ensureTeammates = useCallback(async () => {
+    if (teammates) return teammates;
+    const loaded = await loadAllTeammatesData<UserData>();
+    const list = loaded.map(t => ({ email: t.email, data: t.data }));
+    setTeammates(list);
+    return list;
+  }, [teammates]);
+
+  const buildPool = useCallback(async (): Promise<BlindPoolEntry[]> => {
+    const ownDeleted = new Set(ownDeletedCandidateIds);
+    const ownEntries: BlindPoolEntry[] = ownCandidates
+      .filter(c => !ownDeleted.has(c.id))
+      .map(c => ({ candidate: c, ownerEmail: currentUserEmail, ownerLabel: currentUserLabel, status: blindResumeCandidateStatus(c) }));
+    if (scope === 'self') return ownEntries;
+
+    const all = await ensureTeammates();
+    const resolveKey = (email: string) => normalizeEmail(email);
+    let inScope: (email: string) => boolean;
+    if (scope === 'team') {
+      const team = teams.find(t => t.id === teamId);
+      const members = new Set((team?.memberEmails || []).map(resolveKey));
+      inScope = email => members.has(resolveKey(email));
+    } else if (scope === 'department') {
+      const deptByEmail = new Map(Object.entries(memberDepartments).map(([e, d]) => [resolveKey(e), d]));
+      inScope = email => deptByEmail.get(resolveKey(email)) === department;
+    } else {
+      inScope = () => true;
+    }
+    const entries: BlindPoolEntry[] = [];
+    const selfKey = resolveKey(currentUserEmail);
+    // 自分の候補者はDrive上のコピーではなく、このブラウザの最新データを使う。
+    if (inScope(currentUserEmail)) entries.push(...ownEntries);
+    all.forEach(({ email, data }) => {
+      if (resolveKey(email) === selfKey || !inScope(email)) return;
+      const deleted = new Set(data.deletedCandidateIds || []);
+      const ownerLabel = data.displayName || email;
+      (data.candidates || []).forEach(c => {
+        if (deleted.has(c.id)) return;
+        entries.push({ candidate: c, ownerEmail: email, ownerLabel, status: blindResumeCandidateStatus(c) });
+      });
+    });
+    return entries;
+  }, [scope, teamId, department, teams, memberDepartments, ownCandidates, ownDeletedCandidateIds, currentUserEmail, currentUserLabel, ensureTeammates]);
+
+  const [pool, setPool] = useState<BlindPoolEntry[]>([]);
+  const poolByKey = useMemo(() => new Map(pool.map(e => [poolKey(e), e])), [pool]);
+
+  const handleAddJobFiles = (files: FileList | null) => {
+    if (!files) return;
+    const accepted: File[] = [];
+    for (const file of Array.from(files)) {
+      const { error } = resolveResumeFile(file);
+      if (error) { alert(error); continue; }
+      accepted.push(file);
+    }
+    setJobFiles(prev => [...prev, ...accepted.filter(f => !prev.some(p => p.name === f.name))]);
+  };
+
+  const buildJobParts = async (): Promise<JobContentPart[]> => {
+    const fileParts = await Promise.all(jobFiles.map(async file => ({
+      inlineData: { mimeType: resolveResumeFile(file).mimeType, data: await fileToBase64(file) },
+    })));
+    const header = `■推薦先企業: ${companyName.trim()}${positionTitle.trim() ? `\n■ポジション: ${positionTitle.trim()}` : ''}`;
+    const textPart = { text: `${header}\n■求人情報${jobFiles.length ? '（添付ファイルも参照）' : ''}:\n${jobText.trim() || '（添付ファイルを参照）'}` };
+    return [...fileParts, textPart];
+  };
+
+  const handleSearch = async () => {
+    if (!companyName.trim()) { alert('推薦先の企業名を入力してください。'); return; }
+    if (!jobText.trim() && jobFiles.length === 0) { alert('求人内容（テキストの貼り付け、または求人票ファイル）を入力してください。'); return; }
+    if (scope === 'team' && !teamId) { alert('チームを選択してください。'); return; }
+    setErrorMessage('');
+    try {
+      setBusyMessage('候補者データを読み込んでいます…');
+      const builtPool = await buildPool();
+      if (builtPool.length === 0) {
+        setErrorMessage('対象範囲に候補者が登録されていません。');
+        return;
+      }
+      setPool(builtPool);
+      jobPartsRef.current = await buildJobParts();
+      const result = await matchCandidates({
+        pool: builtPool,
+        jobParts: jobPartsRef.current,
+        companyName: companyName.trim(),
+        extraConditions: extraConditions.trim(),
+        wantedCount,
+        onProgress: setBusyMessage,
+      });
+      if (result.length === 0) {
+        setErrorMessage('求人にマッチする候補者が見つかりませんでした。追加条件をゆるめるか、対象範囲を広げてお試しください。');
+        return;
+      }
+      setMatches(result);
+      setSelectedKeys(result.slice(0, wantedCount).map(r => r.key));
+      // 求人内容を変えて探し直した場合に、前の求人向けに作った本文を使い回さない。
+      setGenerated({});
+      setStep('select');
+    } catch (err) {
+      console.error('ブラインドレジュメの候補者照合に失敗しました', err);
+      setErrorMessage(`候補者の照合中にエラーが発生しました: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusyMessage('');
+    }
+  };
+
+  const toggleSelected = (key: string) => {
+    setSelectedKeys(prev => (prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]));
+  };
+
+  // 選択順ではなくマッチ度順（＝一覧の並び）で候補者A, B, …を振る。
+  const orderedSelectedKeys = useMemo(
+    () => matches.map(m => m.key).filter(k => selectedKeys.includes(k)),
+    [matches, selectedKeys]
+  );
+
+  const generateOne = useCallback(async (key: string) => {
+    const entry = poolByKey.get(key);
+    if (!entry) throw new Error('候補者データが見つかりません');
+    return generateBlindResume({ entry, jobParts: jobPartsRef.current, companyName: companyName.trim() });
+  }, [poolByKey, companyName]);
+
+  const handleGenerate = async () => {
+    if (orderedSelectedKeys.length === 0) { alert('候補者を1名以上選択してください。'); return; }
+    setErrorMessage('');
+    const targets = orderedSelectedKeys.filter(k => !generated[k]);
+    let done = 0;
+    const failures: string[] = [];
+    try {
+      setBusyMessage(`ブラインドレジュメを作成しています…（0/${targets.length}名）`);
+      const next: Record<string, BlindResumeContent> = { ...generated };
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(3, targets.length) }, async () => {
+        while (cursor < targets.length) {
+          const key = targets[cursor++];
+          try {
+            next[key] = await generateOne(key);
+          } catch (err) {
+            console.error('ブラインドレジュメの生成に失敗しました', key, err);
+            failures.push(poolByKey.get(key)?.candidate.name || key);
+          }
+          done++;
+          setBusyMessage(`ブラインドレジュメを作成しています…（${done}/${targets.length}名）`);
+        }
+      }));
+      setGenerated(next);
+      if (failures.length) setErrorMessage(`次の候補者の作成に失敗しました（編集画面の「作り直す」で再試行できます）: ${failures.join('、')}`);
+      setStep('edit');
+    } finally {
+      setBusyMessage('');
+    }
+  };
+
+  const handleRegenerate = async (key: string) => {
+    setRegeneratingKey(key);
+    try {
+      const content = await generateOne(key);
+      setGenerated(prev => ({ ...prev, [key]: content }));
+    } catch (err) {
+      alert(`作り直しに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRegeneratingKey(null);
+    }
+  };
+
+  const updateContent = (key: string, patch: Partial<BlindResumeContent>) => {
+    setGenerated(prev => (prev[key] ? { ...prev, [key]: { ...prev[key], ...patch } } : prev));
+  };
+  const updateCareer = (key: string, index: number, patch: Partial<BlindCareer>) => {
+    setGenerated(prev => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, careers: cur.careers.map((c, i) => (i === index ? { ...c, ...patch } : c)) } };
+    });
+  };
+  const removeCareer = (key: string, index: number) => {
+    setGenerated(prev => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, careers: cur.careers.filter((_, i) => i !== index) } };
+    });
+  };
+  const addCareer = (key: string) => {
+    setGenerated(prev => {
+      const cur = prev[key];
+      if (!cur) return prev;
+      return { ...prev, [key]: { ...cur, careers: [...cur.careers, { period: '', company: '', role: '', description: '' }] } };
+    });
+  };
+
+  const editKeys = orderedSelectedKeys.filter(k => generated[k]);
+  const leaksByKey = useMemo(() => {
+    const result: Record<string, string[]> = {};
+    editKeys.forEach(k => {
+      const entry = poolByKey.get(k);
+      if (entry) result[k] = findLeakedPersonalInfo(generated[k], entry.candidate);
+    });
+    return result;
+  }, [editKeys, generated, poolByKey]);
+
+  const handleExportPdf = () => {
+    if (editKeys.length === 0) return;
+    const leaked = editKeys.filter(k => leaksByKey[k]?.length);
+    if (leaked.length > 0 && !window.confirm('氏名・連絡先らしき文字列が残っている候補者があります（赤字の警告を参照）。このままPDFを出力しますか？')) return;
+    const today = toLocalIsoDate(new Date());
+    const documentTitle = `ブラインドレジュメ_${companyName.trim().replace(/[\\/:*?"<>|\s]+/g, '')}_${today.replace(/-/g, '')}`;
+    const html = renderBlindResumeHtml({
+      companyName: companyName.trim(),
+      positionTitle: positionTitle.trim(),
+      createdDate: today,
+      items: editKeys.map((k, i) => ({ label: blindLabel(i), candidate: poolByKey.get(k)!.candidate, content: generated[k] })),
+      options: displayOptions,
+      documentTitle,
+    });
+    const win = window.open('', '_blank');
+    if (!win) {
+      alert('ポップアップがブロックされました。ブラウザのアドレスバー右側からこのサイトのポップアップを許可して、もう一度お試しください。');
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    // フォント・レイアウトの確定を待ってから印刷ダイアログを開く（「送信先: PDFに保存」で保存）。
+    setTimeout(() => { win.focus(); win.print(); }, 400);
+  };
+
+  const scopeDescription = (() => {
+    if (scope === 'self') return `自分の候補者 ${ownCandidates.filter(c => !ownDeletedCandidateIds.includes(c.id)).length}名`;
+    if (scope === 'team') return `チーム「${teams.find(t => t.id === teamId)?.name || '未選択'}」のメンバーの候補者`;
+    if (scope === 'department') return `${department}所属メンバーの候補者`;
+    return '全ユーザーの候補者';
+  })();
+
+  const linesToArray = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
+  const normalizedCompany = normalizeForDuplicateMatch(companyName);
+  const appliedStage = (c: Candidate) => {
+    if (!normalizedCompany) return null;
+    const app = (c.applications || []).find(a => {
+      const n = normalizeForDuplicateMatch(a.companyName);
+      return n && (n.includes(normalizedCompany) || normalizedCompany.includes(n));
+    });
+    return app ? app.stage : null;
+  };
+
+  return (
+    <div className="modal-overlay" onClick={isBusy ? undefined : onClose} role="dialog" aria-modal="true" aria-labelledby="blind-resume-title">
+      <div className="modal-content blind-resume-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3 id="blind-resume-title">ブラインドレジュメ作成</h3>
+          <button onClick={onClose} className="close-button" aria-label="閉じる" disabled={isBusy}>&times;</button>
+        </div>
+        <div className="modal-body" ref={bodyRef}>
+          <ol className="blind-resume-steps">
+            <li className={step === 'input' ? 'is-current' : ''}>1. 求人と対象範囲</li>
+            <li className={step === 'select' ? 'is-current' : ''}>2. 候補者を選ぶ</li>
+            <li className={step === 'edit' ? 'is-current' : ''}>3. 内容確認・PDF出力</li>
+          </ol>
+
+          {errorMessage && <p className="blind-resume-error">{errorMessage}</p>}
+          {isBusy && <div className="blind-resume-busy">{busyMessage}</div>}
+
+          {step === 'input' && (
+            <div className="blind-resume-form">
+              <div className="blind-resume-row">
+                <label><span>推薦先の企業名<span className="required-mark">*</span></span>
+                  <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="例: 株式会社〇〇" disabled={isBusy} />
+                </label>
+                <label>ポジション名（任意）
+                  <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
+                </label>
+              </div>
+              <label><span>求人内容（求人票のテキストを貼り付け、またはファイルを添付）<span className="required-mark">*</span></span>
+                <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など" disabled={isBusy} />
+              </label>
+              <div className="blind-resume-files">
+                <button type="button" className="secondary-action-button" onClick={() => fileInputRef.current?.click()} disabled={isBusy}>求人票ファイルを添付（PDF/Word）</button>
+                <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx" multiple style={{ display: 'none' }} onChange={e => { handleAddJobFiles(e.target.files); e.target.value = ''; }} />
+                {jobFiles.map(f => (
+                  <span key={f.name} className="blind-resume-file-chip">
+                    {f.name}
+                    <button type="button" onClick={() => setJobFiles(prev => prev.filter(p => p !== f))} aria-label={`${f.name}を外す`} disabled={isBusy}>&times;</button>
+                  </span>
+                ))}
+              </div>
+              <label>追加条件（任意）
+                <input type="text" value={extraConditions} onChange={e => setExtraConditions(e.target.value)} placeholder="例: 35歳まで、首都圏在住、マネジメント経験必須" disabled={isBusy} />
+              </label>
+              <div className="blind-resume-row">
+                <label>出力する人数
+                  <input type="number" min={1} max={10} value={wantedCount} onChange={e => setWantedCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))} disabled={isBusy} />
+                </label>
+                <fieldset className="blind-resume-scope">
+                  <legend>対象範囲</legend>
+                  <div className="view-switcher">
+                    <button type="button" onClick={() => setScope('self')} disabled={isBusy || scope === 'self'}>自分</button>
+                    <button type="button" onClick={() => setScope('team')} disabled={isBusy || scope === 'team'}>チーム</button>
+                    <button type="button" onClick={() => setScope('department')} disabled={isBusy || scope === 'department'}>事業部</button>
+                    <button type="button" onClick={() => setScope('all')} disabled={isBusy || scope === 'all'}>全ユーザー</button>
+                    {scope === 'team' && (
+                      <select value={teamId} onChange={e => setTeamId(e.target.value)} disabled={isBusy}>
+                        <option value="">チームを選択</option>
+                        {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                    )}
+                    {scope === 'department' && (
+                      <select value={department} onChange={e => setDepartment(e.target.value as Department)} disabled={isBusy}>
+                        <option value="F+">F+</option>
+                        <option value="AC">AC</option>
+                      </select>
+                    )}
+                  </div>
+                  <p className="field-hint">{scopeDescription}（選考中に加え、見送り・辞退・掘り起し・非表示の候補者も対象）</p>
+                </fieldset>
+              </div>
+              <fieldset className="blind-resume-options">
+                <legend>PDFに載せる項目（年齢・学歴・現職・職歴は常に記載。氏名・連絡先は載りません）</legend>
+                <label><input type="checkbox" checked={displayOptions.showCurrentSalary} onChange={e => setDisplayOptions(o => ({ ...o, showCurrentSalary: e.target.checked }))} /> 現年収</label>
+                <label><input type="checkbox" checked={displayOptions.showDesiredSalary} onChange={e => setDisplayOptions(o => ({ ...o, showDesiredSalary: e.target.checked }))} /> 希望年収</label>
+                <label><input type="checkbox" checked={displayOptions.showJoinTiming} onChange={e => setDisplayOptions(o => ({ ...o, showJoinTiming: e.target.checked }))} /> 入社希望時期</label>
+              </fieldset>
+            </div>
+          )}
+
+          {step === 'select' && (
+            <div>
+              <p className="field-hint">
+                マッチ度の高い順に表示しています（{pool.length}名中）。上位{wantedCount}名を選択済み — チェックで入れ替えられます。氏名はこの画面にだけ表示され、PDFには載りません。
+              </p>
+              <div className="table-container">
+                <table className="blind-resume-match-table">
+                  <thead>
+                    <tr><th></th><th>マッチ度</th><th>候補者</th><th>担当</th><th>ステータス</th><th>年齢・現職</th><th>推薦理由／懸念点</th></tr>
+                  </thead>
+                  <tbody>
+                    {matches.map(m => {
+                      const entry = poolByKey.get(m.key);
+                      if (!entry) return null;
+                      const c = entry.candidate as Candidate;
+                      const applied = appliedStage(c);
+                      const checked = selectedKeys.includes(m.key);
+                      return (
+                        <tr key={m.key} className={checked ? 'is-selected' : ''} onClick={() => toggleSelected(m.key)}>
+                          <td><input type="checkbox" checked={checked} onChange={() => toggleSelected(m.key)} onClick={e => e.stopPropagation()} aria-label={`${c.name}を選択`} /></td>
+                          <td><span className={`blind-resume-score ${m.score >= 80 ? 'is-high' : m.score >= 60 ? 'is-mid' : 'is-low'}`}>{m.score}</span></td>
+                          <td>
+                            <strong>{c.name}</strong>
+                            {applied && <div className="blind-resume-applied">この企業に応募歴あり（{applied}）</div>}
+                          </td>
+                          <td>{entry.ownerLabel}</td>
+                          <td>{entry.status}</td>
+                          <td>{c.age ? `${c.age}歳` : '—'}<div className="sub-text">{c.currentCompany || '現職未入力'}{c.jobType ? ` ／ ${c.jobType}` : ''}</div></td>
+                          <td>{m.reason}{m.concern && <div className="blind-resume-concern">懸念: {m.concern}</div>}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {step === 'edit' && (
+            <div className="blind-resume-editor">
+              <p className="field-hint">AIが作成した内容です。事実と違う点や社外に出せない表現がないか確認し、必要に応じて直してから「PDFを出力」を押してください。印刷画面で「送信先: PDFに保存」を選ぶと1つのPDFとして保存できます。</p>
+              {editKeys.map((key, i) => {
+                const entry = poolByKey.get(key)!;
+                const content = generated[key];
+                const leaks = leaksByKey[key] || [];
+                return (
+                  <div key={key} className="blind-resume-card">
+                    <div className="blind-resume-card-header">
+                      <h4>候補者{blindLabel(i)}<span className="sub-text">（社内メモ: {entry.candidate.name}／担当 {entry.ownerLabel}）</span></h4>
+                      <button type="button" className="secondary-action-button" onClick={() => handleRegenerate(key)} disabled={isBusy || regeneratingKey !== null}>
+                        {regeneratingKey === key ? '作り直し中…' : '作り直す'}
+                      </button>
+                    </div>
+                    {leaks.length > 0 && <p className="blind-resume-error">個人情報が残っている可能性があります: {leaks.join('、')}</p>}
+                    <label>キャッチ<input type="text" value={content.headline} onChange={e => updateContent(key, { headline: e.target.value })} /></label>
+                    <label>表紙の適合ポイント<input type="text" value={content.coverPoint} onChange={e => updateContent(key, { coverPoint: e.target.value })} /></label>
+                    <label>推薦ポイント（1行に1つ）<textarea rows={3} value={content.matchPoints.join('\n')} onChange={e => updateContent(key, { matchPoints: linesToArray(e.target.value) })} /></label>
+                    <label>職務要約<textarea rows={4} value={content.careerSummary} onChange={e => updateContent(key, { careerSummary: e.target.value })} /></label>
+                    <div className="blind-resume-careers">
+                      <span className="blind-resume-label">職務経歴</span>
+                      {content.careers.map((career, ci) => (
+                        <div key={ci} className="blind-resume-career">
+                          <div className="blind-resume-row">
+                            <input type="text" value={career.company} onChange={e => updateCareer(key, ci, { company: e.target.value })} placeholder="企業名" aria-label="企業名" />
+                            <input type="text" value={career.period} onChange={e => updateCareer(key, ci, { period: e.target.value })} placeholder="在籍期間" aria-label="在籍期間" />
+                            <input type="text" value={career.role} onChange={e => updateCareer(key, ci, { role: e.target.value })} placeholder="部署・役職" aria-label="部署・役職" />
+                            <button type="button" className="blind-resume-remove" onClick={() => removeCareer(key, ci)} aria-label="この職歴を削除">&times;</button>
+                          </div>
+                          <textarea rows={3} value={career.description} onChange={e => updateCareer(key, ci, { description: e.target.value })} placeholder="業務内容・実績" aria-label="業務内容・実績" />
+                        </div>
+                      ))}
+                      <button type="button" className="secondary-action-button" onClick={() => addCareer(key)}>＋ 職歴を追加</button>
+                    </div>
+                    <label>活かせる経験・スキル（1行に1つ）<textarea rows={4} value={content.skills.join('\n')} onChange={e => updateContent(key, { skills: linesToArray(e.target.value) })} /></label>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          {step === 'input' && (
+            <>
+              <button type="button" onClick={onClose} className="cancel-button" disabled={isBusy}>キャンセル</button>
+              <button type="button" onClick={handleSearch} className="submit-button" disabled={isBusy}>候補者を探す</button>
+            </>
+          )}
+          {step === 'select' && (
+            <>
+              <button type="button" onClick={() => setStep('input')} className="cancel-button" disabled={isBusy} style={{ marginRight: 'auto' }}>← 条件に戻る</button>
+              <button type="button" onClick={handleGenerate} className="submit-button" disabled={isBusy || orderedSelectedKeys.length === 0}>
+                選択した{orderedSelectedKeys.length}名のブラインドレジュメを作成
+              </button>
+            </>
+          )}
+          {step === 'edit' && (
+            <>
+              <button type="button" onClick={() => setStep('select')} className="cancel-button" disabled={isBusy} style={{ marginRight: 'auto' }}>← 候補者の選択に戻る</button>
+              <button type="button" onClick={handleExportPdf} className="submit-button" disabled={isBusy || editKeys.length === 0}>PDFを出力（{editKeys.length}名）</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const PipelineDashboard: React.FC<{ candidates: Candidate[] }> = ({ candidates }) => {
     const STAGE_WEIGHTS: Record<PipelineStage, number> = {
@@ -15544,6 +16048,7 @@ const App: React.FC = () => {
   // 設定済みでも「未設定」として見えてしまう。ヘッダーの案内バーから再許可を促す。
   const [driveReauthNeeded, setDriveReauthNeeded] = useState(false);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
+  const [isBlindResumeModalOpen, setIsBlindResumeModalOpen] = useState(false);
   // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
   // write directly into a specific teammate's own Drive file.
   const [driveFileIdByEmail, setDriveFileIdByEmail] = useState<Record<string, string>>({});
@@ -20030,6 +20535,23 @@ const App: React.FC = () => {
         )}
         {view === 'pipeline' && (
           <>
+            <div className="google-tasks-sync-bar blind-resume-launch-bar">
+              <span className="google-tasks-sync-label">求人にマッチする候補者を探して、ブラインドレジュメ（氏名・連絡先なし）を1つのPDFにまとめられます</span>
+              <button type="button" onClick={() => setIsBlindResumeModalOpen(true)} className="secondary-action-button">
+                ブラインドレジュメ作成
+              </button>
+            </div>
+            {isBlindResumeModalOpen && currentIdentity && (
+              <BlindResumeModal
+                onClose={() => setIsBlindResumeModalOpen(false)}
+                currentUserEmail={currentIdentity.email}
+                currentUserLabel={currentUserData?.displayName || currentIdentity.name || currentIdentity.email}
+                ownCandidates={candidates}
+                ownDeletedCandidateIds={currentUserData?.deletedCandidateIds || []}
+                teams={teams}
+                memberDepartments={memberDepartments}
+              />
+            )}
             <div className="google-tasks-sync-bar">
               <span className="google-tasks-sync-label">選考予定はGoogleタスクに自動で同期されます</span>
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>
