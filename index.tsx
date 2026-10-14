@@ -30,6 +30,7 @@ import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarge
 import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPlan, estimateGeneratePlan, GENERATE_CONCURRENCY, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
+import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -677,6 +678,9 @@ interface CompanyApplication {
   // existed before this feature shipped — there's no real record of when it first entered that
   // stage, so it's shown as "記録開始前" rather than a fabricated date.
   stageHistory?: { stage: PipelineStage; date?: string }[];
+  // 面接対策ジェネレーター（GAS）で作った面接対策資料（Word）のURL。今は手で貼り付ける。
+  // GAS側が対応したら生成時に自動で入る想定（services/interviewPrep.ts参照）。
+  interviewPrepDocUrl?: string;
 }
 
 // A single titled free-text note on a candidate (see Candidate.memos) — several can coexist per
@@ -4399,6 +4403,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '選考情報の編集画面に「面接対策資料」欄を追加した。「面接対策ジェネレーターで作る」を押すと、面接対策ジェネレーターが開き、その候補者の面談メモがクリップボードにコピーされます（生成画面の面談メモ欄に貼り付けて使えます）。作った資料のURLを貼っておくと、候補者カードの選考バッジに「対策資料」リンクが出て、すぐ開けます',
+      '面接（カジュアル面談・1次〜最終面接・オファー面談）の予定をGoogleタスクに登録するとき、タスクのメモに面接対策資料へのリンク（未作成なら作成画面へのリンク）を添えるようにした',
       'ヘッダーのタブ名「ブラインドレジュメ作成」を「ブラインドレジュメ収集」に変更した',
       '候補者カードの氏名の右に「ブラインドレジュメ」ボタンを追加した。パイプラインに登録されているその候補者1名分の情報から、氏名・連絡先を伏せたブラインドレジュメを作成し、内容を確認・修正してPDFに出力できます（推薦先の企業名・求人内容は任意。空欄なら特定の企業に寄せない汎用の内容になります）',
       '類似経歴リサーチの実行中に「キャンセル」ボタンを表示し、途中で中止できるようにした（集計表まで出ている場合はそのまま残ります）。実行中でも画面を閉じられるようにした',
@@ -7667,8 +7673,10 @@ const ApplicationModal: React.FC<{
   onClose: () => void;
   onSave: (application: CompanyApplication) => void;
   candidateName: string;
+  // 面接対策ジェネレーターに渡す候補者IDと面談メモ用（未指定ならその欄を出さない）。
+  candidate?: Candidate;
   initialData: CompanyApplication | null; // null for new, object for edit
-}> = ({ isOpen, onClose, onSave, candidateName, initialData }) => {
+}> = ({ isOpen, onClose, onSave, candidateName, candidate, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
@@ -7906,12 +7914,76 @@ const ApplicationModal: React.FC<{
                             placeholder="選考状況に関するメモ"
                         />
                     </div>
+                    {candidate && (
+                        <InterviewPrepSection
+                            candidate={candidate}
+                            application={application}
+                            onUrlChange={url => setApplication(prev => ({ ...prev, interviewPrepDocUrl: url || undefined }))}
+                        />
+                    )}
                 </form>
                 <div className="modal-footer">
                     <button type="button" onClick={onClose} className="cancel-button">キャンセル</button>
                     <button type="submit" form="application-form" className="submit-button">保存</button>
                 </div>
             </div>
+        </div>
+    );
+};
+
+/**
+ * 選考情報モーダル内の「面接対策資料」欄。面接対策ジェネレーター（GAS）を企業名・フェーズ
+ * 入りで開き、面談メモをクリップボードにコピーする（生成画面の面談メモ欄に貼り付ける用）。
+ * 作った資料のURLはここに貼っておけば、カードやGoogleタスクから開ける。
+ */
+const InterviewPrepSection: React.FC<{
+    candidate: Candidate;
+    application: CompanyApplication;
+    onUrlChange: (url: string) => void;
+}> = ({ candidate, application, onUrlChange }) => {
+    const [copyMessage, setCopyMessage] = useState('');
+    const memoText = useMemo(() => buildInterviewMemoText(sortMemosChronologically(candidate.memos || [])), [candidate.memos]);
+    const url = application.interviewPrepDocUrl || '';
+    const isValidUrl = /^https?:\/\//.test(url.trim());
+
+    const handleOpenGenerator = async () => {
+        // window.openは非同期処理の後だとポップアップブロックされるため、先に開く。
+        window.open(buildGeneratorUrl(candidate.id, application), '_blank', 'noopener');
+        if (!memoText) {
+            setCopyMessage('面談メモが登録されていないため、コピーはしていません。');
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(memoText);
+            setCopyMessage('面談メモをコピーしました。生成画面の「面談メモ」欄に貼り付けてください。');
+        } catch {
+            setCopyMessage('面談メモのコピーに失敗しました。');
+        }
+    };
+
+    return (
+        <div className="form-group interview-prep-section">
+            <label htmlFor="interviewPrepDocUrl">面接対策資料</label>
+            <div className="interview-prep-actions">
+                <button type="button" className="interview-prep-generate-button" onClick={handleOpenGenerator} disabled={!application.companyName.trim()}>
+                    面接対策ジェネレーターで作る
+                </button>
+                {isValidUrl && (
+                    <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="interview-prep-open-link">資料を開く</a>
+                )}
+            </div>
+            <input
+                type="url"
+                id="interviewPrepDocUrl"
+                value={url}
+                onChange={e => onUrlChange(e.target.value)}
+                placeholder="作成した資料のURLを貼り付け（任意）"
+            />
+            <p className="interview-prep-hint">
+                {copyMessage || (memoText
+                    ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
+                    : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
+            </p>
         </div>
     );
 };
@@ -11887,6 +11959,19 @@ const ApplicationStageBadge: React.FC<{
   >
     {app.companyName}: {app.stage}
     <SchedulingBallBadgeSuffix app={app} />
+    {app.interviewPrepDocUrl && /^https?:\/\//.test(app.interviewPrepDocUrl) && (
+      <a
+        href={app.interviewPrepDocUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="interview-prep-badge-link"
+        title="面接対策資料を開く"
+        onClick={e => e.stopPropagation()}
+        onKeyDown={e => e.stopPropagation()}
+      >
+        対策資料
+      </a>
+    )}
   </span>
 );
 
@@ -14295,6 +14380,7 @@ const CandidatePipelineView: React.FC<{
                     onClose={handleCloseApplicationModal}
                     onSave={handleSaveApplication}
                     candidateName={applicationModalData.candidate.name}
+                    candidate={applicationModalData.candidate}
                     initialData={applicationModalData.application}
                 />
             )}
@@ -19135,9 +19221,16 @@ const App: React.FC = () => {
   // Google Tasks has no time-of-day field of its own (due is a date only) — so a start time,
   // when set, is prepended straight onto the title text instead, e.g. "13:30 山田太郎（株式会社
   // サンプル）".
+  // 面接系ステージでは、前日までに面接対策資料を作れるよう生成画面（作成済みなら資料）への
+  // リンクもメモに添える。
   const buildPipelineTaskContent = (candidate: Candidate, app: CompanyApplication) => ({
     title: `${app.scheduledTime ? `${app.scheduledTime} ` : ''}${candidate.name}（${app.companyName}）`,
-    notes: `ステージ: ${app.stage}${app.nextAction ? ` / 次のアクション: ${app.nextAction}` : ''}`,
+    notes: `ステージ: ${app.stage}${app.nextAction ? ` / 次のアクション: ${app.nextAction}` : ''}`
+      + (isInterviewPrepStage(app.stage)
+        ? (app.interviewPrepDocUrl
+          ? `\n面接対策資料: ${app.interviewPrepDocUrl}`
+          : `\n面接対策資料を作る: ${buildGeneratorUrl(candidate.id, app)}`)
+        : ''),
     dueDateISO: app.scheduledDate!,
     syncKey: app.id,
   });
@@ -19293,7 +19386,8 @@ const App: React.FC = () => {
             const isUnchanged = prevApp && existingTaskId
               && prevApp.scheduledDate === app.scheduledDate
               && prevApp.scheduledTime === app.scheduledTime
-              && prevApp.stage === app.stage;
+              && prevApp.stage === app.stage
+              && prevApp.interviewPrepDocUrl === app.interviewPrepDocUrl;
             if (isUnchanged) continue;
             const content = buildPipelineTaskContent(effectiveNext, app);
             if (existingTaskId) {
@@ -19512,6 +19606,9 @@ const App: React.FC = () => {
         return { ...prevData, candidates: updatedCandidates, entries: updatedEntries };
     });
     queueCandidateTasksSync(prevCandidate, finalCandidate);
+    // 面接系ステージの結果（通過／お見送り／辞退）を面接対策ジェネレーターへ送る（受け口URL未設定の間は何もしない）。
+    const sessionEmail = getCurrentSession()?.identity.email;
+    if (sessionEmail) void sendResultEvents(computeResultEvents(prevCandidate, finalCandidate, sessionEmail, todayStr));
   };
 
   const handleToggleCandidateVisibility = (candidateId: string) => {
