@@ -27,7 +27,7 @@ const GMAIL_SCOPE_UNCHECKED_MESSAGE = 'Gmailの読み取り権限が付与され
 const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。`;
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
-import { matchCandidates, generateBlindResume, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
+import { matchCandidates, generateBlindResume, researchCompany, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4398,6 +4398,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ブラインドレジュメ作成を、候補者パイプライン内のボタンから、「個人実績」「全ユーザー」「チーム別」「候補者パイプライン」と並ぶ独立したタブ「ブラインドレジュメ」に移した。他のタブを見に行っても入力内容・作成途中のレジュメは残ります',
+      'ブラインドレジュメ作成で、求人内容を空欄のままでも作成できるようにした。その場合は企業名（とポジション名）からWeb検索で企業情報・採用ニーズを調べ、一般的にマッチ度が高そうな候補者を提案します（調べた内容と出典は候補者一覧の上で確認できます）。あわせて、候補者ごとに「推奨ポジション」を提案し、表紙と各候補者のページに載せるようにした（編集画面で修正・削除できます）',
       '候補者パイプラインに「ブラインドレジュメ作成」を追加。推薦先の企業名と求人内容（テキスト貼り付け、または求人票のPDF/Wordファイル）を入れると、AIが登録済みの候補者からマッチしそうな人をマッチ度順に提案します。対象範囲は「自分／チーム／事業部（F+・AC）／全ユーザー」から選べ、選考中の候補者に加えて見送り・辞退・掘り起し・非表示の候補者も対象です。選んだ候補者ごとにAIが匿名のレジュメ（推薦ポイント・職務要約・職務経歴・スキル）を作成し、内容を確認・修正したうえで、表紙付きの1つのPDFとして保存できます（氏名・電話番号・メールアドレスは載りません）',
     ],
   },
@@ -8144,15 +8146,14 @@ const blindResumeCandidateStatus = (c: Candidate): string => {
 const toLocalIsoDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-const BlindResumeModal: React.FC<{
-  onClose: () => void;
+const BlindResumeView: React.FC<{
   currentUserEmail: string;
   currentUserLabel: string;
   ownCandidates: Candidate[];
   ownDeletedCandidateIds: string[];
   teams: Team[];
   memberDepartments: Record<string, Department>;
-}> = ({ onClose, currentUserEmail, currentUserLabel, ownCandidates, ownDeletedCandidateIds, teams, memberDepartments }) => {
+}> = ({ currentUserEmail, currentUserLabel, ownCandidates, ownDeletedCandidateIds, teams, memberDepartments }) => {
   const myTeams = useMemo(
     () => teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === normalizeEmail(currentUserEmail))),
     [teams, currentUserEmail]
@@ -8173,6 +8174,15 @@ const BlindResumeModal: React.FC<{
   const [teamId, setTeamId] = useState<string>(myTeams[0]?.id || teams[0]?.id || '');
   const [department, setDepartment] = useState<Department>(myDepartment || 'F+');
   const [displayOptions, setDisplayOptions] = useState<BlindDisplayOptions>({ showCurrentSalary: true, showDesiredSalary: true, showJoinTiming: true });
+  // チーム設定・所属部署はDriveから後から読み込まれるため、届いた時点で既定値（自分の所属）を入れる。
+  useEffect(() => {
+    if (!teamId && (myTeams[0] || teams[0])) setTeamId((myTeams[0] || teams[0]).id);
+  }, [teamId, myTeams, teams]);
+  const departmentTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!departmentTouchedRef.current && myDepartment) setDepartment(myDepartment);
+  }, [myDepartment]);
+  const [companyResearch, setCompanyResearch] = useState<CompanyResearch | null>(null);
 
   const [teammates, setTeammates] = useState<{ email: string; data: UserData }[] | null>(null);
   const [busyMessage, setBusyMessage] = useState('');
@@ -8188,7 +8198,10 @@ const BlindResumeModal: React.FC<{
   const isBusy = !!busyMessage;
 
   // ステップを切り替えたら、前のステップのスクロール位置を引き継がず先頭から表示する。
-  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [step]);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' });
+  }, [step]);
 
   // 自分以外の候補者はDriveの共有データから都度読み込む（他メンバーの最新の登録内容を使うため）。
   const ensureTeammates = useCallback(async () => {
@@ -8260,7 +8273,6 @@ const BlindResumeModal: React.FC<{
 
   const handleSearch = async () => {
     if (!companyName.trim()) { alert('推薦先の企業名を入力してください。'); return; }
-    if (!jobText.trim() && jobFiles.length === 0) { alert('求人内容（テキストの貼り付け、または求人票ファイル）を入力してください。'); return; }
     if (scope === 'team' && !teamId) { alert('チームを選択してください。'); return; }
     setErrorMessage('');
     try {
@@ -8271,13 +8283,27 @@ const BlindResumeModal: React.FC<{
         return;
       }
       setPool(builtPool);
-      jobPartsRef.current = await buildJobParts();
+      const hasJobDescription = !!jobText.trim() || jobFiles.length > 0;
+      if (hasJobDescription) {
+        setCompanyResearch(null);
+        jobPartsRef.current = await buildJobParts();
+      } else {
+        // 求人内容が無い場合は、企業名（＋ポジション名）からWeb検索で企業情報・採用ニーズを調べ、
+        // それを求人情報の代わりに使う。
+        setBusyMessage(`求人内容が無いため、「${companyName.trim()}」の企業情報をWeb検索で調べています…`);
+        const research = await researchCompany(companyName.trim(), positionTitle.trim());
+        setCompanyResearch(research);
+        jobPartsRef.current = [{
+          text: `■推薦先企業: ${companyName.trim()}${positionTitle.trim() ? `\n■想定ポジション: ${positionTitle.trim()}` : ''}\n■求人票: なし（以下はWeb検索で調べた企業情報と採用ニーズの見立て）\n${research.text}`,
+        }];
+      }
       const result = await matchCandidates({
         pool: builtPool,
         jobParts: jobPartsRef.current,
         companyName: companyName.trim(),
         extraConditions: extraConditions.trim(),
         wantedCount,
+        hasJobDescription,
         onProgress: setBusyMessage,
       });
       if (result.length === 0) {
@@ -8310,8 +8336,9 @@ const BlindResumeModal: React.FC<{
   const generateOne = useCallback(async (key: string) => {
     const entry = poolByKey.get(key);
     if (!entry) throw new Error('候補者データが見つかりません');
-    return generateBlindResume({ entry, jobParts: jobPartsRef.current, companyName: companyName.trim() });
-  }, [poolByKey, companyName]);
+    const recommendedPosition = generated[key]?.recommendedPosition ?? matches.find(m => m.key === key)?.recommendedPosition ?? '';
+    return generateBlindResume({ entry, jobParts: jobPartsRef.current, companyName: companyName.trim(), recommendedPosition });
+  }, [poolByKey, companyName, matches, generated]);
 
   const handleGenerate = async () => {
     if (orderedSelectedKeys.length === 0) { alert('候補者を1名以上選択してください。'); return; }
@@ -8436,13 +8463,12 @@ const BlindResumeModal: React.FC<{
   };
 
   return (
-    <div className="modal-overlay" onClick={isBusy ? undefined : onClose} role="dialog" aria-modal="true" aria-labelledby="blind-resume-title">
-      <div className="modal-content blind-resume-modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3 id="blind-resume-title">ブラインドレジュメ作成</h3>
-          <button onClick={onClose} className="close-button" aria-label="閉じる" disabled={isBusy}>&times;</button>
+    <div className="blind-resume-page" ref={bodyRef}>
+        <div className="blind-resume-page-header">
+          <h2 className="section-title">ブラインドレジュメ作成</h2>
+          <p className="field-hint">推薦先の企業に合いそうな候補者を登録データから探し、氏名・連絡先を伏せたブラインドレジュメを表紙付きの1つのPDFにまとめます。求人内容が無い場合は、企業名からWeb検索で企業情報を調べて候補者と推奨ポジションを提案します。</p>
         </div>
-        <div className="modal-body" ref={bodyRef}>
+        <div className="blind-resume-page-body">
           <ol className="blind-resume-steps">
             <li className={step === 'input' ? 'is-current' : ''}>1. 求人と対象範囲</li>
             <li className={step === 'select' ? 'is-current' : ''}>2. 候補者を選ぶ</li>
@@ -8458,12 +8484,12 @@ const BlindResumeModal: React.FC<{
                 <label><span>推薦先の企業名<span className="required-mark">*</span></span>
                   <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="例: 株式会社〇〇" disabled={isBusy} />
                 </label>
-                <label>ポジション名（任意）
+                <label>ポジション名（任意 — 求人内容が無い場合は検索の手がかりにも使います）
                   <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
                 </label>
               </div>
-              <label><span>求人内容（求人票のテキストを貼り付け、またはファイルを添付）<span className="required-mark">*</span></span>
-                <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など" disabled={isBusy} />
+              <label><span>求人内容（任意 — 求人票のテキストを貼り付け、またはファイルを添付）</span>
+                <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など。空欄の場合は、企業名（とポジション名）からWeb検索で企業情報を調べ、一般的にマッチしそうな候補者と推奨ポジションを提案します" disabled={isBusy} />
               </label>
               <div className="blind-resume-files">
                 <button type="button" className="secondary-action-button" onClick={() => fileInputRef.current?.click()} disabled={isBusy}>求人票ファイルを添付（PDF/Word）</button>
@@ -8496,7 +8522,7 @@ const BlindResumeModal: React.FC<{
                       </select>
                     )}
                     {scope === 'department' && (
-                      <select value={department} onChange={e => setDepartment(e.target.value as Department)} disabled={isBusy}>
+                      <select value={department} onChange={e => { departmentTouchedRef.current = true; setDepartment(e.target.value as Department); }} disabled={isBusy}>
                         <option value="F+">F+</option>
                         <option value="AC">AC</option>
                       </select>
@@ -8516,13 +8542,26 @@ const BlindResumeModal: React.FC<{
 
           {step === 'select' && (
             <div>
+              {companyResearch && (
+                <details className="blind-resume-research">
+                  <summary>求人内容が無いため、Web検索で調べた企業情報をもとに選んでいます（クリックで内容と出典を表示）</summary>
+                  <p className="blind-resume-research-text">{companyResearch.text}</p>
+                  {companyResearch.sources.length > 0 && (
+                    <ul className="blind-resume-research-sources">
+                      {companyResearch.sources.map(src => (
+                        <li key={src.uri}><a href={src.uri} target="_blank" rel="noopener noreferrer">{src.title}</a></li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
+              )}
               <p className="field-hint">
                 マッチ度の高い順に表示しています（{pool.length}名中）。上位{wantedCount}名を選択済み — チェックで入れ替えられます。氏名はこの画面にだけ表示され、PDFには載りません。
               </p>
               <div className="table-container">
                 <table className="blind-resume-match-table">
                   <thead>
-                    <tr><th></th><th>マッチ度</th><th>候補者</th><th>担当</th><th>ステータス</th><th>年齢・現職</th><th>推薦理由／懸念点</th></tr>
+                    <tr><th></th><th>マッチ度</th><th>候補者</th><th>担当</th><th>ステータス</th><th>年齢・現職</th><th>推奨ポジション</th><th>推薦理由／懸念点</th></tr>
                   </thead>
                   <tbody>
                     {matches.map(m => {
@@ -8542,6 +8581,7 @@ const BlindResumeModal: React.FC<{
                           <td>{entry.ownerLabel}</td>
                           <td>{entry.status}</td>
                           <td>{c.age ? `${c.age}歳` : '—'}<div className="sub-text">{c.currentCompany || '現職未入力'}{c.jobType ? ` ／ ${c.jobType}` : ''}</div></td>
+                          <td>{m.recommendedPosition || '—'}</td>
                           <td>{m.reason}{m.concern && <div className="blind-resume-concern">懸念: {m.concern}</div>}</td>
                         </tr>
                       );
@@ -8568,6 +8608,7 @@ const BlindResumeModal: React.FC<{
                       </button>
                     </div>
                     {leaks.length > 0 && <p className="blind-resume-error">個人情報が残っている可能性があります: {leaks.join('、')}</p>}
+                    <label>推奨ポジション（空欄ならPDFに載せません）<input type="text" value={content.recommendedPosition} onChange={e => updateContent(key, { recommendedPosition: e.target.value })} /></label>
                     <label>キャッチ<input type="text" value={content.headline} onChange={e => updateContent(key, { headline: e.target.value })} /></label>
                     <label>表紙の適合ポイント<input type="text" value={content.coverPoint} onChange={e => updateContent(key, { coverPoint: e.target.value })} /></label>
                     <label>推薦ポイント（1行に1つ）<textarea rows={3} value={content.matchPoints.join('\n')} onChange={e => updateContent(key, { matchPoints: linesToArray(e.target.value) })} /></label>
@@ -8594,10 +8635,9 @@ const BlindResumeModal: React.FC<{
             </div>
           )}
         </div>
-        <div className="modal-footer">
+        <div className="blind-resume-page-footer">
           {step === 'input' && (
             <>
-              <button type="button" onClick={onClose} className="cancel-button" disabled={isBusy}>キャンセル</button>
               <button type="button" onClick={handleSearch} className="submit-button" disabled={isBusy}>候補者を探す</button>
             </>
           )}
@@ -8616,7 +8656,6 @@ const BlindResumeModal: React.FC<{
             </>
           )}
         </div>
-      </div>
     </div>
   );
 };
@@ -16010,7 +16049,7 @@ const App: React.FC = () => {
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
   // View state
-  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline'>('personal_kpi');
+  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline' | 'blind_resume'>('personal_kpi');
   const [allUsersData, setAllUsersData] = useState<Record<string, UserData>>({});
 
   // BCA事業部 header switcher — 'BCA' shows F+ and AC combined (not a real assignment of its
@@ -16048,7 +16087,10 @@ const App: React.FC = () => {
   // 設定済みでも「未設定」として見えてしまう。ヘッダーの案内バーから再許可を促す。
   const [driveReauthNeeded, setDriveReauthNeeded] = useState(false);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
-  const [isBlindResumeModalOpen, setIsBlindResumeModalOpen] = useState(false);
+  // ブラインドレジュメのタブは一度開いたら以後マウントしたままにする（他のタブを見に行っても
+  // 入力中の求人内容や生成済みのレジュメが消えないように）。
+  const [hasOpenedBlindResume, setHasOpenedBlindResume] = useState(false);
+  useEffect(() => { if (view === 'blind_resume') setHasOpenedBlindResume(true); }, [view]);
   // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
   // write directly into a specific teammate's own Drive file.
   const [driveFileIdByEmail, setDriveFileIdByEmail] = useState<Record<string, string>>({});
@@ -19611,6 +19653,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
+            <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'}>ブラインドレジュメ</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
@@ -20533,25 +20576,20 @@ const App: React.FC = () => {
             )}
           </div>
         )}
+        {hasOpenedBlindResume && currentIdentity && (
+          <div style={{ display: view === 'blind_resume' ? undefined : 'none' }}>
+            <BlindResumeView
+              currentUserEmail={currentIdentity.email}
+              currentUserLabel={currentUserData?.displayName || currentIdentity.name || currentIdentity.email}
+              ownCandidates={candidates}
+              ownDeletedCandidateIds={currentUserData?.deletedCandidateIds || []}
+              teams={teams}
+              memberDepartments={memberDepartments}
+            />
+          </div>
+        )}
         {view === 'pipeline' && (
           <>
-            <div className="google-tasks-sync-bar blind-resume-launch-bar">
-              <span className="google-tasks-sync-label">求人にマッチする候補者を探して、ブラインドレジュメ（氏名・連絡先なし）を1つのPDFにまとめられます</span>
-              <button type="button" onClick={() => setIsBlindResumeModalOpen(true)} className="secondary-action-button">
-                ブラインドレジュメ作成
-              </button>
-            </div>
-            {isBlindResumeModalOpen && currentIdentity && (
-              <BlindResumeModal
-                onClose={() => setIsBlindResumeModalOpen(false)}
-                currentUserEmail={currentIdentity.email}
-                currentUserLabel={currentUserData?.displayName || currentIdentity.name || currentIdentity.email}
-                ownCandidates={candidates}
-                ownDeletedCandidateIds={currentUserData?.deletedCandidateIds || []}
-                teams={teams}
-                memberDepartments={memberDepartments}
-              />
-            )}
             <div className="google-tasks-sync-bar">
               <span className="google-tasks-sync-label">選考予定はGoogleタスクに自動で同期されます</span>
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem' }}>

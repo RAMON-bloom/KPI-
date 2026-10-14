@@ -44,6 +44,12 @@ export interface MatchResult {
   score: number; // 0-100
   reason: string;
   concern: string;
+  recommendedPosition: string; // 推薦先で最も合いそうなポジション（不明なら空文字）
+}
+
+export interface CompanyResearch {
+  text: string;
+  sources: { title: string; uri: string }[];
 }
 
 export interface BlindCareer {
@@ -54,6 +60,7 @@ export interface BlindCareer {
 }
 
 export interface BlindResumeContent {
+  recommendedPosition: string;
   headline: string;
   careerSummary: string;
   careers: BlindCareer[];
@@ -168,6 +175,40 @@ const runWithConcurrency = async <T, R>(items: T[], limit: number, fn: (item: T)
   return results;
 };
 
+/**
+ * 求人内容が無いときに、企業名（＋任意のポジション名）からWeb検索（GeminiのGoogle検索
+ * グラウンディング）で企業情報と採用ニーズの見立てを作る。以降のマッチング・レジュメ生成では
+ * これを求人情報の代わりに使う。検索ツールとJSON出力は同時に使えないため、ここはテキストで返す。
+ */
+export const researchCompany = async (companyName: string, positionTitle: string): Promise<CompanyResearch> => {
+  const prompt = [
+    `人材紹介会社のキャリアアドバイザーとして、「${companyName}」に候補者を推薦する準備のため、Web検索で次の点を調べて日本語で簡潔に整理してください。`,
+    positionTitle ? `担当者が想定しているポジション: ${positionTitle}` : '',
+    '1. 企業概要（事業内容・主要サービス・業界・規模・拠点）',
+    '2. 現在募集中、または採用ニーズが高いと考えられる職種・ポジション（採用ページや求人媒体の掲載があればそれを優先し、無ければ事業内容から推測したものと明記する）',
+    '3. 各ポジションで求められそうな経験・スキル・人物像、想定年収レンジ（分かる範囲で）',
+    '4. 社風・カルチャーや選考で重視されそうな点',
+    '同名の別企業と混同しないよう注意し、確認できなかった点は「不明」と書くこと。',
+  ].filter(Boolean).join('\n');
+  const response = await newAi().models.generateContent({
+    model: MODEL,
+    contents: prompt,
+    config: { tools: [{ googleSearch: {} }] },
+  });
+  const text = (response.text || '').trim();
+  if (!text) throw new Error('企業情報のWeb検索結果が空でした');
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  const seen = new Set<string>();
+  const sources: { title: string; uri: string }[] = [];
+  chunks.forEach(c => {
+    const uri = c.web?.uri || '';
+    if (!uri || seen.has(uri)) return;
+    seen.add(uri);
+    sources.push({ title: c.web?.title || uri, uri });
+  });
+  return { text, sources };
+};
+
 const MATCH_CHUNK_SIZE = 60;
 
 const scoreChunk = async (
@@ -176,12 +217,18 @@ const scoreChunk = async (
   extraConditions: string,
   profiles: { id: string; text: string }[],
   topK: number,
-): Promise<{ id: string; score: number; reason: string; concern: string }[]> => {
+  hasJobDescription: boolean,
+): Promise<{ id: string; score: number; reason: string; concern: string; recommendedPosition?: string }[]> => {
   const instruction = [
-    `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」の求人情報（上記）に対して、以下の候補者リストの中からマッチしそうな候補者を選び、マッチ度を採点してください。`,
+    hasJobDescription
+      ? `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」の求人情報（上記）に対して、以下の候補者リストの中からマッチしそうな候補者を選び、マッチ度を採点してください。`
+      : `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName}」の具体的な求人票は無く、上記はWeb検索で調べた企業情報と採用ニーズの見立てです。これをもとに、この企業で活躍が見込め、採用ニーズに合いそうな候補者を以下の候補者リストから選び、マッチ度を採点してください。`,
     extraConditions ? `担当者からの追加条件: ${extraConditions}` : '',
-    '採点基準: 求人の必須要件・歓迎要件と候補者の職種・経験・スキルの一致度を最重視し、年齢・年収レンジ（現年収・希望年収と求人の提示年収の整合）、入社時期も考慮する。0〜100の整数で、80以上は「すぐ推薦できる」、60台は「条件次第で推薦可」、40未満は「ほぼ合わない」の目安。',
+    hasJobDescription
+      ? '採点基準: 求人の必須要件・歓迎要件と候補者の職種・経験・スキルの一致度を最重視し、年齢・年収レンジ（現年収・希望年収と求人の提示年収の整合）、入社時期も考慮する。0〜100の整数で、80以上は「すぐ推薦できる」、60台は「条件次第で推薦可」、40未満は「ほぼ合わない」の目安。'
+      : '採点基準: 企業の事業内容と採用ニーズが高そうな職種に対し、候補者の職種・経験・スキルがどれだけ一致するかを最重視し、業界・企業規模への適性、年齢・年収レンジの現実性も考慮する。0〜100の整数で、80以上は「すぐ推薦できる」、60台は「条件次第で推薦可」、40未満は「ほぼ合わない」の目安。',
     `マッチ度の高い順に最大${topK}名を返してください（明らかに合わない候補者は含めなくてよい）。reasonは推薦理由を60字程度、concernは懸念点（無ければ空文字）を40字程度で、いずれも候補者の氏名には触れずに書くこと。`,
+    'recommendedPositionには、その候補者がこの企業で最も活躍できそうなポジション名（例: 法人営業（製造業向け）、経理（連結決算））を20字程度で書く。求人が1つのポジションに限られる場合はそのポジション名でよい。判断できなければ空文字。',
     'ステータスが「見送り」「辞退」「非表示」「掘り起し」の候補者も、過去の候補者の掘り起こし対象として同じ基準で評価してよい。',
     '',
     '候補者リスト:',
@@ -201,8 +248,9 @@ const scoreChunk = async (
             score: { type: Type.NUMBER, description: 'マッチ度（0〜100の整数）' },
             reason: { type: Type.STRING, description: '推薦理由' },
             concern: { type: Type.STRING, description: '懸念点（無ければ空文字）' },
+            recommendedPosition: { type: Type.STRING, description: '推奨ポジション（判断できなければ空文字）' },
           },
-          required: ['id', 'score', 'reason', 'concern'],
+          required: ['id', 'score', 'reason', 'concern', 'recommendedPosition'],
         },
       },
     },
@@ -222,9 +270,10 @@ export const matchCandidates = async (params: {
   companyName: string;
   extraConditions: string;
   wantedCount: number;
+  hasJobDescription: boolean;
   onProgress?: (message: string) => void;
 }): Promise<MatchResult[]> => {
-  const { pool, jobParts, companyName, extraConditions, wantedCount, onProgress } = params;
+  const { pool, jobParts, companyName, extraConditions, wantedCount, hasJobDescription, onProgress } = params;
   const idToKey = new Map<string, string>();
   const keyToEntry = new Map<string, BlindPoolEntry>();
   const profiles = pool.map((entry, i) => {
@@ -244,6 +293,7 @@ export const matchCandidates = async (params: {
       jobParts, companyName, extraConditions,
       chunk.map(p => ({ id: p.id, text: buildMatchingProfile(p.entry, p.id, chunks.length === 1) })),
       chunks.length === 1 ? shortlistSize : Math.min(chunk.length, Math.max(wantedCount * 2, 8)),
+      hasJobDescription,
     );
     done++;
     if (chunks.length > 1) onProgress?.(`候補者を照合中…（${done}/${chunks.length}グループ完了）`);
@@ -260,6 +310,7 @@ export const matchCandidates = async (params: {
       jobParts, companyName, extraConditions,
       finalists.map(f => ({ id: f.id, text: buildMatchingProfile(byId.get(f.id)!.entry, f.id, true) })),
       finalists.length,
+      hasJobDescription,
     );
     const rescoredValid = rescored.filter(r => idToKey.has(r.id));
     if (rescoredValid.length > 0) scored = rescoredValid;
@@ -281,6 +332,7 @@ export const matchCandidates = async (params: {
         score: Math.max(0, Math.min(100, Math.round(Number(r.score) || 0))),
         reason: redactPersonalInfo(r.reason || '', c),
         concern: redactPersonalInfo(r.concern || '', c),
+        recommendedPosition: redactPersonalInfo((r.recommendedPosition || '').trim(), c),
       };
     });
 };
@@ -290,13 +342,15 @@ export const generateBlindResume = async (params: {
   entry: BlindPoolEntry;
   jobParts: JobContentPart[];
   companyName: string;
+  recommendedPosition: string;
 }): Promise<BlindResumeContent> => {
-  const { entry, jobParts, companyName } = params;
+  const { entry, jobParts, companyName, recommendedPosition } = params;
   const c = entry.candidate;
   const summary = redactPersonalInfo((c.summary || '').trim(), c);
   const notes = redactPersonalInfo(collectNotes(c), c);
   const instruction = [
-    `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」（求人情報は上記）へ候補者を匿名で推薦するための「ブラインドレジュメ」の本文を作成してください。`,
+    `あなたは人材紹介会社のキャリアアドバイザーです。推薦先企業「${companyName || '（企業名未入力）'}」（求人情報または企業情報は上記）へ候補者を匿名で推薦するための「ブラインドレジュメ」の本文を作成してください。`,
+    recommendedPosition ? `推薦するポジション: ${recommendedPosition}（このポジションへの適合が伝わるように書く）` : '',
     '',
     '■候補者の登録情報',
     ...basicFacts(c),
@@ -346,6 +400,7 @@ export const generateBlindResume = async (params: {
   const parsed = JSON.parse((response.text || '{}').trim());
   const r = (s: unknown) => redactPersonalInfo(typeof s === 'string' ? s.trim() : '', c);
   return {
+    recommendedPosition,
     headline: r(parsed.headline),
     careerSummary: r(parsed.careerSummary),
     careers: (Array.isArray(parsed.careers) ? parsed.careers : []).map((x: any) => ({
@@ -360,7 +415,7 @@ export const generateBlindResume = async (params: {
 /** 生成結果（編集後を含む）に、元データの氏名・電話・メールが残っていないか確認する。 */
 export const findLeakedPersonalInfo = (content: BlindResumeContent, c: BlindSourceCandidate): string[] => {
   const all = [
-    content.headline, content.careerSummary, content.coverPoint,
+    content.recommendedPosition, content.headline, content.careerSummary, content.coverPoint,
     ...content.careers.flatMap(x => [x.period, x.company, x.role, x.description]),
     ...content.skills, ...content.matchPoints,
   ].join('\n');
@@ -406,10 +461,12 @@ export const renderBlindResumeHtml = (params: {
   const [y, mo, d] = createdDate.split('-');
   const dateLabel = `${y}年${Number(mo)}月${Number(d)}日`;
   const salaryCell = (v?: number) => (v ? `${v}万円` : '—');
+  const showPosition = items.some(i => i.content.recommendedPosition);
 
   const coverRows = items.map(({ label, candidate: c, content }) => `
       <tr>
         <td class="nowrap"><strong>候補者${esc(label)}</strong></td>
+        ${showPosition ? `<td>${esc(content.recommendedPosition || '—')}</td>` : ''}
         <td class="nowrap">${c.age ? `${c.age}歳` : '—'}</td>
         <td>${esc(c.currentCompany || '—')}${c.jobType ? `<div class="sub">${esc(c.jobType)}</div>` : ''}</td>
         ${options.showCurrentSalary ? `<td class="nowrap">${salaryCell(c.currentSalary)}</td>` : ''}
@@ -419,6 +476,7 @@ export const renderBlindResumeHtml = (params: {
 
   const pages = items.map(({ label, candidate: c, content }) => {
     const facts: [string, string][] = [
+      ...(content.recommendedPosition ? [['推奨ポジション', content.recommendedPosition] as [string, string]] : []),
       ['年齢', c.age ? `${c.age}歳` : '—'],
       ['最終学歴', c.education || '—'],
       ['現職', c.currentCompany || '—'],
@@ -496,7 +554,7 @@ export const renderBlindResumeHtml = (params: {
     <p class="to">${esc(companyName || '')}${companyName ? ' 御中' : ''}</p>
     <p class="meta">${positionTitle ? `対象ポジション: ${esc(positionTitle)}　／　` : ''}作成日: ${dateLabel}　／　ご推薦人数: ${items.length}名</p>
     <table>
-      <thead><tr><th>候補者</th><th>年齢</th><th>現職</th>${options.showCurrentSalary ? '<th>現年収</th>' : ''}${options.showDesiredSalary ? '<th>希望年収</th>' : ''}<th>適合ポイント</th></tr></thead>
+      <thead><tr><th>候補者</th>${showPosition ? '<th>推奨ポジション</th>' : ''}<th>年齢</th><th>現職</th>${options.showCurrentSalary ? '<th>現年収</th>' : ''}${options.showDesiredSalary ? '<th>希望年収</th>' : ''}<th>適合ポイント</th></tr></thead>
       <tbody>${coverRows}</tbody>
     </table>
     <p class="note">※ 個人情報保護のため、氏名・連絡先等の個人を特定できる情報は記載しておりません。ご興味をお持ちいただけた候補者がいらっしゃいましたら、候補者記号（例: 候補者A）でお知らせください。</p>
