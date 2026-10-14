@@ -4013,3 +4013,4 @@ p.memo-content-text {
 .similar-career-app.withdrawn { background: #f3f4f6; border-color: #d1d5db; color: #4b5563; }
 .similar-career-app.in-progress { background: #e0ecff; border-color: #b6d4fe; color: var(--primary-color-dark); }
 .similar-career-app.not-started { background: #fff; border-color: #e5e7eb; color: #6b7280; }
+.similar-career-mode-hint { font-size: 0.8rem; color: var(--text-muted-color); margin: -0.5rem 0 0.75rem; }

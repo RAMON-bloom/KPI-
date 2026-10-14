@@ -286,6 +286,82 @@ export const findSimilarCandidates = async (params: {
     });
 };
 
+// ---- クイックリサーチ（Geminiを使わない類似度判定） ----
+// 職種・経歴概要の文字の重なり（2文字ずつの組の一致率）と、年齢・現年収の近さ、現職企業の一致を
+// 重み付けして0〜100点にする。AI判定ほど文脈は読めないが、数百人でも一瞬で終わる。
+
+const bigrams = (text: string): Set<string> => {
+  const s = (text || '').toLowerCase().replace(/[\s　、。・,.()（）「」【】\-ー/／:：]+/g, '');
+  const set = new Set<string>();
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+  return set;
+};
+
+// 一致率: 共通の組の数 ÷ 小さい方の組の数（長さの違う文章どうしでも、短い方がどれだけ含まれるか）
+const overlap = (a: Set<string>, b: Set<string>): number => {
+  if (a.size === 0 || b.size === 0) return 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let hit = 0;
+  small.forEach(x => { if (large.has(x)) hit++; });
+  return hit / small.size;
+};
+
+const careerText = (c: SimilarSourceCandidate) => [c.summary || '', collectNotes(c).slice(0, 1500)].join(' ');
+
+export const findSimilarCandidatesQuick = (params: {
+  target: SimilarSourceCandidate;
+  pool: SimilarPoolEntry[];
+  wantedCount: number;
+  normalizeCompanyName: (name: string) => string;
+}): SimilarMatch[] => {
+  const { target, pool, wantedCount, normalizeCompanyName } = params;
+  const tJob = bigrams(target.jobType || '');
+  const tCareer = bigrams(careerText(target));
+  const tCompany = normalizeCompanyName(target.currentCompany || '');
+  const scored = pool.map(entry => {
+    const c = entry.candidate;
+    const parts: { weight: number; value: number }[] = [];
+    const reasons: string[] = [];
+    const cJob = bigrams(c.jobType || '');
+    if (tJob.size && cJob.size) {
+      const v = overlap(tJob, cJob);
+      parts.push({ weight: 35, value: v });
+      if (v >= 0.5) reasons.push(`職種が近い（${c.jobType}）`);
+    }
+    const cCareer = bigrams(careerText(c));
+    if (tCareer.size && cCareer.size) {
+      // 文章どうしは偶然の一致も多いので、一致率0.6でほぼ満点になるよう伸ばす
+      const v = Math.min(1, overlap(tCareer, cCareer) / 0.6);
+      parts.push({ weight: 35, value: v });
+      if (v >= 0.6) reasons.push('経歴の内容が近い');
+    }
+    if (target.age && c.age) {
+      const diff = Math.abs(target.age - c.age);
+      parts.push({ weight: 15, value: Math.max(0, 1 - diff / 10) });
+      if (diff <= 3) reasons.push(`年齢が近い（${c.age}歳）`);
+    }
+    if (target.currentSalary && c.currentSalary) {
+      const diff = Math.abs(target.currentSalary - c.currentSalary);
+      parts.push({ weight: 10, value: Math.max(0, 1 - diff / 300) });
+      if (diff <= 100) reasons.push(`年収帯が近い（${c.currentSalary}万円）`);
+    }
+    if (tCompany && c.currentCompany) {
+      const same = normalizeCompanyName(c.currentCompany) === tCompany;
+      parts.push({ weight: 5, value: same ? 1 : 0 });
+      if (same) reasons.push('現職が同じ企業');
+    }
+    const totalWeight = parts.reduce((s, p) => s + p.weight, 0);
+    // 比べられる項目が少ないほど偶然の一致になりやすいので、その分を割り引く
+    const coverage = Math.min(1, totalWeight / 70);
+    const score = totalWeight ? Math.round((parts.reduce((s, p) => s + p.weight * p.value, 0) / totalWeight) * 100 * coverage) : 0;
+    return { key: similarKey(entry), score, reason: reasons.join('・') || '一部の項目が近い' };
+  });
+  return scored
+    .filter(s => s.score >= 30)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, wantedCount);
+};
+
 /** 似ている人たちの選考実績を企業ごとに集計する（Geminiを使わず、登録データそのまま）。 */
 export const aggregateByCompany = (
   entries: SimilarPoolEntry[],

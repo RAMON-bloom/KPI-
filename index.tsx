@@ -28,7 +28,7 @@ const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタン�
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPlan, estimateGeneratePlan, GENERATE_CONCURRENCY, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
-import { findSimilarCandidates, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
+import { findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '類似経歴の過去事例リサーチに「クイック」判定を追加した（AIを使わず職種・経歴・年齢・年収の近さで数秒で似ている人を選び、集計表をすぐ表示します。傾向の分析だけ後からAIが追加します）。あわせて対象範囲に事業部（F+・AC）を、似ている人の人数に「最大5名」を追加した',
       '候補者パイプラインに「類似経歴の過去事例をリサーチ」を追加した。候補者カードの詳細、または新規登録した直後に表示されるボタンから、社内の過去・現在の候補者の中で経歴が似ている人を探し、その人たちがどの企業に応募してどんな選考結果（書類通過・内定・見送り・辞退）になったかを企業別に集計します。あわせてAIが、通過・見送りの傾向や応募をおすすめできる企業・注意が必要な企業を整理します',
       'ブラインドレジュメ作成の各ステップ（求人と対象範囲／候補者を選ぶ／内容確認・PDF出力）に「最初からやり直す」ボタンを追加した。入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初の画面から始め直せます（処理中でも中断してやり直せます）',
       'ブラインドレジュメ作成で、「〇名の候補者を求人と照合しています…」などの処理中の表示を、ボタンの上ではなくボタンの左側（同じ行）に出すようにした',
@@ -11820,14 +11821,33 @@ const OUTCOME_BADGE_CLASS: Record<OutcomeKind, string> = {
   offer: 'offer', declined: 'declined', withdrawn: 'withdrawn', in_progress: 'in-progress', not_started: 'not-started',
 };
 
+type SimilarCareerScope = 'all' | 'self' | `dept:${Department}`;
+type SimilarCareerMode = 'quick' | 'ai';
+const SIMILAR_CAREER_MODE_KEY = 'kpiSimilarCareerMode';
+const loadSimilarCareerMode = (): SimilarCareerMode => {
+  try { return localStorage.getItem(SIMILAR_CAREER_MODE_KEY) === 'quick' ? 'quick' : 'ai'; } catch { return 'ai'; }
+};
+
 const SimilarCareerResearchModal: React.FC<{
   candidate: Candidate;
   currentUserEmail: string;
   ownCandidates: Candidate[];
+  memberDepartments: Record<string, Department>;
   onClose: () => void;
-}> = ({ candidate: target, currentUserEmail, ownCandidates, onClose }) => {
-  const [scope, setScope] = useState<'all' | 'self'>('all');
+}> = ({ candidate: target, currentUserEmail, ownCandidates, memberDepartments, onClose }) => {
+  const myDepartment = useMemo(() => {
+    const key = Object.keys(memberDepartments).find(e => normalizeEmail(e) === normalizeEmail(currentUserEmail));
+    return key ? memberDepartments[key] : undefined;
+  }, [memberDepartments, currentUserEmail]);
+  const [scope, setScope] = useState<SimilarCareerScope>('all');
   const [wantedCount, setWantedCount] = useState(15);
+  // クイック: Geminiを使わず職種・経歴の文字の重なりと年齢・年収の近さで即座に判定する。
+  // AI: Geminiで経歴の中身を読んで判定する（精度は高いが人数に応じて数十秒〜かかる）。
+  const [mode, setMode] = useState<SimilarCareerMode>(loadSimilarCareerMode);
+  const changeMode = (m: SimilarCareerMode) => {
+    setMode(m);
+    try { localStorage.setItem(SIMILAR_CAREER_MODE_KEY, m); } catch { /* 記憶できなくても動作に影響なし */ }
+  };
   const [teammates, setTeammates] = useState<{ email: string; data: UserData }[] | null>(
     similarCareerTeammatesCache && Date.now() - similarCareerTeammatesCache.at < SIMILAR_CAREER_CACHE_MS ? similarCareerTeammatesCache.data : null
   );
@@ -11840,6 +11860,7 @@ const SimilarCareerResearchModal: React.FC<{
     analysis: SimilarAnalysis | null;
     analysisError: string;
     poolSize: number;
+    mode: SimilarCareerMode;
   } | null>(null);
   const [showAllCompanies, setShowAllCompanies] = useState(false);
   const isBusy = !!busyMessage;
@@ -11847,7 +11868,7 @@ const SimilarCareerResearchModal: React.FC<{
   const targetKey = `${normalizeEmail(targetOwner)}::${target.id}`;
 
   useEffect(() => {
-    if (scope !== 'all' || teammates) return;
+    if (scope === 'self' || teammates) return;
     let cancelled = false;
     loadAllTeammatesData<UserData>()
       .then(loaded => {
@@ -11871,18 +11892,21 @@ const SimilarCareerResearchModal: React.FC<{
       if (usableApplications(c).length === 0) return;
       entries.push({ candidate: c, ownerEmail: email, ownerLabel: label });
     };
+    const deptByEmail = new Map(Object.entries(memberDepartments).map(([e, d]) => [normalizeEmail(e), d]));
+    const inScope = (email: string) =>
+      scope === 'all' || scope === 'self' || `dept:${deptByEmail.get(normalizeEmail(email)) || ''}` === scope;
     // 自分の候補者はDrive上のコピーではなく、このブラウザの最新データを使う。
-    ownCandidates.forEach(c => add(c, currentUserEmail, '自分'));
+    if (inScope(currentUserEmail)) ownCandidates.forEach(c => add(c, currentUserEmail, '自分'));
     if (scope === 'self') return entries;
     if (!teammates) return null;
     teammates.forEach(({ email, data }) => {
-      if (normalizeEmail(email) === selfKey) return;
+      if (normalizeEmail(email) === selfKey || !inScope(email)) return;
       const deleted = new Set(data.deletedCandidateIds || []);
       const label = data.displayName || email;
       (data.candidates || []).forEach(c => { if (!deleted.has(c.id)) add(c, email, label); });
     });
     return entries;
-  }, [scope, teammates, ownCandidates, currentUserEmail, targetKey]);
+  }, [scope, teammates, ownCandidates, currentUserEmail, targetKey, memberDepartments]);
 
   const profileReady = hasEnoughProfile(target);
 
@@ -11893,7 +11917,9 @@ const SimilarCareerResearchModal: React.FC<{
     setResult(null);
     setShowAllCompanies(false);
     try {
-      const matches = await findSimilarCandidates({ target, pool, wantedCount, onProgress: setBusyMessage });
+      const matches = mode === 'quick'
+        ? findSimilarCandidatesQuick({ target, pool, wantedCount, normalizeCompanyName })
+        : await findSimilarCandidates({ target, pool, wantedCount, onProgress: setBusyMessage });
       if (matches.length === 0) {
         setErrorMessage('経歴が似ている候補者が見つかりませんでした。経歴概要や職種を登録すると精度が上がります。');
         return;
@@ -11901,7 +11927,7 @@ const SimilarCareerResearchModal: React.FC<{
       const byKey = new Map<string, SimilarPoolEntry>(pool.map(e => [similarKey(e), e] as [string, SimilarPoolEntry]));
       const similar = matches.filter(m => byKey.has(m.key)).map(m => ({ entry: byKey.get(m.key)!, match: m }));
       const companyStats = aggregateByCompany(similar.map(s => s.entry), normalizeCompanyName);
-      setResult({ similar, companyStats, analysis: null, analysisError: '', poolSize: pool.length });
+      setResult({ similar, companyStats, analysis: null, analysisError: '', poolSize: pool.length, mode });
       setBusyMessage(`似ている${similar.length}名の選考結果から傾向を分析しています…`);
       try {
         const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats });
@@ -11949,15 +11975,25 @@ const SimilarCareerResearchModal: React.FC<{
           <div className="similar-career-controls">
             <label>
               対象範囲
-              <select value={scope} onChange={e => setScope(e.target.value as 'all' | 'self')} disabled={isBusy}>
+              <select value={scope} onChange={e => setScope(e.target.value as SimilarCareerScope)} disabled={isBusy}>
                 <option value="all">全ユーザーの候補者</option>
+                {(['F+', 'AC'] as Department[]).map(d => (
+                  <option key={d} value={`dept:${d}`}>事業部: {d}{myDepartment === d ? '（自分の所属）' : ''}</option>
+                ))}
                 <option value="self">自分の候補者のみ</option>
               </select>
             </label>
             <label>
               似ている人の人数
               <select value={wantedCount} onChange={e => setWantedCount(Number(e.target.value))} disabled={isBusy}>
-                {[10, 15, 20, 30].map(n => <option key={n} value={n}>最大{n}名</option>)}
+                {[5, 10, 15, 20, 30].map(n => <option key={n} value={n}>最大{n}名</option>)}
+              </select>
+            </label>
+            <label>
+              判定方法
+              <select value={mode} onChange={e => changeMode(e.target.value as SimilarCareerMode)} disabled={isBusy}>
+                <option value="quick">クイック（数秒）</option>
+                <option value="ai">AIで詳しく判定（数十秒〜）</option>
               </select>
             </label>
             <span className="similar-career-pool-count">
@@ -11972,6 +12008,11 @@ const SimilarCareerResearchModal: React.FC<{
               {result ? 'もう一度リサーチ' : 'リサーチ開始'}
             </button>
           </div>
+          <p className="similar-career-mode-hint">
+            {mode === 'quick'
+              ? 'クイック: AIを使わず、職種・経歴概要の言葉の重なりと年齢・年収の近さで似ている人を即座に選びます。集計表はすぐ表示され、傾向の分析だけAIが後から追加します。'
+              : 'AIで詳しく判定: 経歴の中身をAIが読んで似ている人を選びます。精度は高めですが、対象人数に応じて数十秒〜数分かかります。'}
+          </p>
           {isBusy && <div className="blind-resume-busy" role="status" aria-live="polite">{busyMessage}</div>}
           {errorMessage && <div className="similar-career-error">{errorMessage}</div>}
 
@@ -12006,7 +12047,7 @@ const SimilarCareerResearchModal: React.FC<{
                     </div>
                   </div>
                   {result.analysis.advice && <p className="similar-career-advice"><strong>アドバイス:</strong> {result.analysis.advice}</p>}
-                  <p className="similar-career-note">※ 社内データ{result.poolSize}名のうち似ている{result.similar.length}名の実績に基づくAIの整理です。件数が少ない企業は参考程度にご覧ください。</p>
+                  <p className="similar-career-note">※ 社内データ{result.poolSize}名のうち似ている{result.similar.length}名（{result.mode === 'quick' ? 'クイック判定' : 'AI判定'}）の実績に基づくAIの整理です。件数が少ない企業は参考程度にご覧ください。</p>
                 </div>
               ) : result.analysisError ? (
                 <div className="similar-career-error">{result.analysisError}</div>
@@ -13348,13 +13389,15 @@ const CandidatePipelineView: React.FC<{
     // その更新関数（UserData.meetingForecast）。
     meetingForecast: MeetingForecastSettings | undefined;
     onUpdateMeetingForecast: (updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => void;
+    // 類似経歴リサーチの対象範囲「事業部」の判定用（メールアドレス→所属部署）。
+    memberDepartments: Record<string, Department>;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, onDeleteCandidate, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate, onDeleteManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters, weekStartsOn,
-    meetingForecast, onUpdateMeetingForecast,
+    meetingForecast, onUpdateMeetingForecast, memberDepartments,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
@@ -13931,6 +13974,7 @@ const CandidatePipelineView: React.FC<{
                   candidate={similarResearchCandidate}
                   currentUserEmail={currentUserEmail}
                   ownCandidates={candidates.filter(isOwn)}
+                  memberDepartments={memberDepartments}
                   onClose={() => setSimilarResearchCandidate(null)}
               />
             )}
@@ -21099,6 +21143,7 @@ const App: React.FC = () => {
               </div>
             </div>
             <CandidatePipelineView
+                memberDepartments={memberDepartments}
                 candidates={pipelineCandidates}
                 allMedia={allMedia}
                 onSave={handleSaveCandidate}
