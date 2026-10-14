@@ -28,7 +28,7 @@ const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタン�
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
 import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPlan, estimateGeneratePlan, GENERATE_CONCURRENCY, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
-import { findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
+import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '類似経歴リサーチの実行中に「キャンセル」ボタンを表示し、途中で中止できるようにした（集計表まで出ている場合はそのまま残ります）。実行中でも画面を閉じられるようにした',
       '類似経歴リサーチで、リサーチ対象の候補者本人が「経歴が似ている候補者」に出てしまうことがある不具合を修正した（他のメンバーが同じ人を登録している場合なども、氏名・電話番号・メールアドレスが一致すれば本人として除外します）',
       '候補者カードの「類似経歴リサーチ」ボタンを、候補者氏名のすぐ右隣に寄せて表示するようにした',
       '類似経歴リサーチのボタンを候補者カードの氏名の右側に移動した。あわせて「重視する共通点」をフリーワードで入力できるようにした（例: SaaS, マネジメント経験。クイックではキーワードが一致する人を優先し、AI判定では文章での指定も読み取ります）',
@@ -11981,17 +11982,46 @@ const SimilarCareerResearchModal: React.FC<{
 
   const profileReady = hasEnoughProfile(target);
 
+  // 実行中のリサーチのキャンセル用。キャンセルしたらすぐ画面を操作可能に戻し、後から届いた結果は捨てる。
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  const handleCancel = () => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    controller.abort();
+    abortRef.current = null;
+    setBusyMessage('');
+    setResult(prev => {
+      // 集計表まで出ていれば残し、傾向の分析だけ中止扱いにする
+      if (prev && !prev.analysis && !prev.analysisError) return { ...prev, analysisError: '傾向の分析はキャンセルしました（下の集計結果はそのままご覧いただけます）。' };
+      return prev;
+    });
+    setErrorMessage(prev => prev || (result ? '' : 'リサーチをキャンセルしました。'));
+  };
+  const handleClose = () => {
+    abortRef.current?.abort();
+    onClose();
+  };
+
   const handleRun = async () => {
     if (!pool) return;
     if (pool.length === 0) { setErrorMessage('選考企業の記録がある候補者が見つかりませんでした。対象範囲を広げてお試しください。'); return; }
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const signal = controller.signal;
+    // キャンセル後に返ってきた古い実行の結果で画面を書き換えないためのガード
+    const setProgress = (message: string) => { if (!signal.aborted) setBusyMessage(message); };
     setErrorMessage('');
     setResult(null);
     setShowAllCompanies(false);
     try {
       const focus = emphasis.trim();
+      if (mode === 'quick') setBusyMessage('似ている人を探しています…');
       const matches = mode === 'quick'
         ? findSimilarCandidatesQuick({ target, pool, wantedCount, normalizeCompanyName, emphasis: focus })
-        : await findSimilarCandidates({ target, pool, wantedCount, emphasis: focus, onProgress: setBusyMessage });
+        : await findSimilarCandidates({ target, pool, wantedCount, emphasis: focus, onProgress: setProgress, signal });
+      if (signal.aborted) return;
       if (matches.length === 0) {
         setErrorMessage('経歴が似ている候補者が見つかりませんでした。経歴概要や職種を登録すると精度が上がります。');
         return;
@@ -12002,17 +12032,23 @@ const SimilarCareerResearchModal: React.FC<{
       setResult({ similar, companyStats, analysis: null, analysisError: '', poolSize: pool.length, mode });
       setBusyMessage(`似ている${similar.length}名の選考結果から傾向を分析しています…`);
       try {
-        const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats, emphasis: focus });
+        const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats, emphasis: focus, signal });
+        if (signal.aborted) return;
         setResult(prev => (prev ? { ...prev, analysis } : prev));
       } catch (err) {
+        if (signal.aborted || err instanceof SimilarResearchCancelled) return;
         console.error('類似経歴の傾向分析に失敗しました', err);
         setResult(prev => (prev ? { ...prev, analysisError: '傾向の分析に失敗しました（下の集計結果はそのままご覧いただけます）。' } : prev));
       }
     } catch (err) {
+      if (signal.aborted || err instanceof SimilarResearchCancelled) return;
       console.error('類似経歴リサーチに失敗しました', err);
       setErrorMessage(`リサーチに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      setBusyMessage('');
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setBusyMessage('');
+      }
     }
   };
 
@@ -12023,11 +12059,11 @@ const SimilarCareerResearchModal: React.FC<{
   );
 
   return (
-    <div className="modal-overlay" onClick={() => { if (!isBusy) onClose(); }}>
+    <div className="modal-overlay" onClick={() => { if (!isBusy) handleClose(); }}>
       <div className="modal-content similar-career-modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="similar-career-title">
         <div className="modal-header">
           <h3 id="similar-career-title">{target.name || '（氏名未入力）'}さん - 類似経歴の過去事例リサーチ</h3>
-          <button onClick={onClose} className="close-button" aria-label="閉じる" disabled={isBusy}>&times;</button>
+          <button onClick={handleClose} className="close-button" aria-label="閉じる">&times;</button>
         </div>
         <div className="modal-body">
           <p className="modal-description">
@@ -12096,7 +12132,12 @@ const SimilarCareerResearchModal: React.FC<{
               ? 'クイック: AIを使わず、職種・経歴概要の言葉の重なりと年齢・年収の近さで似ている人を即座に選びます。集計表はすぐ表示され、傾向の分析だけAIが後から追加します。'
               : 'AIで詳しく判定: 経歴の中身をAIが読んで似ている人を選びます。精度は高めですが、対象人数に応じて数十秒〜数分かかります。'}
           </p>
-          {isBusy && <div className="blind-resume-busy" role="status" aria-live="polite">{busyMessage}</div>}
+          {isBusy && (
+            <div className="blind-resume-busy similar-career-busy" role="status" aria-live="polite">
+              <span>{busyMessage}</span>
+              <button type="button" className="secondary-action-button" onClick={handleCancel}>キャンセル</button>
+            </div>
+          )}
           {errorMessage && <div className="similar-career-error">{errorMessage}</div>}
 
           {result && (
@@ -12201,7 +12242,7 @@ const SimilarCareerResearchModal: React.FC<{
           )}
         </div>
         <div className="modal-footer">
-          <button type="button" onClick={onClose} className="cancel-button" disabled={isBusy}>閉じる</button>
+          <button type="button" onClick={handleClose} className="cancel-button">閉じる</button>
         </div>
       </div>
     </div>

@@ -4029,3 +4029,4 @@ p.memo-content-text {
 .blind-resume-drop-zone { padding: 1rem; font-size: 0.9rem; }
 .blind-resume-job-input.is-drag-active .blind-resume-drop-zone { border-color: var(--primary-color); color: var(--primary-color-dark); background-color: #fff; }
 .blind-resume-drop-zone[aria-disabled="true"] { cursor: default; opacity: 0.6; }
+.similar-career-busy { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }

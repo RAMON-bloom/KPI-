@@ -88,6 +88,14 @@ export interface SimilarAnalysis {
 
 export const similarKey = (e: SimilarPoolEntry) => `${e.ownerEmail}::${e.candidate.id}`;
 
+/** リサーチがキャンセルされたことを表す例外（画面側ではエラー表示しない）。 */
+export class SimilarResearchCancelled extends Error {
+  constructor() { super('キャンセルしました'); }
+}
+// 使っている@google/genaiのバージョンは送信済みのリクエストを中断できないため、キャンセル後は
+// 次の呼び出しを始めないようにし、返ってきた結果は捨てる。
+const throwIfCancelled = (signal?: AbortSignal) => { if (signal?.aborted) throw new SimilarResearchCancelled(); };
+
 // 選考が前に進んだ順。お見送り・選考辞退は exitedFromStage で「どこで止まったか」を見る。
 const FORWARD_ORDER = ['打診', '書類選考', '適性検査', 'カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談', '内定', '内定承諾'];
 const stageRank = (s?: string) => (s ? FORWARD_ORDER.indexOf(s) : -1);
@@ -231,7 +239,9 @@ export const findSimilarCandidates = async (params: {
   wantedCount: number;
   emphasis?: string;
   onProgress?: (message: string) => void;
+  signal?: AbortSignal;
 }): Promise<SimilarMatch[]> => {
+  const { signal } = params;
   const { target, pool, wantedCount, onProgress } = params;
   const emphasis = (params.emphasis || '').trim();
   const targetProfile = buildProfile(target, 'TARGET', true).replace('[ID: TARGET]\n', '');
@@ -249,12 +259,14 @@ export const findSimilarCandidates = async (params: {
   let done = 0;
   onProgress?.(`${pool.length}名の過去の候補者と経歴を照合しています…`);
   const chunkResults = await runWithConcurrency(chunks, CONCURRENCY, async chunk => {
+    throwIfCancelled(signal);
     const res = await scoreChunk(
       targetProfile,
       chunk.map(p => ({ id: p.id, text: buildProfile(p.entry.candidate, p.id, chunks.length === 1) })),
       chunks.length === 1 ? shortlist : Math.min(chunk.length, Math.max(wantedCount, 8)),
       emphasis,
     );
+    throwIfCancelled(signal);
     done++;
     if (chunks.length > 1) onProgress?.(`経歴を照合中…（${done}/${chunks.length}グループ完了）`);
     return res;
@@ -264,6 +276,7 @@ export const findSimilarCandidates = async (params: {
   if (chunks.length > 1 && scored.length > 0) {
     scored.sort((a, b) => b.score - a.score);
     const finalists = scored.slice(0, shortlist);
+    throwIfCancelled(signal);
     onProgress?.(`上位${finalists.length}名を詳しいプロフィールで再評価しています…`);
     const byId = new Map(profiles.map(p => [p.id, p]));
     const rescored = await scoreChunk(
@@ -272,6 +285,7 @@ export const findSimilarCandidates = async (params: {
       finalists.length,
       emphasis,
     );
+    throwIfCancelled(signal);
     const valid = rescored.filter(r => idToKey.has(r.id));
     if (valid.length > 0) scored = valid;
   }
@@ -433,7 +447,9 @@ export const analyzeSimilarOutcomes = async (params: {
   similar: { entry: SimilarPoolEntry; match: SimilarMatch }[];
   companyStats: CompanyStat[];
   emphasis?: string;
+  signal?: AbortSignal;
 }): Promise<SimilarAnalysis> => {
+  throwIfCancelled(params.signal);
   const { target, similar, companyStats } = params;
   const emphasis = (params.emphasis || '').trim();
   const targetProfile = buildProfile(target, 'TARGET', true).replace('[ID: TARGET]\n', '');
@@ -512,6 +528,7 @@ export const analyzeSimilarOutcomes = async (params: {
       },
     },
   });
+  throwIfCancelled(params.signal);
   const parsed = JSON.parse((response.text || '{}').trim());
   const s = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
   const list = (v: unknown) => (Array.isArray(v) ? v.map(s).filter(Boolean) : []);
