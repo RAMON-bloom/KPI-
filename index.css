@@ -4014,3 +4014,6 @@ p.memo-content-text {
 .similar-career-app.in-progress { background: #e0ecff; border-color: #b6d4fe; color: var(--primary-color-dark); }
 .similar-career-app.not-started { background: #fff; border-color: #e5e7eb; color: #6b7280; }
 .similar-career-mode-hint { font-size: 0.8rem; color: var(--text-muted-color); margin: -0.5rem 0 0.75rem; }
+.similar-career-launch-inline { padding: 0.15rem 0.55rem; font-size: 0.8rem; flex-shrink: 0; }
+.similar-career-emphasis { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-muted-color); margin-bottom: 0.75rem; }
+.similar-career-emphasis input { padding: 0.4rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; font-size: 0.9rem; color: var(--text-color); }

@@ -183,11 +183,13 @@ const scoreChunk = async (
   targetProfile: string,
   profiles: { id: string; text: string }[],
   topK: number,
+  emphasis: string,
 ): Promise<{ id: string; score: number; reason: string }[]> => {
   const instruction = [
     'あなたは人材紹介会社のキャリアアドバイザーです。次の「対象候補者」と経歴が似ている人を「過去の候補者リスト」から選び、類似度を採点してください。',
     '目的: 似た経歴の人がどの企業に応募し、どんな選考結果になったかを参考にするため。',
     '採点基準: 職種・担当業務・業界・経験年数（年齢）・スキルの近さを最重視し、現職の企業規模・学歴・年収レンジの近さも考慮する。0〜100の整数で、80以上は「ほぼ同じタイプの経歴」、60台は「職種や業界が近い」、40未満は「あまり似ていない」の目安。',
+    emphasis ? `担当者が特に重視したい共通点: 「${emphasis}」— この点が対象候補者と共通している人を大きく加点し、共通していない人は減点する。reasonでもこの点に触れること。` : '',
     `類似度の高い順に最大${topK}名を返してください（明らかに似ていない人は含めなくてよい）。reasonは似ている点を40字程度で、氏名には触れずに書くこと。`,
     '',
     '■対象候補者',
@@ -195,7 +197,7 @@ const scoreChunk = async (
     '',
     '■過去の候補者リスト',
     profiles.map(p => p.text).join('\n\n'),
-  ].join('\n');
+  ].filter(s => s !== '').join('\n');
   const response = await newAi().models.generateContent({
     model: MODEL,
     contents: instruction,
@@ -227,9 +229,11 @@ export const findSimilarCandidates = async (params: {
   target: SimilarSourceCandidate;
   pool: SimilarPoolEntry[];
   wantedCount: number;
+  emphasis?: string;
   onProgress?: (message: string) => void;
 }): Promise<SimilarMatch[]> => {
   const { target, pool, wantedCount, onProgress } = params;
+  const emphasis = (params.emphasis || '').trim();
   const targetProfile = buildProfile(target, 'TARGET', true).replace('[ID: TARGET]\n', '');
   const idToKey = new Map<string, string>();
   const keyToEntry = new Map<string, SimilarPoolEntry>();
@@ -249,6 +253,7 @@ export const findSimilarCandidates = async (params: {
       targetProfile,
       chunk.map(p => ({ id: p.id, text: buildProfile(p.entry.candidate, p.id, chunks.length === 1) })),
       chunks.length === 1 ? shortlist : Math.min(chunk.length, Math.max(wantedCount, 8)),
+      emphasis,
     );
     done++;
     if (chunks.length > 1) onProgress?.(`経歴を照合中…（${done}/${chunks.length}グループ完了）`);
@@ -265,6 +270,7 @@ export const findSimilarCandidates = async (params: {
       targetProfile,
       finalists.map(f => ({ id: f.id, text: buildProfile(byId.get(f.id)!.entry.candidate, f.id, true) })),
       finalists.length,
+      emphasis,
     );
     const valid = rescored.filter(r => idToKey.has(r.id));
     if (valid.length > 0) scored = valid;
@@ -308,13 +314,21 @@ const overlap = (a: Set<string>, b: Set<string>): number => {
 
 const careerText = (c: SimilarSourceCandidate) => [c.summary || '', collectNotes(c).slice(0, 1500)].join(' ');
 
+const normalizeForMatch = (s: string) => (s || '').toLowerCase().replace(/[\s　]+/g, '');
+
+/** 「重視する共通点」のフリーワードをキーワードに分ける（読点・カンマ・空白・スラッシュ区切り）。 */
+export const splitEmphasisKeywords = (emphasis: string): string[] =>
+  Array.from(new Set((emphasis || '').split(/[、,，\s　/／・]+/).map(normalizeForMatch).filter(k => k.length >= 2)));
+
 export const findSimilarCandidatesQuick = (params: {
   target: SimilarSourceCandidate;
   pool: SimilarPoolEntry[];
   wantedCount: number;
   normalizeCompanyName: (name: string) => string;
+  emphasis?: string;
 }): SimilarMatch[] => {
   const { target, pool, wantedCount, normalizeCompanyName } = params;
+  const keywords = splitEmphasisKeywords(params.emphasis || '');
   const tJob = bigrams(target.jobType || '');
   const tCareer = bigrams(careerText(target));
   const tCompany = normalizeCompanyName(target.currentCompany || '');
@@ -349,6 +363,13 @@ export const findSimilarCandidatesQuick = (params: {
       const same = normalizeCompanyName(c.currentCompany) === tCompany;
       parts.push({ weight: 5, value: same ? 1 : 0 });
       if (same) reasons.push('現職が同じ企業');
+    }
+    if (keywords.length) {
+      // 重視するキーワードは、候補者の職種・現職・学歴・経歴・面談メモのどこかに含まれていれば一致とみなす
+      const haystack = normalizeForMatch([c.jobType, c.currentCompany, c.education, careerText(c)].join(' '));
+      const hits = keywords.filter(k => haystack.includes(k));
+      parts.push({ weight: 60, value: hits.length / keywords.length });
+      if (hits.length) reasons.unshift(`重視項目が一致（${hits.join('・')}）`);
     }
     const totalWeight = parts.reduce((s, p) => s + p.weight, 0);
     // 比べられる項目が少ないほど偶然の一致になりやすいので、その分を割り引く
@@ -411,8 +432,10 @@ export const analyzeSimilarOutcomes = async (params: {
   target: SimilarSourceCandidate;
   similar: { entry: SimilarPoolEntry; match: SimilarMatch }[];
   companyStats: CompanyStat[];
+  emphasis?: string;
 }): Promise<SimilarAnalysis> => {
   const { target, similar, companyStats } = params;
+  const emphasis = (params.emphasis || '').trim();
   const targetProfile = buildProfile(target, 'TARGET', true).replace('[ID: TARGET]\n', '');
   const people = similar.map(({ entry, match }, i) => {
     const c = entry.candidate;
@@ -435,6 +458,7 @@ export const analyzeSimilarOutcomes = async (params: {
   const instruction = [
     'あなたは人材紹介会社のキャリアアドバイザーです。担当中の「対象候補者」の応募先を検討するため、社内の過去データから経歴が似ている人たちの応募先と選考結果を集めました。',
     'これをもとに、対象候補者の応募戦略に役立つ分析を日本語でまとめてください。',
+    emphasis ? `担当者が重視している共通点: 「${emphasis}」— この観点から見た傾向にも触れること。` : '',
     '',
     '■対象候補者',
     targetProfile,
@@ -454,7 +478,7 @@ export const analyzeSimilarOutcomes = async (params: {
     '- cautionCompaniesは似た経歴の人が見送り・辞退になっている等、応募時に注意が要る企業を最大5社。reasonは何フェーズで止まったか等の根拠を含めて60字程度で。該当が無ければ空配列。',
     '- adviceは対象候補者の応募戦略・面接対策についての具体的な提案を150字程度で。',
     '- 氏名は書かず、「類似者1」のように番号で参照してよい。',
-  ].join('\n');
+  ].filter(s => s !== '').join('\n');
   const response = await newAi().models.generateContent({
     model: MODEL,
     contents: instruction,

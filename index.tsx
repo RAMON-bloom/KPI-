@@ -4399,6 +4399,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      '類似経歴リサーチのボタンを候補者カードの氏名の右側に移動した。あわせて「重視する共通点」をフリーワードで入力できるようにした（例: SaaS, マネジメント経験。クイックではキーワードが一致する人を優先し、AI判定では文章での指定も読み取ります）',
       '類似経歴の過去事例リサーチに「クイック」判定を追加した（AIを使わず職種・経歴・年齢・年収の近さで数秒で似ている人を選び、集計表をすぐ表示します。傾向の分析だけ後からAIが追加します）。あわせて対象範囲に事業部（F+・AC）を、似ている人の人数に「最大5名」を追加した',
       '候補者パイプラインに「類似経歴の過去事例をリサーチ」を追加した。候補者カードの詳細、または新規登録した直後に表示されるボタンから、社内の過去・現在の候補者の中で経歴が似ている人を探し、その人たちがどの企業に応募してどんな選考結果（書類通過・内定・見送り・辞退）になったかを企業別に集計します。あわせてAIが、通過・見送りの傾向や応募をおすすめできる企業・注意が必要な企業を整理します',
       'ブラインドレジュメ作成の各ステップ（求人と対象範囲／候補者を選ぶ／内容確認・PDF出力）に「最初からやり直す」ボタンを追加した。入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初の画面から始め直せます（処理中でも中断してやり直せます）',
@@ -11844,6 +11845,8 @@ const SimilarCareerResearchModal: React.FC<{
   // クイック: Geminiを使わず職種・経歴の文字の重なりと年齢・年収の近さで即座に判定する。
   // AI: Geminiで経歴の中身を読んで判定する（精度は高いが人数に応じて数十秒〜かかる）。
   const [mode, setMode] = useState<SimilarCareerMode>(loadSimilarCareerMode);
+  // 重視したい共通点（フリーワード）。クイックではキーワードとして一致を加点し、AI判定・傾向分析では指示文に含める。
+  const [emphasis, setEmphasis] = useState('');
   const changeMode = (m: SimilarCareerMode) => {
     setMode(m);
     try { localStorage.setItem(SIMILAR_CAREER_MODE_KEY, m); } catch { /* 記憶できなくても動作に影響なし */ }
@@ -11917,9 +11920,10 @@ const SimilarCareerResearchModal: React.FC<{
     setResult(null);
     setShowAllCompanies(false);
     try {
+      const focus = emphasis.trim();
       const matches = mode === 'quick'
-        ? findSimilarCandidatesQuick({ target, pool, wantedCount, normalizeCompanyName })
-        : await findSimilarCandidates({ target, pool, wantedCount, onProgress: setBusyMessage });
+        ? findSimilarCandidatesQuick({ target, pool, wantedCount, normalizeCompanyName, emphasis: focus })
+        : await findSimilarCandidates({ target, pool, wantedCount, emphasis: focus, onProgress: setBusyMessage });
       if (matches.length === 0) {
         setErrorMessage('経歴が似ている候補者が見つかりませんでした。経歴概要や職種を登録すると精度が上がります。');
         return;
@@ -11930,7 +11934,7 @@ const SimilarCareerResearchModal: React.FC<{
       setResult({ similar, companyStats, analysis: null, analysisError: '', poolSize: pool.length, mode });
       setBusyMessage(`似ている${similar.length}名の選考結果から傾向を分析しています…`);
       try {
-        const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats });
+        const analysis = await analyzeSimilarOutcomes({ target, similar, companyStats, emphasis: focus });
         setResult(prev => (prev ? { ...prev, analysis } : prev));
       } catch (err) {
         console.error('類似経歴の傾向分析に失敗しました', err);
@@ -12008,6 +12012,17 @@ const SimilarCareerResearchModal: React.FC<{
               {result ? 'もう一度リサーチ' : 'リサーチ開始'}
             </button>
           </div>
+          <label className="similar-career-emphasis">
+            重視する共通点（任意）
+            <input
+              type="text"
+              value={emphasis}
+              onChange={e => setEmphasis(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !isBusy && pool && profileReady) handleRun(); }}
+              placeholder="例: SaaS, マネジメント経験, 製造業向け（AI判定では「同業界からの転職を重視」のような文章も可）"
+              disabled={isBusy}
+            />
+          </label>
           <p className="similar-career-mode-hint">
             {mode === 'quick'
               ? 'クイック: AIを使わず、職種・経歴概要の言葉の重なりと年齢・年収の近さで似ている人を即座に選びます。集計表はすぐ表示され、傾向の分析だけAIが後から追加します。'
@@ -12499,6 +12514,14 @@ const PipelineCandidateCard: React.FC<{
           ) : (
             <h3 title={c.name}>{c.name}</h3>
           )}
+          <button
+              type="button"
+              className="similar-career-launch-button similar-career-launch-inline"
+              onClick={() => onOpenSimilarResearch(c)}
+              title="社内の過去データから経歴が似ている候補者を探し、どの企業に応募してどんな結果になったかを調べます"
+          >
+              🔍 類似経歴リサーチ
+          </button>
           {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
           {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
           {c.duplicateMatches && c.duplicateMatches.length > 0 && (
@@ -12792,16 +12815,6 @@ const PipelineCandidateCard: React.FC<{
       </div>
       <div className={`candidate-detail-content ${isExpanded ? 'open' : ''}`}>
           <div className="candidate-detail-view">
-              <div className="similar-career-launch">
-                  <button
-                      type="button"
-                      className="similar-career-launch-button"
-                      onClick={() => onOpenSimilarResearch(c)}
-                      title="社内の過去データから経歴が似ている候補者を探し、どの企業に応募してどんな結果になったかを調べます"
-                  >
-                      🔍 類似経歴の過去事例をリサーチ
-                  </button>
-              </div>
               <div className="candidate-info-section">
                 <div className="candidate-info-item">
                     <span className="info-label">現職企業名</span>
