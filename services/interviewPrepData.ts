@@ -61,23 +61,34 @@ export const normalizePersonName = (name: string): string =>
 
 export class InterviewPrepAccessError extends Error {}
 
-async function googleFetch(url: string): Promise<any> {
+export async function googleFetch(url: string, init: RequestInit = {}): Promise<any> {
   let session = getCurrentSession();
   if (!session) {
     try { await refreshTokenSilently(); } catch { /* 下で判定 */ }
     session = getCurrentSession();
     if (!session) throw new Error('ログインが必要です。');
   }
-  const res = await fetch(url, { cache: 'no-store', headers: { Authorization: `Bearer ${session.accessToken}` } });
+  const res = await fetch(url, {
+    ...init,
+    cache: 'no-store',
+    headers: { ...(init.headers || {}), Authorization: `Bearer ${session.accessToken}`, ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
   if (res.status === 403 || res.status === 404) {
     const body = await res.text().catch(() => '');
     // kpi-mgrのGoogle CloudプロジェクトでSheets APIが有効になっていない場合も403になる。
     if (/SERVICE_DISABLED|has not been used|is disabled/.test(body)) {
       throw new InterviewPrepAccessError('Google Sheets APIが有効になっていないため、面接対策ジェネレーターのデータを読めません（管理者による設定が必要です）。');
     }
-    throw new InterviewPrepAccessError('面接対策ジェネレーターのデータを閲覧する権限がありません。');
+    throw new InterviewPrepAccessError(init.method && init.method !== 'GET'
+      ? '面接対策ジェネレーターのスプレッドシートへの書き込み権限がありません。'
+      : '面接対策ジェネレーターのデータを閲覧する権限がありません。');
   }
-  if (!res.ok) throw new Error(`Google APIエラー（${res.status}）`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const error = new Error(`Google APIエラー（${res.status}）`) as Error & { body?: string };
+    error.body = body;
+    throw error;
+  }
   return res.json();
 }
 

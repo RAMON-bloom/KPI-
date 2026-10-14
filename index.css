@@ -4171,3 +4171,34 @@ p.memo-content-text {
   gap: 0.5rem;
   margin-left: auto;
 }
+.knowledge-submit {
+  margin-top: 0.6rem;
+}
+.knowledge-submit-open {
+  padding: 0.75rem;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  background: #fcfcfd;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.knowledge-submit label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: #495057;
+  flex: 1;
+  min-width: 140px;
+}
+.knowledge-submit-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.knowledge-submit-actions {
+  display: flex;
+  gap: 0.5rem;
+}

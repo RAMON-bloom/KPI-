@@ -31,7 +31,8 @@ import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPl
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
-import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
+import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
+import { submitKnowledge, draftKnowledgeFromMemo, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -4402,6 +4403,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-15',
+    items: [
+      '選考情報の「面接対策資料」欄に「この選考のナレッジ・結果をジェネレーターに投稿」を追加した。面接で聞かれたこと・面接官・雰囲気などの企業ナレッジと、電話や口頭で伝えられた選考結果を、面接対策ジェネレーターに送れます。「AIで下書き」を押すと、選んだ面談ログから下書きを作ります（候補者の氏名・連絡先は伏せて送ります）。送った内容は、ジェネレーター側で承認されると企業ナレッジに反映されます',
+    ],
+  },
+  {
     date: '2026-10-14',
     items: [
       '候補者パイプラインの上部に「メールで届いた選考結果」を表示するようにした。面接対策ジェネレーターが企業からのメールで読み取った選考結果（通過・不採用・辞退・内定）のうち、こちらの選考状況にまだ反映されていないものが一覧で出ます。「反映する」を押すと結果を入れた状態で選考情報が開くので、内容を確認して保存してください（「無視」で一覧から消せます）',
@@ -8045,8 +8052,145 @@ const InterviewPrepSection: React.FC<{
                             ))}
                         </details>
                     )}
+                    <KnowledgeSubmitForm candidate={candidate} application={application} data={prep.data} />
                 </div>
             )}
+        </div>
+    );
+};
+
+/**
+ * この選考で得た企業ナレッジ（面接で聞かれたこと等）と選考結果を、面接対策ジェネレーターへ
+ * 投稿するフォーム。面談ログからAIで下書きを作り、担当者が直して送る。送り先はジェネレーターの
+ * スプレッドシートの専用シート（kpi_submissions）で、ジェネレーター側で承認されると反映される。
+ */
+const KnowledgeSubmitForm: React.FC<{
+    candidate: Candidate;
+    application: CompanyApplication;
+    data: InterviewPrepData | null;
+}> = ({ candidate, application, data }) => {
+    const memos = useMemo(() => [...sortMemosChronologically(candidate.memos || [])].reverse().filter(m => m.content.trim()), [candidate.memos]);
+    const [open, setOpen] = useState(false);
+    const [phase, setPhase] = useState(gasPhaseForStage(application.stage) || '一次面接');
+    const [memoId, setMemoId] = useState(memos[0]?.id || '');
+    const [position, setPosition] = useState('');
+    const [content, setContent] = useState('');
+    const [interviewer, setInterviewer] = useState('');
+    const [candidateAttr, setCandidateAttr] = useState('');
+    const [result, setResult] = useState('');
+    const [reason, setReason] = useState('');
+    const [busy, setBusy] = useState<'' | 'drafting' | 'submitting'>('');
+    const [message, setMessage] = useState('');
+    const blockEnter = (e: React.KeyboardEvent) => { if (e.key === 'Enter') e.preventDefault(); };
+
+    const handleDraft = async () => {
+        const memo = memos.find(m => m.id === memoId);
+        if (!memo) return;
+        setBusy('drafting');
+        setMessage('');
+        try {
+            const draft = await draftKnowledgeFromMemo({
+                memoText: memo.content, candidateName: candidate.name, companyName: application.companyName, phase,
+            });
+            setContent(draft.content);
+            setInterviewer(draft.interviewer);
+            setCandidateAttr(draft.candidateAttr);
+            if (draft.result) setResult(draft.result);
+            if (draft.reason) setReason(draft.reason);
+            setMessage('下書きを作りました。内容を確認・修正してから送信してください。');
+        } catch (err) {
+            console.error('企業ナレッジの下書き作成に失敗しました', err);
+            setMessage('下書きの作成に失敗しました。時間をおいて再度お試しください。');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const handleSubmit = async () => {
+        if (!content.trim() && !result) return;
+        const submittedBy = getCurrentSession()?.identity.email || '';
+        setBusy('submitting');
+        setMessage('');
+        try {
+            await submitKnowledge({
+                companyName: application.companyName, phase, position, result, reason, interviewer,
+                content, candidateAttr, applicationId: application.id, submittedBy,
+            }, data);
+            setContent(''); setInterviewer(''); setCandidateAttr(''); setResult(''); setReason(''); setPosition('');
+            setMessage('面接対策ジェネレーターに送信しました。ジェネレーター側で承認されると企業ナレッジに反映されます。');
+        } catch (err) {
+            console.error('企業ナレッジの送信に失敗しました', err);
+            setMessage(err instanceof InterviewPrepAccessError ? err.message : '送信に失敗しました。時間をおいて再度お試しください。');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    if (!open) {
+        return (
+            <div className="knowledge-submit">
+                <button type="button" className="interview-prep-link-button" onClick={() => setOpen(true)}>この選考のナレッジ・結果をジェネレーターに投稿</button>
+                {message && <p className="interview-prep-hint">{message}</p>}
+            </div>
+        );
+    }
+    return (
+        <div className="knowledge-submit knowledge-submit-open">
+            <div className="interview-prep-subtitle">面接対策ジェネレーターに投稿（候補者の氏名・連絡先は送りません）</div>
+            <div className="knowledge-submit-row">
+                <label>フェーズ
+                    <select value={phase} onChange={e => setPhase(e.target.value)}>
+                        {GENERATOR_PHASES.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                </label>
+                <label>ポジション（任意）
+                    <input type="text" value={position} onChange={e => setPosition(e.target.value)} onKeyDown={blockEnter} />
+                </label>
+            </div>
+            {memos.length > 0 ? (
+                <div className="knowledge-submit-row">
+                    <label>下書きに使う面談ログ
+                        <select value={memoId} onChange={e => setMemoId(e.target.value)}>
+                            {memos.map(m => <option key={m.id} value={m.id}>{m.title || 'メモ'}（{(m.logDate || m.updatedAt).slice(0, 10)}）</option>)}
+                        </select>
+                    </label>
+                    <button type="button" className="interview-prep-generate-button" onClick={handleDraft} disabled={!!busy}>
+                        {busy === 'drafting' ? '下書き作成中...' : 'AIで下書き'}
+                    </button>
+                </div>
+            ) : (
+                <p className="interview-prep-hint">面談ログが無いため、AI下書きは使えません。直接入力してください。</p>
+            )}
+            <label>面接で聞かれたこと・傾向
+                <textarea rows={8} value={content} onChange={e => setContent(e.target.value)}
+                    placeholder={'■形式・所要時間\n■面接官\n■聞かれた質問\n■評価されたポイント・懸念された点\n■逆質問とその回答\n■雰囲気・その他'} />
+            </label>
+            <div className="knowledge-submit-row">
+                <label>面接官（役職・人数）
+                    <input type="text" value={interviewer} onChange={e => setInterviewer(e.target.value)} onKeyDown={blockEnter} placeholder="例: 事業部長1名、人事1名" />
+                </label>
+                <label>候補者のタイプ
+                    <input type="text" value={candidateAttr} onChange={e => setCandidateAttr(e.target.value)} onKeyDown={blockEnter} placeholder="例: 30代前半・経理経験者" />
+                </label>
+            </div>
+            <div className="knowledge-submit-row">
+                <label>選考結果（任意）
+                    <select value={result} onChange={e => setResult(e.target.value)}>
+                        <option value="">（結果なし）</option>
+                        {GENERATOR_RESULTS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                </label>
+                <label>結果の理由（任意）
+                    <input type="text" value={reason} onChange={e => setReason(e.target.value)} onKeyDown={blockEnter} />
+                </label>
+            </div>
+            <div className="knowledge-submit-actions">
+                <button type="button" className="interview-prep-generate-button" onClick={handleSubmit} disabled={!!busy || (!content.trim() && !result)}>
+                    {busy === 'submitting' ? '送信中...' : '送信する'}
+                </button>
+                <button type="button" className="interview-prep-link-button" onClick={() => setOpen(false)} disabled={!!busy}>閉じる</button>
+            </div>
+            {message && <p className="interview-prep-hint">{message}</p>}
         </div>
     );
 };
