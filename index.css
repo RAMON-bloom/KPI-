@@ -3886,7 +3886,9 @@ p.memo-content-text {
 .blind-resume-research-text { white-space: pre-wrap; font-size: 0.88rem; margin: 0.75rem 0 0.5rem; }
 .blind-resume-research-sources { font-size: 0.82rem; margin: 0; padding-left: 1.2rem; }
 .blind-resume-research-sources a { word-break: break-all; }
-.blind-resume-steps { display: flex; gap: 0.5rem; list-style: none; padding: 0; margin: 0 0 1rem; flex-wrap: wrap; }
+.blind-resume-steps-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.blind-resume-steps { display: flex; gap: 0.5rem; list-style: none; padding: 0; margin: 0; flex-wrap: wrap; }
+.blind-resume-steps-bar .blind-resume-reset { font-size: 0.85rem; padding: 0.25rem 0.75rem; }
 .blind-resume-steps li { padding: 0.25rem 0.75rem; border-radius: 999px; background: var(--border-color); color: var(--text-muted-color); font-size: 0.85rem; }
 .blind-resume-steps li.is-current { background: var(--primary-color); color: #fff; font-weight: 600; }
 .blind-resume-busy { background: #eef5ff; border: 1px solid #b6d4fe; color: var(--primary-color-dark); padding: 0.6rem 0.9rem; border-radius: var(--border-radius); margin-bottom: 1rem; }

@@ -4398,6 +4398,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ブラインドレジュメ作成の各ステップ（求人と対象範囲／候補者を選ぶ／内容確認・PDF出力）に「最初からやり直す」ボタンを追加した。入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初の画面から始め直せます（処理中でも中断してやり直せます）',
       'ブラインドレジュメ作成で、「〇名の候補者を求人と照合しています…」などの処理中の表示を、ボタンの上ではなくボタンの左側（同じ行）に出すようにした',
       'ブラインドレジュメ作成で、「候補者を探す」「ブラインドレジュメを作成」の横に推定所要時間を表示し、処理中は残り時間のカウントダウンと進捗バーを表示するようにした（実際にかかった時間を記録して、使うほど見積もりが正確になります）',
       'ヘッダーのタブ名を「ブラインドレジュメ作成」に変更し、見つけやすいよう薄い緑の背景にした',
@@ -8205,7 +8206,8 @@ const BlindResumeView: React.FC<{
   ownDeletedCandidateIds: string[];
   teams: Team[];
   memberDepartments: Record<string, Department>;
-}> = ({ currentUserEmail, currentUserLabel, ownCandidates, ownDeletedCandidateIds, teams, memberDepartments }) => {
+  onReset: () => void;
+}> = ({ currentUserEmail, currentUserLabel, ownCandidates, ownDeletedCandidateIds, teams, memberDepartments, onReset }) => {
   const myTeams = useMemo(
     () => teams.filter(t => t.memberEmails.some(e => normalizeEmail(e) === normalizeEmail(currentUserEmail))),
     [teams, currentUserEmail]
@@ -8572,6 +8574,15 @@ const BlindResumeView: React.FC<{
   const generateEstimate = generateTargetCount > 0 ? estimateGeneratePlan(generateTargetCount).totalSec : null;
 
   const linesToArray = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
+  // 入力内容・候補者の選択・作成途中のレジュメをすべて破棄して、1. の入力画面から始め直す。
+  const handleReset = () => {
+    const message = isBusy
+      ? '処理中の作業を中断し、入力内容や作成途中の内容をすべてクリアして最初からやり直します。よろしいですか？'
+      : '入力内容・候補者の選択・作成途中のレジュメをすべてクリアして、最初からやり直します。よろしいですか？';
+    if (!window.confirm(message)) return;
+    onReset();
+  };
+
   const normalizedCompany = normalizeForDuplicateMatch(companyName);
   const appliedStage = (c: Candidate) => {
     if (!normalizedCompany) return null;
@@ -8589,11 +8600,14 @@ const BlindResumeView: React.FC<{
           <p className="field-hint">推薦先の企業に合いそうな候補者を登録データから探し、氏名・連絡先を伏せたブラインドレジュメを表紙付きの1つのPDFにまとめます。求人内容が無い場合は、企業名からWeb検索で企業情報を調べて候補者と推奨ポジションを提案します。</p>
         </div>
         <div className="blind-resume-page-body">
-          <ol className="blind-resume-steps">
-            <li className={step === 'input' ? 'is-current' : ''}>1. 求人と対象範囲</li>
-            <li className={step === 'select' ? 'is-current' : ''}>2. 候補者を選ぶ</li>
-            <li className={step === 'edit' ? 'is-current' : ''}>3. 内容確認・PDF出力</li>
-          </ol>
+          <div className="blind-resume-steps-bar">
+            <ol className="blind-resume-steps">
+              <li className={step === 'input' ? 'is-current' : ''}>1. 求人と対象範囲</li>
+              <li className={step === 'select' ? 'is-current' : ''}>2. 候補者を選ぶ</li>
+              <li className={step === 'edit' ? 'is-current' : ''}>3. 内容確認・PDF出力</li>
+            </ol>
+            <button type="button" className="secondary-action-button blind-resume-reset" onClick={handleReset}>最初からやり直す</button>
+          </div>
 
           {errorMessage && <p className="blind-resume-error">{errorMessage}</p>}
 
@@ -16237,6 +16251,8 @@ const App: React.FC = () => {
   // ブラインドレジュメのタブは一度開いたら以後マウントしたままにする（他のタブを見に行っても
   // 入力中の求人内容や生成済みのレジュメが消えないように）。
   const [hasOpenedBlindResume, setHasOpenedBlindResume] = useState(false);
+  // 「最初からやり直す」でブラインドレジュメ作成の入力・作成途中の内容をすべて破棄するため、keyを変えて作り直す。
+  const [blindResumeResetKey, setBlindResumeResetKey] = useState(0);
   useEffect(() => { if (view === 'blind_resume') setHasOpenedBlindResume(true); }, [view]);
   // Populated alongside allUsersData by fetchAllUsersData — needed by ミドル proxy-entry to
   // write directly into a specific teammate's own Drive file.
@@ -20726,6 +20742,8 @@ const App: React.FC = () => {
         {hasOpenedBlindResume && currentIdentity && (
           <div style={{ display: view === 'blind_resume' ? undefined : 'none' }}>
             <BlindResumeView
+              key={blindResumeResetKey}
+              onReset={() => setBlindResumeResetKey(k => k + 1)}
               currentUserEmail={currentIdentity.email}
               currentUserLabel={currentUserData?.displayName || currentIdentity.name || currentIdentity.email}
               ownCandidates={candidates}
