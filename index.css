@@ -4017,3 +4017,10 @@ p.memo-content-text {
 .similar-career-launch-inline { padding: 0.15rem 0.55rem; font-size: 0.8rem; flex-shrink: 0; }
 .similar-career-emphasis { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-muted-color); margin-bottom: 0.75rem; }
 .similar-career-emphasis input { padding: 0.4rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; font-size: 0.9rem; color: var(--text-color); }
+/* 類似経歴リサーチのボタンを氏名のすぐ右に寄せる — 氏名は伸ばさず、ボタンの右側の余白で
+   残りのバッジ・操作ボタンを右へ寄せる（これまでは氏名が flex-grow で横幅いっぱいに広がっていた）。 */
+.candidate-card-header h3,
+.candidate-card-header .candidate-name-display,
+.candidate-card-header .candidate-name-input { flex-grow: 0; }
+.candidate-card-header .candidate-name-input { width: 14em; }
+.candidate-card-header .similar-career-launch-inline { margin-left: -0.5rem; margin-right: auto; }
