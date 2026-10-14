@@ -3947,11 +3947,12 @@ p.memo-content-text {
   background-color: #cdebd3;
 }
 .blind-resume-page-footer { flex-wrap: wrap; align-items: center; }
-.blind-resume-page-footer .blind-resume-busy { flex: 1 1 100%; margin-bottom: 0; }
+/* 処理中のステータスはボタンと同じ行の左側に並べる（狭い画面では折り返す） */
+.blind-resume-page-footer .blind-resume-busy { flex: 1 1 320px; min-width: 0; margin-bottom: 0; }
 .blind-resume-busy-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.25rem 1rem; }
 .blind-resume-countdown { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .blind-resume-progress-track { height: 6px; background: #d6e6fb; border-radius: 999px; overflow: hidden; margin-top: 0.5rem; }
 .blind-resume-progress-bar { height: 100%; background: var(--primary-color); border-radius: 999px; transition: width 0.5s linear; }
 .blind-resume-estimate { color: var(--text-muted-color); font-size: 0.85rem; order: 1; }
-.blind-resume-page-footer .blind-resume-busy { order: -1; }
+.blind-resume-page-footer .blind-resume-busy { order: 1; }
 .blind-resume-page-footer .submit-button { order: 2; }
