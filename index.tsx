@@ -27,7 +27,7 @@ const GMAIL_SCOPE_UNCHECKED_MESSAGE = 'Gmailの読み取り権限が付与され
 const gmailPermissionMessage = (err: Error) => `${err.message} 下のボタンから許可してください（Googleの許可画面ではGmailの項目にチェックを入れてください）。`;
 import { decodeCsvFile, parseScoutCsv, ScoutCsvMediaId, ScoutCsvDayCounts, ScoutCsvParseResult } from './services/mediaCsvImport';
 import { decodeSpreadsheetCsvFile, parseSpreadsheetGrid, computeKpiCountsByTarget, SpreadsheetGrid, KpiImportByTargetResult } from './services/spreadsheetKpiImport';
-import { matchCandidates, generateBlindResume, researchCompany, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
+import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPlan, estimateGeneratePlan, GENERATE_CONCURRENCY, type CompanyResearch, findLeakedPersonalInfo, renderBlindResumeHtml, blindLabel, poolKey, type BlindPoolEntry, type MatchResult, type BlindResumeContent, type BlindCareer, type BlindDisplayOptions, type JobContentPart } from './services/blindResume';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4398,6 +4398,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ブラインドレジュメ作成で、「候補者を探す」「ブラインドレジュメを作成」の横に推定所要時間を表示し、処理中は残り時間のカウントダウンと進捗バーを表示するようにした（実際にかかった時間を記録して、使うほど見積もりが正確になります）',
       'ヘッダーのタブ名を「ブラインドレジュメ作成」に変更し、見つけやすいよう薄い緑の背景にした',
       'ブラインドレジュメ作成で、対象にする候補者を「選考中・応募前・内定承諾・見送り・辞退・掘り起し・非表示」のフェーズで絞り込めるようにした（複数選択可。選んだフェーズのいずれかに該当する候補者が対象で、フェーズごとの人数と対象人数をその場で表示します）',
       'ブラインドレジュメ作成を、候補者パイプライン内のボタンから、「個人実績」「全ユーザー」「チーム別」「候補者パイプライン」と並ぶ独立したタブ「ブラインドレジュメ」に移した。他のタブを見に行っても入力内容・作成途中のレジュメは残ります',
@@ -8154,6 +8155,45 @@ const blindResumeCandidatePhases = (c: Candidate): BlindResumePhase[] => {
   return phases;
 };
 
+// 「約1分20秒」形式（見積もり表示用）
+const formatApproxDuration = (sec: number): string => {
+  const s = Math.max(1, Math.round(sec));
+  if (s < 60) return `約${s}秒`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `約${m}分${r}秒` : `約${m}分`;
+};
+// 「1:05」形式（カウントダウン表示用）
+const formatCountdown = (sec: number): string => {
+  const s = Math.max(0, Math.ceil(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+// 処理中の見積もり残り時間。creditedSec は完了した作業ぶんの見積もり秒数（グループ・候補者が
+// 1つ終わるたびに加算）、lastAt はその最終加算時刻 — 「見積もり合計 − 完了ぶん − 最後の完了からの
+// 経過」を残り時間とすることで、実際の進み具合に合わせて自動で補正される。
+interface BlindResumeEta { startedAt: number; totalSec: number; creditedSec: number; lastAt: number }
+
+const BlindResumeProgress: React.FC<{ message: string; eta: BlindResumeEta | null; now: number }> = ({ message, eta, now }) => {
+  if (!eta) return <div className="blind-resume-busy">{message}</div>;
+  const remaining = Math.max(0, eta.totalSec - eta.creditedSec - (now - eta.lastAt) / 1000);
+  const elapsed = (now - eta.startedAt) / 1000;
+  const ratio = Math.min(0.98, Math.max(0, (eta.totalSec - remaining) / eta.totalSec));
+  return (
+    <div className="blind-resume-busy" role="status" aria-live="polite">
+      <div className="blind-resume-busy-row">
+        <span>{message}</span>
+        <span className="blind-resume-countdown">
+          {remaining > 0
+            ? <>残り <strong>{formatCountdown(remaining)}</strong>（推定 {formatApproxDuration(eta.totalSec)}）</>
+            : <>予定より時間がかかっています…（経過 {formatCountdown(elapsed)}）</>}
+        </span>
+      </div>
+      <div className="blind-resume-progress-track"><div className="blind-resume-progress-bar" style={{ width: `${ratio * 100}%` }} /></div>
+    </div>
+  );
+};
+
 const toLocalIsoDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
@@ -8197,6 +8237,22 @@ const BlindResumeView: React.FC<{
 
   const [teammates, setTeammates] = useState<{ email: string; data: UserData }[] | null>(null);
   const [busyMessage, setBusyMessage] = useState('');
+  const [eta, setEta] = useState<BlindResumeEta | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!eta) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [eta]);
+  const startEta = (totalSec: number) => {
+    const t = Date.now();
+    setNow(t);
+    setEta({ startedAt: t, totalSec, creditedSec: 0, lastAt: t });
+  };
+  const creditEta = (sec: number) => {
+    if (!(sec > 0)) return;
+    setEta(prev => (prev ? { ...prev, creditedSec: Math.min(prev.totalSec, prev.creditedSec + sec), lastAt: Date.now() } : prev));
+  };
   const [errorMessage, setErrorMessage] = useState('');
   const [matches, setMatches] = useState<MatchResult[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -8330,6 +8386,8 @@ const BlindResumeView: React.FC<{
       }
       setPool(builtPool);
       const hasJobDescription = !!jobText.trim() || jobFiles.length > 0;
+      const plan = estimateSearchPlan(builtPool.length, !hasJobDescription);
+      startEta(plan.totalSec);
       if (hasJobDescription) {
         setCompanyResearch(null);
         jobPartsRef.current = await buildJobParts();
@@ -8338,6 +8396,7 @@ const BlindResumeView: React.FC<{
         // それを求人情報の代わりに使う。
         setBusyMessage(`求人内容が無いため、「${companyName.trim()}」の企業情報をWeb検索で調べています…`);
         const research = await researchCompany(companyName.trim(), positionTitle.trim());
+        creditEta(plan.researchSec);
         setCompanyResearch(research);
         jobPartsRef.current = [{
           text: `■推薦先企業: ${companyName.trim()}${positionTitle.trim() ? `\n■想定ポジション: ${positionTitle.trim()}` : ''}\n■求人票: なし（以下はWeb検索で調べた企業情報と採用ニーズの見立て）\n${research.text}`,
@@ -8351,6 +8410,8 @@ const BlindResumeView: React.FC<{
         wantedCount,
         hasJobDescription,
         onProgress: setBusyMessage,
+        onChunkDone: () => creditEta(plan.perChunkCreditSec),
+        onRerankDone: () => creditEta(plan.rerankSec),
       });
       if (result.length === 0) {
         setErrorMessage('求人にマッチする候補者が見つかりませんでした。追加条件をゆるめるか、対象範囲を広げてお試しください。');
@@ -8366,6 +8427,7 @@ const BlindResumeView: React.FC<{
       setErrorMessage(`候補者の照合中にエラーが発生しました: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusyMessage('');
+      setEta(null);
     }
   };
 
@@ -8392,11 +8454,13 @@ const BlindResumeView: React.FC<{
     const targets = orderedSelectedKeys.filter(k => !generated[k]);
     let done = 0;
     const failures: string[] = [];
+    const plan = estimateGeneratePlan(targets.length);
     try {
       setBusyMessage(`ブラインドレジュメを作成しています…（0/${targets.length}名）`);
+      startEta(plan.totalSec);
       const next: Record<string, BlindResumeContent> = { ...generated };
       let cursor = 0;
-      await Promise.all(Array.from({ length: Math.min(3, targets.length) }, async () => {
+      await Promise.all(Array.from({ length: Math.min(GENERATE_CONCURRENCY, targets.length) }, async () => {
         while (cursor < targets.length) {
           const key = targets[cursor++];
           try {
@@ -8406,6 +8470,7 @@ const BlindResumeView: React.FC<{
             failures.push(poolByKey.get(key)?.candidate.name || key);
           }
           done++;
+          creditEta(plan.perItemCreditSec);
           setBusyMessage(`ブラインドレジュメを作成しています…（${done}/${targets.length}名）`);
         }
       }));
@@ -8414,6 +8479,7 @@ const BlindResumeView: React.FC<{
       setStep('edit');
     } finally {
       setBusyMessage('');
+      setEta(null);
     }
   };
 
@@ -8497,6 +8563,13 @@ const BlindResumeView: React.FC<{
     return '全ユーザーの候補者';
   })();
 
+  const hasJobDescriptionInput = !!jobText.trim() || jobFiles.length > 0;
+  const searchEstimate = phaseCounts && phaseCounts.matched > 0
+    ? estimateSearchPlan(phaseCounts.matched, !hasJobDescriptionInput).totalSec
+    : null;
+  const generateTargetCount = orderedSelectedKeys.filter(k => !generated[k]).length;
+  const generateEstimate = generateTargetCount > 0 ? estimateGeneratePlan(generateTargetCount).totalSec : null;
+
   const linesToArray = (s: string) => s.split('\n').map(x => x.trim()).filter(Boolean);
   const normalizedCompany = normalizeForDuplicateMatch(companyName);
   const appliedStage = (c: Candidate) => {
@@ -8522,7 +8595,6 @@ const BlindResumeView: React.FC<{
           </ol>
 
           {errorMessage && <p className="blind-resume-error">{errorMessage}</p>}
-          {isBusy && <div className="blind-resume-busy">{busyMessage}</div>}
 
           {step === 'input' && (
             <div className="blind-resume-form">
@@ -8701,6 +8773,15 @@ const BlindResumeView: React.FC<{
           )}
         </div>
         <div className="blind-resume-page-footer">
+          {isBusy && <BlindResumeProgress message={busyMessage} eta={eta} now={now} />}
+          {!isBusy && step === 'input' && searchEstimate !== null && (
+            <span className="blind-resume-estimate">
+              推定 {formatApproxDuration(searchEstimate)}（{phaseCounts!.matched}名を照合{hasJobDescriptionInput ? '' : '・Web検索あり'}）
+            </span>
+          )}
+          {!isBusy && step === 'select' && generateEstimate !== null && (
+            <span className="blind-resume-estimate">推定 {formatApproxDuration(generateEstimate)}（{generateTargetCount}名分を作成）</span>
+          )}
           {step === 'input' && (
             <>
               <button type="button" onClick={handleSearch} className="submit-button" disabled={isBusy}>候補者を探す</button>

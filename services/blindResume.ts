@@ -162,6 +162,73 @@ export const buildMatchingProfile = (entry: BlindPoolEntry, id: string, detailed
 
 const newAi = () => new GoogleGenAI({ apiKey: process.env.API_KEY as string });
 
+// ---- 所要時間の見積もり ----
+// 画面に「推定時間・残り時間」を出すための目安。Geminiの応答時間は混み具合で大きく変わるので、
+// 実際にかかった時間をこのブラウザのlocalStorageに記録し（指数移動平均）、次回以降の見積もりに
+// 使う。初期値は gemini-2.5-flash での経験的な目安。
+export const MATCH_CONCURRENCY = 4;
+export const GENERATE_CONCURRENCY = 3;
+
+export interface BlindTimings {
+  researchSec: number; // Web検索での企業調査 1回
+  matchSecPer60: number; // 採点 1グループ（60名換算）
+  rerankSec: number; // 上位候補の再評価 1回
+  generateSec: number; // レジュメ本文の生成 1名
+}
+
+const DEFAULT_TIMINGS: BlindTimings = { researchSec: 25, matchSecPer60: 30, rerankSec: 25, generateSec: 20 };
+const TIMINGS_STORAGE_KEY = 'kpiBlindResumeTimings';
+
+export const loadBlindTimings = (): BlindTimings => {
+  try {
+    const raw = localStorage.getItem(TIMINGS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_TIMINGS };
+    const parsed = JSON.parse(raw);
+    const pick = (k: keyof BlindTimings) => (typeof parsed[k] === 'number' && parsed[k] > 0 ? parsed[k] : DEFAULT_TIMINGS[k]);
+    return { researchSec: pick('researchSec'), matchSecPer60: pick('matchSecPer60'), rerankSec: pick('rerankSec'), generateSec: pick('generateSec') };
+  } catch {
+    return { ...DEFAULT_TIMINGS };
+  }
+};
+
+const recordBlindTiming = (kind: keyof BlindTimings, seconds: number) => {
+  if (!(seconds > 0) || seconds > 600) return;
+  try {
+    const current = loadBlindTimings();
+    current[kind] = Math.round((current[kind] * 0.7 + seconds * 0.3) * 10) / 10;
+    localStorage.setItem(TIMINGS_STORAGE_KEY, JSON.stringify(current));
+  } catch {
+    // 記録できなくても見積もりが初期値のままになるだけ
+  }
+};
+
+const MATCH_SIZE_FLOOR = 0.35; // 少人数でも1回の呼び出しには一定の時間がかかる
+const matchChunkSeconds = (size: number, t: BlindTimings) => t.matchSecPer60 * Math.max(MATCH_SIZE_FLOOR, size / 60);
+
+/** 候補者の照合（＋必要ならWeb検索）の見積もり。workUnits は進捗計算用の内訳。 */
+export const estimateSearchPlan = (poolSize: number, needsResearch: boolean, t: BlindTimings = loadBlindTimings()) => {
+  const chunkSizes: number[] = [];
+  for (let i = 0; i < poolSize; i += MATCH_CHUNK_SIZE) chunkSizes.push(Math.min(MATCH_CHUNK_SIZE, poolSize - i));
+  const rounds: number[][] = [];
+  for (let i = 0; i < chunkSizes.length; i += MATCH_CONCURRENCY) rounds.push(chunkSizes.slice(i, i + MATCH_CONCURRENCY));
+  const matchSec = rounds.reduce((sum, round) => sum + Math.max(...round.map(s => matchChunkSeconds(s, t))), 0);
+  const researchSec = needsResearch ? t.researchSec : 0;
+  const rerankSec = chunkSizes.length > 1 ? t.rerankSec : 0;
+  return {
+    totalSec: Math.max(1, Math.round(researchSec + matchSec + rerankSec)),
+    researchSec,
+    // 並列実行のため、1グループ完了ごとに照合全体の見積もりを均等に進める
+    perChunkCreditSec: chunkSizes.length ? matchSec / chunkSizes.length : 0,
+    rerankSec,
+  };
+};
+
+/** レジュメ本文の生成（count名）の見積もり。 */
+export const estimateGeneratePlan = (count: number, t: BlindTimings = loadBlindTimings()) => {
+  const totalSec = Math.ceil(count / GENERATE_CONCURRENCY) * t.generateSec;
+  return { totalSec: Math.max(1, Math.round(totalSec)), perItemCreditSec: count ? totalSec / count : 0 };
+};
+
 const runWithConcurrency = async <T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
   const results: R[] = new Array(items.length);
   let next = 0;
@@ -190,11 +257,13 @@ export const researchCompany = async (companyName: string, positionTitle: string
     '4. 社風・カルチャーや選考で重視されそうな点',
     '同名の別企業と混同しないよう注意し、確認できなかった点は「不明」と書くこと。',
   ].filter(Boolean).join('\n');
+  const startedAt = Date.now();
   const response = await newAi().models.generateContent({
     model: MODEL,
     contents: prompt,
     config: { tools: [{ googleSearch: {} }] },
   });
+  recordBlindTiming('researchSec', (Date.now() - startedAt) / 1000);
   const text = (response.text || '').trim();
   if (!text) throw new Error('企業情報のWeb検索結果が空でした');
   const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
@@ -272,8 +341,11 @@ export const matchCandidates = async (params: {
   wantedCount: number;
   hasJobDescription: boolean;
   onProgress?: (message: string) => void;
+  // 残り時間表示用: 採点1グループ／再評価が終わるたびに呼ばれる
+  onChunkDone?: () => void;
+  onRerankDone?: () => void;
 }): Promise<MatchResult[]> => {
-  const { pool, jobParts, companyName, extraConditions, wantedCount, hasJobDescription, onProgress } = params;
+  const { pool, jobParts, companyName, extraConditions, wantedCount, hasJobDescription, onProgress, onChunkDone, onRerankDone } = params;
   const idToKey = new Map<string, string>();
   const keyToEntry = new Map<string, BlindPoolEntry>();
   const profiles = pool.map((entry, i) => {
@@ -288,14 +360,17 @@ export const matchCandidates = async (params: {
   for (let i = 0; i < profiles.length; i += MATCH_CHUNK_SIZE) chunks.push(profiles.slice(i, i + MATCH_CHUNK_SIZE));
   let done = 0;
   onProgress?.(`${pool.length}名の候補者を求人と照合しています…`);
-  const chunkResults = await runWithConcurrency(chunks, 4, async chunk => {
+  const chunkResults = await runWithConcurrency(chunks, MATCH_CONCURRENCY, async chunk => {
+    const chunkStartedAt = Date.now();
     const res = await scoreChunk(
       jobParts, companyName, extraConditions,
       chunk.map(p => ({ id: p.id, text: buildMatchingProfile(p.entry, p.id, chunks.length === 1) })),
       chunks.length === 1 ? shortlistSize : Math.min(chunk.length, Math.max(wantedCount * 2, 8)),
       hasJobDescription,
     );
+    recordBlindTiming('matchSecPer60', (Date.now() - chunkStartedAt) / 1000 / Math.max(MATCH_SIZE_FLOOR, chunk.length / 60));
     done++;
+    onChunkDone?.();
     if (chunks.length > 1) onProgress?.(`候補者を照合中…（${done}/${chunks.length}グループ完了）`);
     return res;
   });
@@ -306,12 +381,15 @@ export const matchCandidates = async (params: {
     const finalists = scored.slice(0, shortlistSize);
     onProgress?.(`上位${finalists.length}名を詳しいプロフィールで再評価しています…`);
     const byId = new Map(profiles.map(p => [p.id, p]));
+    const rerankStartedAt = Date.now();
     const rescored = await scoreChunk(
       jobParts, companyName, extraConditions,
       finalists.map(f => ({ id: f.id, text: buildMatchingProfile(byId.get(f.id)!.entry, f.id, true) })),
       finalists.length,
       hasJobDescription,
     );
+    recordBlindTiming('rerankSec', (Date.now() - rerankStartedAt) / 1000);
+    onRerankDone?.();
     const rescoredValid = rescored.filter(r => idToKey.has(r.id));
     if (rescoredValid.length > 0) scored = rescoredValid;
   }
@@ -366,6 +444,7 @@ export const generateBlindResume = async (params: {
     '- matchPointsは推薦先の求人要件と結び付けた適合ポイントを3つ（各60字程度）。',
     '- headlineは候補者を一言で表すキャッチ（30字程度）、coverPointは表紙の一覧に載せる適合ポイントの要約（50字程度）。',
   ].filter(s => s !== '').join('\n');
+  const generateStartedAt = Date.now();
   const response = await newAi().models.generateContent({
     model: MODEL,
     contents: { parts: [...jobParts, { text: instruction }] },
@@ -397,6 +476,7 @@ export const generateBlindResume = async (params: {
       },
     },
   });
+  recordBlindTiming('generateSec', (Date.now() - generateStartedAt) / 1000);
   const parsed = JSON.parse((response.text || '{}').trim());
   const r = (s: unknown) => redactPersonalInfo(typeof s === 'string' ? s.trim() : '', c);
   return {
