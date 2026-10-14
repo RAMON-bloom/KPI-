@@ -3937,3 +3937,12 @@ p.memo-content-text {
 .blind-resume-link-button { background: none; border: none; color: var(--primary-color); cursor: pointer; padding: 0; font-size: 0.85rem; text-decoration: underline; }
 .blind-resume-link-button:disabled { color: var(--text-muted-color); cursor: default; }
 .blind-resume-phase-cell { white-space: nowrap; }
+/* ヘッダーの「ブラインドレジュメ作成」タブ — 他の集計タブと区別しやすいよう薄い緑の背景にする
+   （選択中は他のタブと同じ青の選択色）。 */
+.view-switcher button.view-switcher-blind-resume:not(:disabled) {
+  background-color: #e3f4e6;
+  color: #1e6b34;
+}
+.view-switcher button.view-switcher-blind-resume:hover:not(:disabled) {
+  background-color: #cdebd3;
+}

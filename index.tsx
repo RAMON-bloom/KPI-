@@ -4398,6 +4398,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-14',
     items: [
+      'ヘッダーのタブ名を「ブラインドレジュメ作成」に変更し、見つけやすいよう薄い緑の背景にした',
       'ブラインドレジュメ作成で、対象にする候補者を「選考中・応募前・内定承諾・見送り・辞退・掘り起し・非表示」のフェーズで絞り込めるようにした（複数選択可。選んだフェーズのいずれかに該当する候補者が対象で、フェーズごとの人数と対象人数をその場で表示します）',
       'ブラインドレジュメ作成を、候補者パイプライン内のボタンから、「個人実績」「全ユーザー」「チーム別」「候補者パイプライン」と並ぶ独立したタブ「ブラインドレジュメ」に移した。他のタブを見に行っても入力内容・作成途中のレジュメは残ります',
       'ブラインドレジュメ作成で、求人内容を空欄のままでも作成できるようにした。その場合は企業名（とポジション名）からWeb検索で企業情報・採用ニーズを調べ、一般的にマッチ度が高そうな候補者を提案します（調べた内容と出典は候補者一覧の上で確認できます）。あわせて、候補者ごとに「推奨ポジション」を提案し、表紙と各候補者のページに載せるようにした（編集画面で修正・削除できます）',
@@ -19717,7 +19718,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('all_users_kpi')} disabled={view === 'all_users_kpi'}>全ユーザー</button>
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
-            <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'}>ブラインドレジュメ</button>
+            <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'} className="view-switcher-blind-resume">ブラインドレジュメ作成</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
