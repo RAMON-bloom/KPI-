@@ -4266,62 +4266,72 @@ p.memo-content-text {
 /* 選考情報モーダルの「面接対策」欄。資料作成・アンケート・実績ナレッジを色分けしたカードに分け、
    各カードの主操作（生成ボタン・コピー）を一目で分かるようにする。 */
 .modal-content.application-modal { max-width: 580px; }
-.interview-prep-section > label { font-size: 1rem; font-weight: 700; }
-.prep-card {
-  --prep-accent: #8b1e2d;
-  --prep-tint: #fbf4f5;
-  margin-top: 0.75rem;
-  padding: 0.9rem 1rem 1rem;
-  border: 1px solid #e3e6ea;
-  border-left: 4px solid var(--prep-accent);
-  border-radius: 8px;
-  background: #fff;
+.interview-prep-section > label {
+  margin: 1.4rem 0 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #7a8090;
 }
-.prep-card--survey { --prep-accent: #0f7b6c; --prep-tint: #eef8f6; }
-.prep-card--insights { --prep-accent: #3b5bdb; --prep-tint: #f1f4fe; }
+.prep-card {
+  --prep-accent: #1f2a44;
+  --prep-tint: #eef0f4;
+  --prep-line: #e4e6eb;
+  margin-top: 0.85rem;
+  padding: 1rem 1.1rem 1.1rem;
+  border: 1px solid var(--prep-line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
 .prep-card-header {
   display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  margin-bottom: 0.75rem;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 0.9rem;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid var(--prep-line);
 }
 .prep-card-icon {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 7px;
   background: var(--prep-tint);
-  font-size: 1rem;
+  color: var(--prep-accent);
 }
 .prep-card-title {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 0.93rem;
   font-weight: 700;
-  color: #212529;
+  letter-spacing: 0.02em;
+  color: #1a1f2b;
   display: flex;
   align-items: center;
   gap: 0.4rem;
   flex-wrap: wrap;
 }
 .prep-card-desc {
-  margin: 0.15rem 0 0;
-  font-size: 0.78rem;
-  color: #6c757d;
+  margin: 0.1rem 0 0;
+  font-size: 0.75rem;
+  color: #7a8090;
 }
 .prep-chip {
   display: inline-block;
   padding: 0.05rem 0.5rem;
-  border-radius: 999px;
-  background: var(--prep-tint);
-  color: var(--prep-accent);
-  font-size: 0.7rem;
+  border: 1px solid #d5d9e2;
+  border-radius: 4px;
+  background: #fff;
+  color: #5a6172;
+  font-size: 0.68rem;
   font-weight: 600;
+  letter-spacing: 0.03em;
   white-space: nowrap;
 }
-.prep-chip--ok { background: #e6f4ea; color: #1e7b34; }
+.prep-chip--ok { border-color: #c5d9cc; background: #f3f8f5; color: #2f6b4a; }
 .prep-primary-row {
   display: flex;
   gap: 0.5rem;
@@ -4329,24 +4339,26 @@ p.memo-content-text {
 }
 .prep-primary-button {
   flex: 1 1 auto;
-  padding: 0.65rem 1rem;
+  padding: 0.7rem 1rem;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--prep-accent);
   color: #fff;
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   cursor: pointer;
-  transition: filter 0.15s;
+  transition: background 0.15s;
 }
-.prep-primary-button:hover:not(:disabled) { filter: brightness(1.12); }
+.prep-primary-button:hover:not(:disabled) { background: #2d3b5e; }
 .prep-primary-button:disabled { opacity: 0.45; cursor: not-allowed; }
 .prep-secondary-button {
   display: inline-flex;
   align-items: center;
-  padding: 0.65rem 1rem;
-  border: 1px solid var(--prep-accent);
-  border-radius: 6px;
+  gap: 0.35rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid #c9cedb;
+  border-radius: 7px;
   background: #fff;
   color: var(--prep-accent);
   font-size: 0.9rem;
@@ -4361,10 +4373,11 @@ p.memo-content-text {
   color: #6c757d;
 }
 .prep-status.is-active {
-  padding: 0.4rem 0.6rem;
-  border-radius: 6px;
-  background: #e6f4ea;
-  color: #1e5e2f;
+  padding: 0.45rem 0.65rem;
+  border-left: 2px solid #4f7a63;
+  border-radius: 0 6px 6px 0;
+  background: #f3f7f4;
+  color: #2f5641;
 }
 .prep-note {
   margin: 0.35rem 0 0;
@@ -4375,9 +4388,9 @@ p.memo-content-text {
 .prep-field-label {
   display: block;
   margin-bottom: 0.3rem;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
-  color: #495057;
+  color: #4a5162;
 }
 .prep-docs {
   margin-top: 0.85rem;
@@ -4388,14 +4401,15 @@ p.memo-content-text {
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid #edf0f2;
-  border-radius: 6px;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--prep-line);
+  border-radius: 7px;
   font-size: 0.85rem;
 }
 .prep-docs li + li { margin-top: 0.3rem; }
-.prep-docs li.is-linked { border-color: #b7dfc3; background: #f4fbf6; }
-.prep-docs li a { font-weight: 600; }
+.prep-docs li.is-linked { border-color: #c5d9cc; background: #f7faf8; }
+.prep-docs li a { font-weight: 600; color: var(--prep-accent); text-decoration: none; }
+.prep-docs li a:hover { text-decoration: underline; }
 .prep-docs-date { font-size: 0.75rem; color: #6c757d; }
 .prep-docs li .interview-prep-link-button,
 .prep-docs li .prep-chip { margin-left: auto; }
@@ -4412,19 +4426,20 @@ p.memo-content-text {
 .prep-steps > li.is-disabled .prep-field-label { color: #adb5bd; }
 .prep-step-num {
   flex-shrink: 0;
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.45rem;
+  height: 1.45rem;
+  border: 1px solid var(--prep-accent);
   border-radius: 50%;
-  background: var(--prep-accent);
-  color: #fff;
-  font-size: 0.8rem;
+  background: #fff;
+  color: var(--prep-accent);
+  font-size: 0.75rem;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   margin-top: 0.05rem;
 }
-.prep-steps > li.is-disabled .prep-step-num { background: #ced4da; }
+.prep-steps > li.is-disabled .prep-step-num { border-color: #ced4da; color: #adb5bd; }
 .prep-step-body { flex: 1; min-width: 0; }
 .prep-copy-buttons {
   display: grid;
@@ -4432,12 +4447,16 @@ p.memo-content-text {
   gap: 0.5rem;
 }
 .prep-copy-buttons button {
-  padding: 0.55rem 0.75rem;
-  border: 1px solid var(--prep-accent);
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #c9cedb;
+  border-radius: 7px;
   background: #fff;
   color: var(--prep-accent);
-  font-size: 0.88rem;
+  font-size: 0.87rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -4449,9 +4468,9 @@ p.memo-content-text {
 }
 .prep-details {
   margin-top: 0.85rem;
-  border: 1px solid #edf0f2;
-  border-radius: 6px;
-  background: #fcfcfd;
+  border: 1px solid var(--prep-line);
+  border-radius: 7px;
+  background: #fafbfc;
 }
 .prep-details > summary {
   padding: 0.5rem 0.7rem;
@@ -4462,35 +4481,36 @@ p.memo-content-text {
 }
 .prep-details > .interview-prep-knowledge-item { padding: 0 0.7rem; }
 .prep-count {
-  margin-left: 0.25rem;
-  padding: 0 0.45rem;
-  border-radius: 999px;
-  background: var(--prep-tint);
-  color: var(--prep-accent);
-  font-size: 0.72rem;
+  margin-left: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #7a8090;
 }
 .prep-stats {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  align-items: baseline;
+  gap: 0.9rem;
   flex-wrap: wrap;
-  padding: 0.55rem 0.7rem;
-  border-radius: 6px;
-  background: var(--prep-tint);
-  font-size: 0.82rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--prep-line);
+  border-radius: 7px;
+  background: #fafbfc;
+  font-size: 0.8rem;
+  color: #5a6172;
 }
-.prep-stats-label { font-weight: 700; color: #343a40; margin-right: 0.25rem; }
-.prep-stat strong { font-size: 1.05rem; margin: 0 0.1rem; }
-.prep-stat--pass strong { color: #1e7b34; }
-.prep-stat--fail strong { color: #b02a37; }
+.prep-stats-label { font-weight: 700; color: #1a1f2b; }
+.prep-stat strong { font-size: 1.05rem; margin: 0 0.1rem; color: #1a1f2b; font-variant-numeric: tabular-nums; }
+.prep-stat--pass strong { color: #2f6b4a; }
+.prep-stat--fail strong { color: #9b3a3a; }
 .prep-stat--rate { margin-left: auto; }
-.prep-stat--rate strong { color: var(--prep-accent); font-size: 1.2rem; }
+.prep-stat--rate strong { color: var(--prep-accent); font-size: 1.3rem; }
 .prep-card--insights .knowledge-submit { margin-top: 0.85rem; }
 .prep-card--insights .knowledge-submit > .interview-prep-link-button {
   width: 100%;
-  padding: 0.5rem;
-  border: 1px dashed var(--prep-accent);
-  border-radius: 6px;
+  padding: 0.55rem;
+  border: 1px dashed #b7bdcb;
+  border-radius: 7px;
+  background: #fff;
   color: var(--prep-accent);
   font-size: 0.85rem;
   font-weight: 600;
@@ -4510,20 +4530,18 @@ p.memo-content-text {
 .prep-delete-button {
   flex-shrink: 0;
   padding: 0.15rem 0.6rem;
-  border: 1px solid #f1c0c5;
+  border: 1px solid #e3c9c9;
   border-radius: 4px;
   background: #fff;
-  color: #b02a37;
+  color: #9b3a3a;
   font-size: 0.75rem;
   cursor: pointer;
 }
 .prep-delete-button:hover { background: #fdf0f1; }
 
 /* 選考情報モーダルの上半分（企業名〜メモ）。面接対策欄の prep-card と同じカードで色分けする。 */
-.prep-card.app-card--basic { --prep-accent: #475569; --prep-tint: #f1f5f9; }
-.prep-card.app-card--schedule { --prep-accent: #c2410c; --prep-tint: #fff4ec; }
-.prep-card.app-card--fee { --prep-accent: #7c3aed; --prep-tint: #f5f0ff; }
-.prep-card.app-card--memo { --prep-accent: #64748b; --prep-tint: #f4f6f8; }
+/* 背景をわずかに沈め、白いカードを浮かせて区切りをはっきりさせる */
+.modal-content.application-modal .modal-body { background: #f6f7f9; }
 .application-modal .modal-body > .prep-card:first-child { margin-top: 0; }
 .prep-card .form-group { margin-bottom: 0.85rem; }
 .prep-card .form-group:last-child { margin-bottom: 0; }
@@ -4533,6 +4551,12 @@ p.memo-content-text {
   font-weight: 600;
   color: #495057;
 }
+.prep-card input:not([type="checkbox"]):not([type="radio"]),
+.prep-card select,
+.prep-card textarea {
+  border-color: #d5d9e2;
+  border-radius: 6px;
+}
 .prep-card .form-group input:focus,
 .prep-card .form-group select:focus,
 .prep-card .form-group textarea:focus {
@@ -4541,14 +4565,11 @@ p.memo-content-text {
   box-shadow: 0 0 0 3px var(--prep-tint);
 }
 .app-required {
-  margin-left: 0.3rem;
-  padding: 0 0.4rem;
-  border-radius: 999px;
-  background: #fdecee;
-  color: #b02a37;
+  margin-left: 0.35rem;
   font-size: 0.68rem;
-  font-weight: 700;
-  vertical-align: 1px;
+  font-weight: 600;
+  color: #9b3a3a;
+  letter-spacing: 0.03em;
 }
 .app-grid-2 {
   display: grid;

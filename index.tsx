@@ -4411,6 +4411,12 @@ interface ChangelogEntry {
 
 const APP_CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-10-16',
+    items: [
+      '選考情報の編集画面のデザインを、落ち着いた色合いに統一した。見出しのアイコンを絵文字から細い線のアイコンに変え、カードごとの色分けをやめて紺を基調にまとめました。カードは背景から少し浮かせ、見出し・入力欄・ボタンの強弱をはっきりさせています',
+    ],
+  },
+  {
     date: '2026-10-15',
     items: [
       '選考情報の編集画面の上半分（企業名〜メモ）も、面接対策欄と同じく色分けしたカードに整理した。「企業・次アクション」「進捗状況・選考日程」「報酬・確度」「メモ」に分かれ、報酬形態と料率、内定確度と入社確度は横に並べて見比べやすくしました',
@@ -7725,6 +7731,25 @@ const CandidateModal: React.FC<{
 };
 
 
+/** 選考情報モーダルのカード見出し・ボタン用の線画アイコン（currentColorで描く）。 */
+const PREP_ICON_PATHS: Record<string, React.ReactNode> = {
+    building: <><rect x="5" y="3" width="14" height="18" rx="1.5" /><path d="M9 7h1.5M13.5 7H15M9 11h1.5M13.5 11H15M9 15h1.5M13.5 15H15M10.5 21v-3h3v3" /></>,
+    calendar: <><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M3.5 10h17M8 3v4M16 3v4" /></>,
+    yen: <path d="M6.5 4 12 11.5 17.5 4M12 11.5V20M8 13h8M8 16.5h8" />,
+    note: <><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8z" /><path d="M14 3v5h5M8.5 13h7M8.5 16.5h4.5" /></>,
+    pen: <><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z" /><path d="m14 7 3 3" /></>,
+    clipboard: <><rect x="5.5" y="4.5" width="13" height="16.5" rx="1.5" /><path d="M9 4.5V3h6v1.5M8.5 10h7M8.5 13.5h7M8.5 17h4" /></>,
+    chart: <path d="M3.5 20.5h17M7 17v-5M12 17V7M17 17v-8" />,
+    mail: <><rect x="3" y="5" width="18" height="14" rx="1.5" /><path d="m3.5 6.5 8.5 6 8.5-6" /></>,
+    chat: <path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.3-4.4a8 8 0 1 1 15.2-4.1z" />,
+    external: <path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10" />,
+};
+const PrepIcon: React.FC<{ name: keyof typeof PREP_ICON_PATHS; size?: number }> = ({ name, size = 16 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+        {PREP_ICON_PATHS[name]}
+    </svg>
+);
+
 const ApplicationModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -7833,7 +7858,7 @@ const ApplicationModal: React.FC<{
                 <form id="application-form" className="modal-body" onSubmit={handleSubmit}>
                     <section className="prep-card app-card--basic">
                         <header className="prep-card-header">
-                            <span className="prep-card-icon" aria-hidden="true">🏢</span>
+                            <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="building" /></span>
                             <div>
                                 <h4 className="prep-card-title">企業・次アクション</h4>
                                 <p className="prep-card-desc">応募先の企業と、次にやることを入力します</p>
@@ -7863,7 +7888,7 @@ const ApplicationModal: React.FC<{
                     </section>
                     <section className="prep-card app-card--schedule">
                         <header className="prep-card-header">
-                            <span className="prep-card-icon" aria-hidden="true">🗓️</span>
+                            <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="calendar" /></span>
                             <div>
                                 <h4 className="prep-card-title">進捗状況・選考日程</h4>
                                 <p className="prep-card-desc">現在のフェーズと面接日程、意思決定の見込み時期</p>
@@ -7894,7 +7919,7 @@ const ApplicationModal: React.FC<{
                     </section>
                     <section className="prep-card app-card--fee">
                         <header className="prep-card-header">
-                            <span className="prep-card-icon" aria-hidden="true">💰</span>
+                            <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="yen" /></span>
                             <div>
                                 <h4 className="prep-card-title">報酬・確度</h4>
                                 <p className="prep-card-desc">想定粗利の計算や確度の集計に使われます</p>
@@ -7995,7 +8020,7 @@ const ApplicationModal: React.FC<{
                     </section>
                     <section className="prep-card app-card--memo">
                         <header className="prep-card-header">
-                            <span className="prep-card-icon" aria-hidden="true">🗒️</span>
+                            <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="note" /></span>
                             <div>
                                 <h4 className="prep-card-title">メモ</h4>
                                 <p className="prep-card-desc">この選考に関するメモ（社内用）</p>
@@ -8318,7 +8343,7 @@ const InterviewPrepSection: React.FC<{
             {/* 1. 面接対策資料を作る・紐づける */}
             <section className="prep-card prep-card--generate">
                 <header className="prep-card-header">
-                    <span className="prep-card-icon" aria-hidden="true">📝</span>
+                    <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="pen" /></span>
                     <div>
                         <h4 className="prep-card-title">面接対策資料</h4>
                         <p className="prep-card-desc">面接対策ジェネレーターで資料を作り、この選考に紐づけます</p>
@@ -8329,7 +8354,7 @@ const InterviewPrepSection: React.FC<{
                         面接対策ジェネレーターで作る
                     </button>
                     {isValidUrl && (
-                        <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く ↗</a>
+                        <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く<PrepIcon name="external" size={14} /></a>
                     )}
                 </div>
                 <p className={`prep-status${copyMessage ? ' is-active' : ''}`}>
@@ -8374,7 +8399,7 @@ const InterviewPrepSection: React.FC<{
             {companyName && (
                 <section className="prep-card prep-card--survey">
                     <header className="prep-card-header">
-                        <span className="prep-card-icon" aria-hidden="true">📋</span>
+                        <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="clipboard" /></span>
                         <div>
                             <h4 className="prep-card-title">面接振り返りアンケート <span className="prep-chip">候補者向け</span></h4>
                             <p className="prep-card-desc">面接の感想を候補者に回答してもらい、面談ログに取り込めます</p>
@@ -8399,8 +8424,8 @@ const InterviewPrepSection: React.FC<{
                             <div className="prep-step-body">
                                 <span className="prep-field-label">案内文をコピーして候補者に送る</span>
                                 <div className="prep-copy-buttons">
-                                    <button type="button" onClick={() => copyInvite('email')} disabled={!feedbackStage}>✉️ メール用をコピー</button>
-                                    <button type="button" onClick={() => copyInvite('line')} disabled={!feedbackStage}>💬 LINE用をコピー</button>
+                                    <button type="button" onClick={() => copyInvite('email')} disabled={!feedbackStage}><PrepIcon name="mail" />メール用をコピー</button>
+                                    <button type="button" onClick={() => copyInvite('line')} disabled={!feedbackStage}><PrepIcon name="chat" />LINE用をコピー</button>
                                 </div>
                                 {surveyMessage && <p className="prep-status is-active">{surveyMessage}</p>}
                                 {feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
@@ -8440,7 +8465,7 @@ const InterviewPrepSection: React.FC<{
             {companyName && (
                 <section className="prep-card prep-card--insights">
                     <header className="prep-card-header">
-                        <span className="prep-card-icon" aria-hidden="true">📊</span>
+                        <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="chart" /></span>
                         <div>
                             <h4 className="prep-card-title">{companyName}の実績・企業ナレッジ</h4>
                             <p className="prep-card-desc">面接対策ジェネレーターに記録された情報です</p>
