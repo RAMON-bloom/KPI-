@@ -768,6 +768,9 @@ interface Candidate {
   // に個別のタイトル編集・削除ができる。手書きのメモ（面談メモ、見送り理由等）も同じ場所に
   // 自由に追加できる。updatedAtはそのエントリが保存されるたびに自動設定される（手入力しない）。
   memos?: MemoEntry[];
+  // 取り込んだ後に削除した面接振り返りアンケートの回答キー（MemoEntry.sourceFileId = form:...）。
+  // 面談ログから消しただけだと「新しい回答」として再び取り込み候補に出てしまうため、ここに残す。
+  dismissedFeedbackKeys?: string[];
   createdAt: string; // ISO string
   // epoch ms, bumped by computeStageAdvanceUpdate and by every direct isHidden toggle (own or
   // ミドル代理) — lets performSave's Drive-write merge (dataSync.ts) tell which of two candidate
@@ -4410,6 +4413,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '取り込んだ面接振り返りアンケートの回答を削除できるようにした。選考情報の編集画面の「面接振り返りアンケート」欄で、回答ごとの「削除」から消せます（候補者カードの面談ログの×でも同じく削除できます）。一度削除した回答は、候補者パイプライン上部の「新しい回答」に再び出てくることはありません',
       '選考情報の編集画面の「面接対策」欄を見やすく整理した。「面接対策資料」「面接振り返りアンケート」「企業の実績・企業ナレッジ」を色分けしたカードに分け、「面接対策ジェネレーターで作る」を大きなボタンに、アンケートは「①対象の面接を選ぶ → ②メール用／LINE用をコピー」の順に並べました。ドライブの資料はどれが紐づけ済みか分かるようにし、通過実績は件数と通過率を大きく表示します',
       '選考情報の編集画面を開いている時に、画面の外側（暗くなっている背景）をクリックしても閉じないようにした。入力途中の内容がうっかり消えるのを防ぐためです。閉じる時は右上の×・キャンセル・保存を使ってください',
       '面接振り返りアンケートの案内文で、お見送りになった選考でも結果には一切触れないようにした（「残念な結果となりましたが」などの表現をやめ、選考中と同じ「お疲れさまでした」から始まる文面にしました）',
@@ -7727,8 +7731,10 @@ const ApplicationModal: React.FC<{
   candidateName: string;
   // 面接対策ジェネレーターに渡す候補者IDと面談メモ用（未指定ならその欄を出さない）。
   candidate?: Candidate;
+  // 選考情報の「面接振り返りアンケート」欄から、取り込んだ回答（面談ログ）を削除する。
+  onDeleteMemo?: (memoId: string) => void;
   initialData: CompanyApplication | null; // null for new, object for edit
-}> = ({ isOpen, onClose, onSave, candidateName, candidate, initialData }) => {
+}> = ({ isOpen, onClose, onSave, candidateName, candidate, onDeleteMemo, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
@@ -7970,6 +7976,7 @@ const ApplicationModal: React.FC<{
                             candidate={candidate}
                             application={application}
                             onUrlChange={url => setApplication(prev => ({ ...prev, interviewPrepDocUrl: url || undefined }))}
+                            onDeleteMemo={onDeleteMemo}
                         />
                     )}
                 </form>
@@ -8183,7 +8190,8 @@ const InterviewPrepSection: React.FC<{
     candidate: Candidate;
     application: CompanyApplication;
     onUrlChange: (url: string) => void;
-}> = ({ candidate, application, onUrlChange }) => {
+    onDeleteMemo?: (memoId: string) => void;
+}> = ({ candidate, application, onUrlChange, onDeleteMemo }) => {
     const [copyMessage, setCopyMessage] = useState('');
     const prep = useInterviewPrepData();
     const companyName = application.companyName.trim();
@@ -8366,7 +8374,18 @@ const InterviewPrepSection: React.FC<{
                             <summary>この選考の回答 <span className="prep-count">{surveyMemos.length}件</span></summary>
                             {surveyMemos.map(m => (
                                 <div key={m.id} className="interview-prep-knowledge-item">
-                                    <div className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</div>
+                                    <div className="prep-response-head">
+                                        <span className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</span>
+                                        {onDeleteMemo && (
+                                            <button
+                                                type="button"
+                                                className="prep-delete-button"
+                                                onClick={() => {
+                                                    if (window.confirm(`「${m.title}」を削除しますか？\n面談ログからも消え、元に戻せません（新しい回答として再表示もされません）。`)) onDeleteMemo(m.id);
+                                                }}
+                                            >削除</button>
+                                        )}
+                                    </div>
                                     <pre>{m.content}</pre>
                                 </div>
                             ))}
@@ -8580,6 +8599,22 @@ const KnowledgeSubmitForm: React.FC<{
  * 出し、ボタンで取り込む。受付番号（＝応募ID）で選考に紐づけ、取り込み済みかどうかは面談ログの
  * sourceFileId（form:タイムスタンプ_応募ID）で判定する。
  */
+/**
+ * 面談ログ（memos）から指定のメモを消した候補者を返す。面接振り返りアンケートから取り込んだメモ
+ * （sourceFileId = form:...）なら、そのキーを dismissedFeedbackKeys に残して再表示を防ぐ。
+ */
+const removeMemoFromCandidate = (c: Candidate, memos: MemoEntry[], memoId: string): Candidate => {
+    const target = memos.find(m => m.id === memoId);
+    const key = target?.sourceFileId?.startsWith('form:') ? target.sourceFileId : undefined;
+    return {
+        ...c,
+        memos: memos.filter(m => m.id !== memoId),
+        interviewMemo: undefined,
+        interviewSummary: undefined,
+        ...(key ? { dismissedFeedbackKeys: Array.from(new Set([...(c.dismissedFeedbackKeys || []), key])) } : {}),
+    };
+};
+
 const FeedbackResponsesPanel: React.FC<{
     candidates: Candidate[];
     onSaveCandidate: (candidate: Candidate) => void;
@@ -8605,8 +8640,10 @@ const FeedbackResponsesPanel: React.FC<{
             const hit = byAppId.get(r.applicationId);
             if (!hit) return [];
             const memos = hit.candidate.memos || [];
-            if (memos.some(m => m.sourceFileId === r.key)) return [];
-            if (!legacyClaimed.has(r.applicationId) && memos.some(m => m.sourceFileId === `form:undefined_${r.applicationId}`)) {
+            const dismissed = hit.candidate.dismissedFeedbackKeys || [];
+            if (memos.some(m => m.sourceFileId === r.key) || dismissed.includes(r.key)) return [];
+            const legacyKey = `form:undefined_${r.applicationId}`;
+            if (!legacyClaimed.has(r.applicationId) && (memos.some(m => m.sourceFileId === legacyKey) || dismissed.includes(legacyKey))) {
                 legacyClaimed.add(r.applicationId);
                 return [];
             }
@@ -13538,7 +13575,7 @@ const PipelineCandidateCard: React.FC<{
     setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
   };
   const removeMemo = (id: string) => {
-    commitMemos(displayMemos.filter(m => m.id !== id));
+    onSave(removeMemoFromCandidate(c, displayMemos, id));
   };
 
   // 面談ログ・メモの各項目の開閉状態 — 件数が増えるとカードが縦に長くなりすぎるため、
@@ -14708,8 +14745,26 @@ const CandidatePipelineView: React.FC<{
         setApplicationModalData({ candidate: null, application: null });
     };
 
+    // モーダルを開いた時点の候補者のコピーは、開いている間の他の保存（回答の削除など）を知らない
+    // ので、保存時は一覧の最新の候補者を元にする。
+    const latestModalCandidate = () => {
+        const opened = applicationModalData.candidate;
+        return opened ? (candidates.find(c => c.id === opened.id) || opened) : null;
+    };
+    const handleDeleteModalMemo = (memoId: string) => {
+        const candidate = latestModalCandidate();
+        if (!candidate) return;
+        const base: MemoEntry[] = candidate.memos && candidate.memos.length > 0 ? candidate.memos : [
+            ...(candidate.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: candidate.interviewMemo, updatedAt: '' }] : []),
+            ...(candidate.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約（旧形式・統合済み）', content: candidate.interviewSummary, updatedAt: '' }] : []),
+        ];
+        const updated = removeMemoFromCandidate(candidate, base, memoId);
+        saveCandidate(updated);
+        setApplicationModalData(prev => ({ ...prev, candidate: updated }));
+    };
+
     const handleSaveApplication = (applicationData: CompanyApplication) => {
-        const { candidate } = applicationModalData;
+        const candidate = latestModalCandidate();
         if (!candidate) return;
 
         const isEditing = candidate.applications.some(app => app.id === applicationData.id);
@@ -15105,6 +15160,7 @@ const CandidatePipelineView: React.FC<{
                     onSave={handleSaveApplication}
                     candidateName={applicationModalData.candidate.name}
                     candidate={applicationModalData.candidate}
+                    onDeleteMemo={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleDeleteModalMemo : undefined}
                     initialData={applicationModalData.application}
                 />
             )}

@@ -4499,3 +4499,22 @@ p.memo-content-text {
 @media (max-width: 480px) {
   .prep-copy-buttons { grid-template-columns: 1fr; }
 }
+.prep-response-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.prep-response-head .interview-prep-subtitle { margin-bottom: 0; }
+.prep-delete-button {
+  flex-shrink: 0;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid #f1c0c5;
+  border-radius: 4px;
+  background: #fff;
+  color: #b02a37;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.prep-delete-button:hover { background: #fdf0f1; }
