@@ -4800,3 +4800,68 @@ p.memo-content-text {
   word-break: break-word;
   color: #343a40;
 }
+
+/* 選考情報モーダルのタブ（APPLICATION_MODAL_TABS）。1タブ＝1カードなので、カード同士の上の余白は不要 */
+.modal-content.application-modal { max-width: 860px; }
+.application-modal [hidden] { display: none !important; }
+.application-modal .modal-body .prep-card { margin-top: 0; }
+.application-modal .interview-prep-section { margin: 0; }
+.app-modal-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.1rem;
+  padding: 0 1rem;
+  border-bottom: 1px solid #e4e6eb;
+  background: #fff;
+}
+.app-modal-tab {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.7rem 0.65rem 0.65rem;
+  border: none;
+  background: none;
+  color: #7a8090;
+  font-size: 0.83rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.app-modal-tab:hover { color: #1f2a44; }
+.app-modal-tab.is-active { color: #1f2a44; }
+.app-modal-tab.is-active::after {
+  content: '';
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: #1f2a44;
+}
+.app-modal-tab-count {
+  min-width: 1.15rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: #eef0f4;
+  color: #1f2a44;
+  font-size: 0.68rem;
+  line-height: 1.15rem;
+  text-align: center;
+}
+.prep-empty-tab {
+  padding: 2rem 1rem;
+  border: 1px dashed #d5d9e2;
+  border-radius: 10px;
+  background: #fff;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #7a8090;
+}
+.prep-responses .interview-prep-knowledge-item + .interview-prep-knowledge-item {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--prep-line);
+}

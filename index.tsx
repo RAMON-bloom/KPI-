@@ -4430,6 +4430,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '選考情報の編集画面を、縦に長くならないようタブで切り替える形にした。「企業・次アクション」「進捗状況」「報酬・確度」「メモ」「面接対策資料」「振り返りアンケート」「ナレッジ」「アンケート結果」の8つのタブに分かれています。タブを切り替えても入力中の内容は消えず、最後の「保存」でまとめて保存されます',
       '面接振り返りアンケートの案内文を、自分用に編集できるようにした。選考情報の「面接振り返りアンケート」欄の「案内文を編集（自分用）」から、メール・LINEごと、選考の状況（選考中・お見送り・辞退）ごとに文面を書き換えて保存できます。候補者名・企業名・面接・URLは {候補者名} などの差し込み項目で自動で入ります（URLは消しても最後に自動で入ります）。「既定の文面に戻す」でいつでも元に戻せます',
       '選考情報に「ポジション」欄を追加した。面接対策ジェネレーターにその企業で登録されているポジションが候補に出ます。候補に無いポジションは「新規登録」でジェネレーターにも登録できます',
       '選考情報の「面接対策資料」欄に「生成オプション」を追加し、ジェネレーターの生成画面で行っていた設定をKPI管理くんからできるようにした。フェーズ、求人票（保存済みのものを自動で読み込み・PDF/Wordファイルから読み取り・ジェネレーターへの保存）、使う面談メモの選択、レジュメファイルの追加、汎用ナレッジの選択、追加要望、資料内の敬称を指定してから「面接対策ジェネレーターで作る」を押すと、その内容で自動作成されます',
@@ -7758,6 +7759,23 @@ const CandidateModal: React.FC<{
 };
 
 
+/**
+ * 選考情報モーダルのタブ。縦に長くなりすぎたので、まとまりごとにタブで切り替える（2026-10-16）。
+ * 各タブの中身は表示しない時も描画したまま隠す（hidden）。入力途中の内容や、生成オプション・
+ * 案内文の編集などの状態がタブを切り替えても消えないようにするため。
+ */
+type ApplicationModalTab = 'basic' | 'schedule' | 'fee' | 'memo' | 'prep' | 'survey' | 'knowledge' | 'responses';
+const APPLICATION_MODAL_TABS: { key: ApplicationModalTab; label: string; needsCandidate?: boolean }[] = [
+    { key: 'basic', label: '企業・次アクション' },
+    { key: 'schedule', label: '進捗状況' },
+    { key: 'fee', label: '報酬・確度' },
+    { key: 'memo', label: 'メモ' },
+    { key: 'prep', label: '面接対策資料', needsCandidate: true },
+    { key: 'survey', label: '振り返りアンケート', needsCandidate: true },
+    { key: 'knowledge', label: 'ナレッジ', needsCandidate: true },
+    { key: 'responses', label: 'アンケート結果', needsCandidate: true },
+];
+
 /** 選考情報モーダルのカード見出し・ボタン用の線画アイコン（currentColorで描く）。 */
 const PREP_ICON_PATHS: Record<string, React.ReactNode> = {
     building: <><rect x="5" y="3" width="14" height="18" rx="1.5" /><path d="M9 7h1.5M13.5 7H15M9 11h1.5M13.5 11H15M9 15h1.5M13.5 15H15M10.5 21v-3h3v3" /></>,
@@ -7800,9 +7818,11 @@ const ApplicationModal: React.FC<{
     // 保持して成約月の確認ポップアップ（DecisionMonthPromptModal）を挟む。ポップアップで
     // 選ばれた月を反映したexpectedDecisionDateに上書きしてから実際のonSaveを呼ぶ。
     const [pendingSaveApplication, setPendingSaveApplication] = useState<CompanyApplication | null>(null);
+    const [activeTab, setActiveTab] = useState<ApplicationModalTab>('basic');
 
     useEffect(() => {
         if (isOpen) {
+            setActiveTab('basic');
             if (initialData) {
                 setApplication(initialData); // Editing existing application
             } else {
@@ -7850,6 +7870,7 @@ const ApplicationModal: React.FC<{
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!application.companyName.trim()) {
+            setActiveTab('basic');
             alert('企業名は必須です。');
             return;
         }
@@ -7887,8 +7908,30 @@ const ApplicationModal: React.FC<{
                     <h3 id="application-modal-title">{modalTitle}</h3>
                     <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
                 </div>
-                <form id="application-form" className="modal-body" onSubmit={handleSubmit}>
-                    <section className="prep-card app-card--basic">
+                <nav className="app-modal-tabs" role="tablist" aria-label="選考情報の項目">
+                    {APPLICATION_MODAL_TABS.filter(t => !t.needsCandidate || candidate).map(t => {
+                        const count = t.key === 'responses' && candidate
+                            ? (candidate.memos || []).filter(m => m.sourceFileId?.startsWith('form:') && m.sourceFileId.endsWith(`_${application.id}`)).length
+                            : 0;
+                        return (
+                            <button
+                                key={t.key}
+                                type="button"
+                                role="tab"
+                                aria-selected={activeTab === t.key}
+                                className={`app-modal-tab${activeTab === t.key ? ' is-active' : ''}`}
+                                onClick={() => setActiveTab(t.key)}
+                            >
+                                {t.label}
+                                {count > 0 && <span className="app-modal-tab-count">{count}</span>}
+                            </button>
+                        );
+                    })}
+                </nav>
+                {/* 企業名は「企業・次アクション」タブにある。隠れたタブの必須欄でブラウザの検証が黙って止まらない
+                    よう、検証は handleSubmit で行う（未入力ならそのタブに戻す） */}
+                <form id="application-form" className="modal-body" onSubmit={handleSubmit} noValidate>
+                    <section className="prep-card app-card--basic" hidden={activeTab !== 'basic'}>
                         <header className="prep-card-header">
                             <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="building" /></span>
                             <div>
@@ -7928,7 +7971,7 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     </section>
-                    <section className="prep-card app-card--schedule">
+                    <section className="prep-card app-card--schedule" hidden={activeTab !== 'schedule'}>
                         <header className="prep-card-header">
                             <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="calendar" /></span>
                             <div>
@@ -7959,7 +8002,7 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     </section>
-                    <section className="prep-card app-card--fee">
+                    <section className="prep-card app-card--fee" hidden={activeTab !== 'fee'}>
                         <header className="prep-card-header">
                             <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="yen" /></span>
                             <div>
@@ -8060,7 +8103,7 @@ const ApplicationModal: React.FC<{
                     </div>
                     </div>
                     </section>
-                    <section className="prep-card app-card--memo">
+                    <section className="prep-card app-card--memo" hidden={activeTab !== 'memo'}>
                         <header className="prep-card-header">
                             <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="note" /></span>
                             <div>
@@ -8089,6 +8132,7 @@ const ApplicationModal: React.FC<{
                             onKnowledgeSubmitted={onKnowledgeSubmitted && (() => onKnowledgeSubmitted(application.id))}
                             feedbackInviteTemplates={feedbackInviteTemplates}
                             onSaveFeedbackInviteTemplates={onSaveFeedbackInviteTemplates}
+                            activeTab={activeTab}
                         />
                     )}
                 </form>
@@ -8379,7 +8423,9 @@ const InterviewPrepSection: React.FC<{
     onKnowledgeSubmitted?: () => void;
     feedbackInviteTemplates?: FeedbackInviteTemplates;
     onSaveFeedbackInviteTemplates?: (templates: FeedbackInviteTemplates) => void;
-}> = ({ candidate, application, onUrlChange, onDeleteMemo, onKnowledgeSubmitted, feedbackInviteTemplates, onSaveFeedbackInviteTemplates }) => {
+    // 選考情報モーダルで表示中のタブ（この欄のどのカードを見せるか）
+    activeTab: ApplicationModalTab;
+}> = ({ candidate, application, onUrlChange, onDeleteMemo, onKnowledgeSubmitted, feedbackInviteTemplates, onSaveFeedbackInviteTemplates, activeTab }) => {
     const [copyMessage, setCopyMessage] = useState('');
     const prep = useInterviewPrepData();
     const companyName = application.companyName.trim();
@@ -8518,11 +8564,13 @@ const InterviewPrepSection: React.FC<{
     };
 
     return (
-        <div className="form-group interview-prep-section">
-            <label htmlFor="interviewPrepDocUrl">面接対策</label>
+        <div className="interview-prep-section">
+            {!companyName && (activeTab === 'survey' || activeTab === 'knowledge' || activeTab === 'responses') && (
+                <p className="prep-empty-tab">「企業・次アクション」タブで企業名を入力すると使えます。</p>
+            )}
 
             {/* 1. 面接対策資料を作る・紐づける */}
-            <section className="prep-card prep-card--generate">
+            <section className="prep-card prep-card--generate" hidden={activeTab !== 'prep'}>
                 <header className="prep-card-header">
                     <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="pen" /></span>
                     <div>
@@ -8706,7 +8754,7 @@ const InterviewPrepSection: React.FC<{
 
             {/* 2. 候補者向けの面接振り返りアンケート */}
             {companyName && (
-                <section className="prep-card prep-card--survey">
+                <section className="prep-card prep-card--survey" hidden={activeTab !== 'survey'}>
                     <header className="prep-card-header">
                         <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="clipboard" /></span>
                         <div>
@@ -8753,10 +8801,22 @@ const InterviewPrepSection: React.FC<{
                             sample={{ candidateName: candidate.name, companyName, interviewStage: feedbackStage || '一次面接', url: 'https://kpi-mgr-five.vercel.app/q/…' }}
                         />
                     )}
-                    {surveyMemos.length > 0 && (
-                        <details className="prep-details" open>
-                            <summary>この選考の回答 <span className="prep-count">{surveyMemos.length}件</span></summary>
-                            {surveyMemos.map(m => (
+                </section>
+            )}
+
+            {/* 4. 取り込んだアンケートの回答 */}
+            {companyName && (
+                <section className="prep-card prep-card--responses" hidden={activeTab !== 'responses'}>
+                    <header className="prep-card-header">
+                        <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="clipboard" /></span>
+                        <div>
+                            <h4 className="prep-card-title">アンケート結果 <span className="prep-count">{surveyMemos.length}件</span></h4>
+                            <p className="prep-card-desc">この選考で取り込んだ面接振り返りアンケートの回答です（候補者パイプラインの上部から取り込めます）</p>
+                        </div>
+                    </header>
+                    {surveyMemos.length === 0 && <p className="prep-note">まだ回答はありません。「振り返りアンケート」タブから候補者に案内を送ってください。</p>}
+                    <div className="prep-responses">
+                        {surveyMemos.map(m => (
                                 <div key={m.id} className="interview-prep-knowledge-item">
                                     <div className="prep-response-head">
                                         <span className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</span>
@@ -8773,14 +8833,13 @@ const InterviewPrepSection: React.FC<{
                                     <pre>{m.content}</pre>
                                 </div>
                             ))}
-                        </details>
-                    )}
+                    </div>
                 </section>
             )}
 
             {/* 3. ジェネレーターに記録された実績・ナレッジ、投稿 */}
             {companyName && (
-                <section className="prep-card prep-card--insights">
+                <section className="prep-card prep-card--insights" hidden={activeTab !== 'knowledge'}>
                     <header className="prep-card-header">
                         <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="chart" /></span>
                         <div>
