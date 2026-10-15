@@ -33,6 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { loadPendingGeneratedDocs, saveGeneratedDocToDrive, prepDocOpenUrl, prepDocDownloadUrl, googleDocIdFromUrl, PREP_DOCS_FOLDER_NAME, type SavedPrepDoc } from './services/generatedPrepDocs';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -684,6 +685,10 @@ interface CompanyApplication {
   // 面接対策ジェネレーター（GAS）で作った面接対策資料（Word）のURL。今は手で貼り付ける。
   // GAS側が対応したら生成時に自動で入る想定（services/interviewPrep.ts参照）。
   interviewPrepDocUrl?: string;
+  // 面接対策ジェネレーターで作り、担当者本人のドライブ（「面接対策資料」フォルダ）に自動保存した
+  // 資料（Googleドキュメント）。新しい順ではなく保存順。最新のものが interviewPrepDocUrl にも入る
+  // （services/generatedPrepDocs.ts、GeneratedPrepDocsCollector）。
+  interviewPrepDocs?: SavedPrepDoc[];
   // 企業名を面接対策ジェネレーターの企業マスタ（companies シート）から選んだ場合の企業ID。
   // ジェネレーターのデータとの突き合わせに名前より優先して使う。企業名を後から書き換えて
   // マスタの名前と合わなくなった場合は無視される（services/interviewPrepData.ts）。
@@ -4413,6 +4418,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '面接対策ジェネレーターで作った面接対策資料が、自動で自分のGoogleドライブに保存され、その選考に紐づくようにした。候補者カードの選考バッジの「対策資料」や、選考情報の「面接対策資料」欄から、いつでも開いたりWordでダウンロードしたりできます。対象は選考情報の「面接対策ジェネレーターで作る」から開いて生成した資料で、ドライブの「面接対策資料」フォルダにGoogleドキュメントとして保存されます（KPI管理くんを開いている間に1分以内に保存されます。生成後に本文を編集してWordをダウンロードした場合は、編集後の内容に更新されます）',
       '企業ナレッジ・選考結果をジェネレーターに投稿してから反映されるまでの待ち時間を短くした（最大10分 → 送信直後、遅くとも1分ほど）。送信と同時にジェネレーターへ取り込みを依頼し、届かなかった場合もジェネレーター側が1分ごとに取り込みます',
       '面接振り返りアンケートの回答が、候補者パイプラインの「新しい回答」に出るまでに時間がかかる（ページを再読み込みするまで出ない）ことがあったのを改善した。画面を開いている間は1分ごと、別のタブから戻ってきた時にも自動で回答を確認します',
       '選考情報の編集画面のデザインを、落ち着いた色合いに統一した。見出しのアイコンを絵文字から細い線のアイコンに変え、カードごとの色分けをやめて紺を基調にまとめました。カードは背景から少し浮かせ、見出し・入力欄・ボタンの強弱をはっきりさせています',
@@ -7745,6 +7751,7 @@ const PREP_ICON_PATHS: Record<string, React.ReactNode> = {
     mail: <><rect x="3" y="5" width="18" height="14" rx="1.5" /><path d="m3.5 6.5 8.5 6 8.5-6" /></>,
     chat: <path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.3-4.4a8 8 0 1 1 15.2-4.1z" />,
     external: <path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10" />,
+    download: <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M4.5 19.5h15" />,
 };
 const PrepIcon: React.FC<{ name: keyof typeof PREP_ICON_PATHS; size?: number }> = ({ name, size = 16 }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -8284,6 +8291,10 @@ const InterviewPrepSection: React.FC<{
     );
     const url = application.interviewPrepDocUrl || '';
     const isValidUrl = /^https?:\/\//.test(url.trim());
+    const urlDocId = googleDocIdFromUrl(url);
+    // 自動保存した資料は、モーダルを開いた後に届くこともあるので、最新の候補者の側から読む
+    const savedDocs = candidate.applications.find(a => a.id === application.id)?.interviewPrepDocs || [];
+    const otherDocs = docs.filter(d => !savedDocs.some(s => s.fileId === d.id));
 
     // アンケートで聞く面接の段階。選考のステータス（お見送り等）ではなく、候補者が受けた面接を入れる。
     const [feedbackStage, setFeedbackStage] = useState<string>(() => defaultFeedbackStage(application) || '');
@@ -8358,12 +8369,15 @@ const InterviewPrepSection: React.FC<{
                     {isValidUrl && (
                         <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く<PrepIcon name="external" size={14} /></a>
                     )}
+                    {urlDocId && (
+                        <a href={prepDocDownloadUrl(urlDocId)} className="prep-secondary-button">Word<PrepIcon name="download" size={14} /></a>
+                    )}
                 </div>
                 <p className={`prep-status${copyMessage ? ' is-active' : ''}`}>
                     {copyMessage || (!companyName
                         ? '先に企業名を入力してください。'
                         : memoText
-                            ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
+                            ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。作った資料は自動であなたのドライブに保存され、ここに紐づきます。'
                             : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
                 </p>
                 <div className="prep-field">
@@ -8376,11 +8390,27 @@ const InterviewPrepSection: React.FC<{
                         placeholder="https://docs.google.com/... を貼り付け"
                     />
                 </div>
-                {docs.length > 0 && (
+                {savedDocs.length > 0 && (
+                    <div className="prep-docs">
+                        <span className="prep-field-label">ジェネレーターで作った資料（ドライブの「{PREP_DOCS_FOLDER_NAME}」に保存済み）</span>
+                        <ul>
+                            {[...savedDocs].reverse().map(d => (
+                                <li key={d.key} className={url.trim() === prepDocOpenUrl(d.fileId) ? 'is-linked' : ''}>
+                                    <a href={prepDocOpenUrl(d.fileId)} target="_blank" rel="noopener noreferrer">{d.name}</a>
+                                    <span className="prep-docs-date">{d.savedAt.slice(0, 10)}保存</span>
+                                    <a href={prepDocDownloadUrl(d.fileId)} className="prep-download-link">
+                                        <PrepIcon name="download" size={14} />Word
+                                    </a>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+                {otherDocs.length > 0 && (
                     <div className="prep-docs">
                         <span className="prep-field-label">ドライブにある{companyName}の資料</span>
                         <ul>
-                            {docs.map(d => {
+                            {otherDocs.map(d => {
                                 const linked = url.trim() === d.url;
                                 return (
                                     <li key={d.id} className={linked ? 'is-linked' : ''}>
@@ -8682,6 +8712,93 @@ const removeMemoFromCandidate = (c: Candidate, memos: MemoEntry[], memoId: strin
         interviewSummary: undefined,
         ...(key ? { dismissedFeedbackKeys: Array.from(new Set([...(c.dismissedFeedbackKeys || []), key])) } : {}),
     };
+};
+
+/**
+ * 面接対策ジェネレーターで作った資料（KPI管理くんから開いて生成したもの）を受け取り、担当者本人の
+ * ドライブの「面接対策資料」フォルダに保存して、その選考に紐づける。表示中は1分ごとと、タブに
+ * 戻ってきた時に確認する。保存できたら一覧の上部にお知らせを出す。
+ */
+const GeneratedPrepDocsCollector: React.FC<{
+    candidates: Candidate[];
+    onSaveCandidate: (candidate: Candidate) => void;
+}> = ({ candidates, onSaveCandidate }) => {
+    const candidatesRef = useRef(candidates);
+    candidatesRef.current = candidates;
+    const saveRef = useRef(onSaveCandidate);
+    saveRef.current = onSaveCandidate;
+    const busyRef = useRef(false);
+    const [notices, setNotices] = useState<{ id: string; text: string; fileId: string }[]>([]);
+    const [error, setError] = useState('');
+
+    const collect = useCallback(async () => {
+        if (busyRef.current) return;
+        busyRef.current = true;
+        try {
+            const appIds = new Set<string>(candidatesRef.current.flatMap(c => c.applications.map(a => a.id)));
+            if (appIds.size === 0) return;
+            const deliveries = await loadPendingGeneratedDocs(appIds);
+            for (const d of deliveries) {
+                const owner = candidatesRef.current.find(c => c.applications.some(a => a.id === d.applicationId));
+                const app = owner?.applications.find(a => a.id === d.applicationId);
+                if (!owner || !app) continue;
+                const saved = await saveGeneratedDocToDrive(d, app.interviewPrepDocs || []);
+                if (!saved) continue;   // 別のタブが受け取り中
+                // 保存の間に候補者が更新されているかもしれないので、最新の状態に書き足す
+                const latest = candidatesRef.current.find(c => c.id === owner.id) || owner;
+                saveRef.current({
+                    ...latest,
+                    applications: latest.applications.map(a => a.id !== d.applicationId ? a : {
+                        ...a,
+                        interviewPrepDocs: [...(a.interviewPrepDocs || []).filter(x => x.key !== saved.key), saved],
+                        interviewPrepDocUrl: prepDocOpenUrl(saved.fileId),
+                    }),
+                });
+                setNotices(prev => [...prev, {
+                    id: `${saved.key}_${saved.savedAt}`, fileId: saved.fileId,
+                    text: `${latest.name}さん・${d.companyName} ${d.phase}`,
+                }]);
+            }
+            setError('');
+        } catch (err) {
+            console.warn('面接対策資料のドライブ保存に失敗しました', err);
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            busyRef.current = false;
+        }
+    }, []);
+
+    useEffect(() => {
+        collect();
+        const refreshIfVisible = () => { if (document.visibilityState === 'visible') collect(); };
+        const intervalId = window.setInterval(refreshIfVisible, 60 * 1000);
+        document.addEventListener('visibilitychange', refreshIfVisible);
+        window.addEventListener('focus', refreshIfVisible);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', refreshIfVisible);
+            window.removeEventListener('focus', refreshIfVisible);
+        };
+    }, [collect]);
+
+    if (notices.length === 0 && !error) return null;
+    return (
+        <div className="prep-docs-notice">
+            {notices.map(n => (
+                <div key={n.id} className="prep-docs-notice-item">
+                    <span>面接対策資料をドライブの「{PREP_DOCS_FOLDER_NAME}」に保存し、選考に紐づけました：{n.text}</span>
+                    <a href={prepDocOpenUrl(n.fileId)} target="_blank" rel="noopener noreferrer">開く</a>
+                    <a href={prepDocDownloadUrl(n.fileId)}>Wordでダウンロード</a>
+                    <button type="button" className="interview-prep-link-button" onClick={() => setNotices(prev => prev.filter(x => x.id !== n.id))}>閉じる</button>
+                </div>
+            ))}
+            {error && notices.length === 0 && (
+                <div className="prep-docs-notice-item is-error">
+                    <span>面接対策ジェネレーターで作った資料をドライブに保存できませんでした（1分後にもう一度試します）：{error}</span>
+                </div>
+            )}
+        </div>
+    );
 };
 
 const FeedbackResponsesPanel: React.FC<{
@@ -12815,6 +12932,20 @@ const ApplicationStageBadge: React.FC<{
         対策資料
       </a>
     )}
+    {(() => {
+      const docId = googleDocIdFromUrl(app.interviewPrepDocUrl || '');
+      return docId && (
+        <a
+          href={prepDocDownloadUrl(docId)}
+          className="interview-prep-badge-link"
+          title="面接対策資料をWordでダウンロード"
+          onClick={e => e.stopPropagation()}
+          onKeyDown={e => e.stopPropagation()}
+        >
+          Word
+        </a>
+      );
+    })()}
   </span>
 );
 
@@ -14851,9 +14982,21 @@ const CandidatePipelineView: React.FC<{
         if (!candidate) return;
 
         const isEditing = candidate.applications.some(app => app.id === applicationData.id);
+        // モーダルを開いている間に、ジェネレーターで作った資料が自動保存されて紐づくことがある。
+        // モーダル側はその一覧を編集しないので最新のものを残し、資料のURLも担当者が書き換えて
+        // いなければ最新のもの（自動で紐づいた資料）を残す。
+        const latestApp = candidate.applications.find(app => app.id === applicationData.id);
+        const openedApp = applicationModalData.application;
+        const merged: CompanyApplication = latestApp ? {
+            ...applicationData,
+            interviewPrepDocs: latestApp.interviewPrepDocs,
+            interviewPrepDocUrl: applicationData.interviewPrepDocUrl === openedApp?.interviewPrepDocUrl
+                ? latestApp.interviewPrepDocUrl
+                : applicationData.interviewPrepDocUrl,
+        } : applicationData;
         
         const updatedApplications = isEditing
-            ? candidate.applications.map(app => app.id === applicationData.id ? applicationData : app)
+            ? candidate.applications.map(app => app.id === applicationData.id ? merged : app)
             : [...candidate.applications, applicationData];
         
         const updatedCandidate = {
@@ -15242,7 +15385,7 @@ const CandidatePipelineView: React.FC<{
                     onClose={handleCloseApplicationModal}
                     onSave={handleSaveApplication}
                     candidateName={applicationModalData.candidate.name}
-                    candidate={applicationModalData.candidate}
+                    candidate={latestModalCandidate() || applicationModalData.candidate}
                     onDeleteMemo={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleDeleteModalMemo : undefined}
                     initialData={applicationModalData.application}
                 />
@@ -15291,6 +15434,7 @@ const CandidatePipelineView: React.FC<{
             </div>
 
             <FeedbackResponsesPanel candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
+            <GeneratedPrepDocsCollector candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
 
             <MailResultSuggestionsPanel
                 candidates={ownCandidatesForSuggestions}
