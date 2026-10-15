@@ -8184,7 +8184,15 @@ const InterviewPrepSection: React.FC<{
     const stats = prep.data && companyName ? getPhaseStats(prep.data, companyName, application.stage, application.gasCompanyId) : null;
     const knowledge = prep.data && companyName ? getKnowledge(prep.data, companyName, application.stage, application.gasCompanyId) : [];
     const docs = prep.data && companyName ? findDocsForApplication(prep.data, companyName, application.stage).slice(0, 5) : [];
-    const memoText = useMemo(() => buildInterviewMemoText(sortMemosChronologically(candidate.memos || [])), [candidate.memos]);
+    // 面談メモ。まだ新形式（memos）に移っていない候補者は、カードと同じく旧形式の面談メモ・
+    // 面談要約を使う（これが無いと、旧形式のメモしか無い候補者で空のメモを渡してしまっていた）。
+    const memoText = useMemo(() => {
+        const memos: MemoEntry[] = candidate.memos && candidate.memos.length > 0 ? candidate.memos : [
+            ...(candidate.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: candidate.interviewMemo, updatedAt: '' }] : []),
+            ...(candidate.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約', content: candidate.interviewSummary, updatedAt: '' }] : []),
+        ];
+        return buildInterviewMemoText(sortMemosChronologically(memos));
+    }, [candidate.memos, candidate.interviewMemo, candidate.interviewSummary]);
     // この選考について取り込んだ面接振り返りアンケート（sourceFileId = form:<タイムスタンプ>_<応募ID>）。
     const surveyMemos = useMemo(
         () => sortMemosChronologically((candidate.memos || []).filter(m => m.sourceFileId?.startsWith('form:') && m.sourceFileId.endsWith(`_${application.id}`))),

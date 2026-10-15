@@ -43,11 +43,27 @@ export interface KnowledgeSubmission {
 
 const SHEETS_BASE = `https://sheets.googleapis.com/v4/spreadsheets/${INTERVIEW_PREP_SPREADSHEET_ID}`;
 
-/** KPI管理くん専用のシート（kpi_submissions / kpi_handoffs）が無ければ見出し付きで作る。 */
+const colLetter = (i: number): string => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + (i % 26));
+
+/**
+ * KPI管理くん専用のシート（kpi_submissions / kpi_handoffs）が無ければ見出し付きで作る。
+ * 既にある場合は、こちらで新しく使い始めた列の見出しが無ければ右端に足す（既存の列は動かさない）。
+ */
 const ensureSheet = async (title: string, columns: readonly string[]): Promise<void> => {
   const meta = await googleFetch(`${SHEETS_BASE}?fields=sheets.properties.title`);
   const exists = (meta.sheets || []).some((sh: any) => sh.properties?.title === title);
-  if (exists) return;
+  if (exists) {
+    const header: string[] = ((await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${title}!1:1`)}`)).values || [[]])[0] || [];
+    const missing = columns.filter(c => !header.includes(c));
+    if (missing.length > 0) {
+      const start = colLetter(header.length);
+      await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${title}!${start}1`)}?valueInputOption=RAW`, {
+        method: 'PUT',
+        body: JSON.stringify({ values: [missing] }),
+      });
+    }
+    return;
+  }
   try {
     await googleFetch(`${SHEETS_BASE}:batchUpdate`, {
       method: 'POST',
@@ -121,6 +137,9 @@ export const HANDOFF_COLUMNS = [
   'token', 'status', 'created_at', 'expires_at', 'created_by',
   'kpi_candidate_id', 'kpi_application_id', 'company_id', 'company_name', 'phase', 'position',
   'interview_memo', 'used_at',
+  // 候補者名（ジェネレーターの候補者名欄に入れる。ジェネレーターは画面上の「あなた」の置き換えにだけ
+  // 使い、AIには送らない）。面談メモと同じく、ジェネレーターが読み込んだら消す。
+  'candidate_name',
 ] as const;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -158,6 +177,7 @@ export const createHandoff = async (h: {
     // 面談メモは氏名・メール・電話番号を伏せてから置く（ジェネレーター側の自動マスクも通る）。
     interview_memo: fitSheetCell(maskPersonalInfo(h.memoText, h.candidateName)),
     used_at: '',
+    candidate_name: h.candidateName.trim(),
   };
   await appendRowByHeader(HANDOFFS_SHEET, row);
 };
@@ -183,7 +203,6 @@ export const registerCompany = async (rawName: string): Promise<{ id: string; na
   const nameCol = fullHeader.indexOf('name');
   if (idCol < 0 || nameCol < 0) throw new Error('ジェネレーターの企業マスタの形式が想定と違うため、登録できませんでした。');
   // id列とname列だけを読み直す（memo列などの長い本文は読まない）。
-  const colLetter = (i: number): string => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + (i % 26));
   const ranges = [idCol, nameCol].map(i => `ranges=${encodeURIComponent(`companies!${colLetter(i)}:${colLetter(i)}`)}`).join('&');
   const cols = (await googleFetch(`${SHEETS_BASE}/values:batchGet?${ranges}&majorDimension=COLUMNS`)).valueRanges || [];
   const ids: string[] = (cols[0]?.values?.[0] || []).slice(1);
