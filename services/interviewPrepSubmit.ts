@@ -65,6 +65,21 @@ const ensureSheet = async (title: string, columns: readonly string[]): Promise<v
 };
 const ensureSubmissionsSheet = () => ensureSheet(SUBMISSIONS_SHEET, SUBMISSION_COLUMNS);
 
+/**
+ * シートの見出し行に合わせて1行追記する。ジェネレーター側が列を足したり並べ替えたりしても
+ * （2026-10-15時点で kpi_submissions に case_id / phase_id が追加されている）、値が別の列に
+ * ずれないようにするため。見出しに無い項目は書かず、こちらが知らない列は空欄のままにする。
+ */
+const appendRowByHeader = async (sheet: string, fields: Record<string, string>): Promise<void> => {
+  const header: string[] = ((await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${sheet}!1:1`)}`)).values || [[]])[0] || [];
+  const missing = Object.keys(fields).filter(k => !header.includes(k));
+  if (missing.length > 0) console.warn(`${sheet} の見出しに無い項目は書き込みませんでした:`, missing);
+  await googleFetch(
+    `${SHEETS_BASE}/values/${encodeURIComponent(`${sheet}!A1`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    { method: 'POST', body: JSON.stringify({ values: [header.map(h => fields[h] ?? '')] }) },
+  );
+};
+
 const newSubmissionId = () => `ks_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
 /** 投稿を1行追記する。ジェネレーターの企業マスタに完全一致する企業があれば company_id も入れる。 */
@@ -88,10 +103,7 @@ export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewP
     candidate_attr: sub.candidateAttr.trim(), kpi_application_id: sub.applicationId,
     reviewed_at: '', reviewed_by: '', review_note: '',
   };
-  await googleFetch(
-    `${SHEETS_BASE}/values/${encodeURIComponent(`${SUBMISSIONS_SHEET}!A1`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-    { method: 'POST', body: JSON.stringify({ values: [SUBMISSION_COLUMNS.map(c => row[c])] }) },
-  );
+  await appendRowByHeader(SUBMISSIONS_SHEET, row);
   return id;
 };
 
@@ -147,10 +159,7 @@ export const createHandoff = async (h: {
     interview_memo: fitSheetCell(maskPersonalInfo(h.memoText, h.candidateName)),
     used_at: '',
   };
-  await googleFetch(
-    `${SHEETS_BASE}/values/${encodeURIComponent(`${HANDOFFS_SHEET}!A1`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
-    { method: 'POST', body: JSON.stringify({ values: [HANDOFF_COLUMNS.map(c => row[c])] }) },
-  );
+  await appendRowByHeader(HANDOFFS_SHEET, row);
 };
 
 // --- 企業の新規登録 ---
