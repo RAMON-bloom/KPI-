@@ -35,42 +35,85 @@ const OPTIONAL_COLUMNS = [
   '他社の選考状況（内定・最終面接の予定など）', '担当者に伝えたいこと・不安な点',
 ];
 
-export const buildFeedbackFormUrl = (app: { id: string; companyName: string; stage: string }): string => {
+// アンケートの対象にできる（＝候補者が実際に受ける）面接の段階。フォームの「選考フェーズ」欄には
+// これ以外（お見送り・選考辞退・内定など、kpi-mgr内部の選考ステータス）を絶対に入れない —
+// 候補者に見えてしまうため。
+export const FEEDBACK_INTERVIEW_STAGES = ['カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談'] as const;
+const isFeedbackStage = (s: string | undefined): s is string => !!s && (FEEDBACK_INTERVIEW_STAGES as readonly string[]).includes(s);
+
+/** 選考が今どういう状態か（案内文の書き分け用）。 */
+export type FeedbackOutcome = 'in_progress' | 'rejected' | 'withdrawn';
+export const feedbackOutcomeOf = (stage: string): FeedbackOutcome =>
+  stage === 'お見送り' ? 'rejected' : (stage === '選考辞退' || stage === '内定承諾後辞退') ? 'withdrawn' : 'in_progress';
+
+/**
+ * アンケートで聞く面接の段階の初期値。お見送り・辞退なら「どの段階で終わったか」（exitedFromStage）、
+ * 面接中のステージならそのステージ、それ以外（次の段階の日程調整中・内定など）なら直近に受けた面接。
+ * 面接を一度も受けていない選考（打診・書類選考のみ）は null。
+ */
+export const defaultFeedbackStage = (app: {
+  stage: string;
+  exitedFromStage?: string;
+  stageHistory?: { stage: string }[];
+}): string | null => {
+  if (feedbackOutcomeOf(app.stage) !== 'in_progress' && isFeedbackStage(app.exitedFromStage)) return app.exitedFromStage;
+  if (isFeedbackStage(app.stage)) return app.stage;
+  const past = [...(app.stageHistory || [])].reverse().find(h => isFeedbackStage(h.stage));
+  return past ? past.stage : null;
+};
+
+export const buildFeedbackFormUrl = (app: { id: string; companyName: string }, interviewStage: string): string => {
   const params = new URLSearchParams({ usp: 'pp_url' });
   params.set(`entry.${ENTRY_APPLICATION_ID}`, app.id);
   params.set(`entry.${ENTRY_COMPANY}`, app.companyName.trim());
-  params.set(`entry.${ENTRY_PHASE}`, app.stage);
+  params.set(`entry.${ENTRY_PHASE}`, isFeedbackStage(interviewStage) ? interviewStage : '');
   return `${FEEDBACK_FORM_RESPONDER_URL}?${params.toString()}`;
 };
 
-/** 候補者に送る案内文。メールは件名付きの丁寧な文面、LINEは短め。 */
+/**
+ * 候補者に送る案内文。メールは件名付きの丁寧な文面、LINEは短め。お見送りになった選考には
+ * 結果に触れつつ受けてもらったことへのお礼から入り、「次の選考」のような表現は使わない。
+ */
 export const buildFeedbackInviteText = (
   channel: 'email' | 'line',
-  params: { candidateName: string; companyName: string; stage: string; url: string },
+  params: { candidateName: string; companyName: string; interviewStage: string; outcome: FeedbackOutcome; url: string },
 ): string => {
   const name = params.candidateName.trim() ? `${params.candidateName.trim()}様` : '';
+  const target = `${params.companyName}の${params.interviewStage}`;
+  const opening = {
+    in_progress: { line: `${target}、お疲れさまでした！`, email: `先日は${target}、お疲れさまでした。` },
+    rejected: {
+      line: `${target}、お疲れさまでした。今回は残念な結果となりましたが、選考に臨んでいただきありがとうございました。`,
+      email: `先日は${target}にご参加いただき、ありがとうございました。今回は残念な結果となりましたが、真摯に選考に臨んでいただいたことに改めて御礼申し上げます。`,
+    },
+    withdrawn: { line: `${target}、ありがとうございました。`, email: `先日は${target}にご参加いただき、ありがとうございました。` },
+  }[params.outcome];
+  const purpose = {
+    in_progress: { line: '今後の対策のため、', email: '今後の選考に向けた対策のため、' },
+    rejected: { line: '今後の転職活動のサポートに活かすため、', email: '今後の転職活動のサポートにより活かしていくため、' },
+    withdrawn: { line: '今後のサポートの参考にするため、', email: '今後のサポートの参考にさせていただくため、' },
+  }[params.outcome];
   if (channel === 'line') {
     return [
-      `${name ? `${name}\n` : ''}${params.companyName}の${params.stage}、お疲れさまでした！`,
-      '今後の対策のため、面接で聞かれたことなどを5分ほどのアンケートで教えていただけますか？',
+      `${name ? `${name}\n` : ''}${opening.line}`,
+      `${purpose.line}面接で聞かれたことなどを5分ほどのアンケートで教えていただけますか？`,
       params.url,
       '覚えている範囲で大丈夫です。よろしくお願いします。',
     ].join('\n');
   }
   return [
-    `件名：【bloom】${params.companyName} ${params.stage}の振り返りアンケートのお願い`,
+    `件名：【bloom】${target}についてのアンケートのお願い`,
     '',
     name,
     '',
     'お世話になっております。bloomでございます。',
-    `本日は${params.companyName}の${params.stage}、お疲れさまでした。`,
+    opening.email,
     '',
-    '次の選考に向けた対策のため、面接で聞かれた質問や雰囲気などを、下記のアンケートで教えていただけますでしょうか。',
+    `${purpose.email}面接で聞かれた質問や雰囲気などを、下記のアンケートで教えていただけますでしょうか。`,
     '5分ほどで回答できます。覚えている範囲で構いません。',
     '',
     params.url,
     '',
-    'ご回答いただいた内容は、今後の選考対策に活用させていただきます。',
     '何卒よろしくお願いいたします。',
   ].join('\n');
 };

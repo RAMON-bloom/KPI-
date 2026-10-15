@@ -33,7 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
-import { buildFeedbackFormUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, type FeedbackResponse } from './services/interviewFeedbackForm';
+import { buildFeedbackFormUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -4406,6 +4406,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '面接振り返りアンケートの案内で、「お見送り」「選考辞退」などの選考ステータスが候補者に見えないようにした。アンケートには候補者が受けた面接（例：2次面接）だけが入り、対象の面接はプルダウンで選べます（初期値は、お見送り・辞退の選考なら終わった段階、それ以外は直近に受けた面接）。お見送りの選考では結果に配慮した文面、辞退の選考では参加へのお礼の文面で案内文を作ります。面接をまだ受けていない選考では、対象の面接を選ぶまでコピーできません',
       '取り込んだ面接振り返りアンケートの回答を、その選考の選考情報（「面接対策資料」欄）でも表示するようにした（これまでは候補者カードの面談ログにだけ表示されていました）。あわせて、同じ選考に複数回の回答があった場合に2件目以降が取り込めないことがある不具合を修正',
       '候補者向けの「面接振り返りアンケート」（Googleフォーム）を追加した。選考情報の「面接対策資料」欄の「メール用の文面をコピー」「LINE用の文面をコピー」で、その選考の受付番号・企業名・フェーズが入ったアンケートの案内をコピーできます。候補者が回答すると、候補者パイプラインの上部に「面接振り返りアンケートの新しい回答」として出るので、「面談ログに取り込む」で面談ログに追加できます（取り込んだ回答は企業ナレッジ投稿の「AIで下書き」にも使えます。手応え・志望度・他社状況などの任意回答も入ります）',
       '選考情報の「面接対策資料」欄に「この選考のナレッジ・結果をジェネレーターに投稿」を追加した。面接で聞かれたこと・面接官・雰囲気などの企業ナレッジと、電話や口頭で伝えられた選考結果を、面接対策ジェネレーターに送れます。「AIで下書き」を押すと、選んだ面談ログから下書きを作ります（候補者の氏名・連絡先は伏せて送ります）。送った内容は、ジェネレーター側で承認されると企業ナレッジに反映されます',
@@ -7986,9 +7987,13 @@ const InterviewPrepSection: React.FC<{
     const url = application.interviewPrepDocUrl || '';
     const isValidUrl = /^https?:\/\//.test(url.trim());
 
+    // アンケートで聞く面接の段階。選考のステータス（お見送り等）ではなく、候補者が受けた面接を入れる。
+    const [feedbackStage, setFeedbackStage] = useState<string>(() => defaultFeedbackStage(application) || '');
     const copyInvite = async (channel: 'email' | 'line') => {
+        if (!feedbackStage) return;
         const text = buildFeedbackInviteText(channel, {
-            candidateName: candidate.name, companyName, stage: application.stage, url: buildFeedbackFormUrl(application),
+            candidateName: candidate.name, companyName, interviewStage: feedbackStage,
+            outcome: feedbackOutcomeOf(application.stage), url: buildFeedbackFormUrl(application, feedbackStage),
         });
         try {
             await navigator.clipboard.writeText(text);
@@ -8039,9 +8044,21 @@ const InterviewPrepSection: React.FC<{
             {companyName && (
                 <div className="interview-prep-actions">
                     <span className="interview-prep-subtitle">面接振り返りアンケート（候補者向け）</span>
-                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('email')}>メール用の文面をコピー</button>
-                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('line')}>LINE用の文面をコピー</button>
+                    <select value={feedbackStage} onChange={e => setFeedbackStage(e.target.value)} aria-label="アンケートで聞く面接">
+                        <option value="">対象の面接を選択</option>
+                        {FEEDBACK_INTERVIEW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('email')} disabled={!feedbackStage}>メール用の文面をコピー</button>
+                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('line')} disabled={!feedbackStage}>LINE用の文面をコピー</button>
                 </div>
+            )}
+            {companyName && !feedbackStage && (
+                <p className="interview-prep-hint">この選考はまだ面接を受けていないため、アンケートの対象にする面接を選んでからコピーしてください。</p>
+            )}
+            {companyName && feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
+                <p className="interview-prep-hint">
+                    この選考は「{application.stage}」のため、案内文は{application.stage === 'お見送り' ? '結果に配慮した' : '参加へのお礼の'}文面になります（フォームには「{feedbackStage}」だけが入り、選考の結果は表示されません）。
+                </p>
             )}
             {surveyMemos.length > 0 && (
                 <details className="interview-prep-knowledge" open>
