@@ -8,6 +8,12 @@
 //
 // 同じ人が複数のタブでKPI管理くんを開いていても二重に保存しないよう、保存前に status へ
 // 「claimed:<タブID>」を書いて読み直し、自分の印が残っている時だけ保存する。
+//
+// ミドル/BPがメンバーの候補者の資料を作った場合（2026-10-16）：受け取って保存するのは「作成を押した
+// 人」（kpi_user）のKPI管理くん。その人のドライブに保存し、候補者の担当者（kpi_owner）にも編集者として
+// 共有する。選考への紐づけは、その候補者を一覧に持っている側（作成者の代理編集、または担当者本人の
+// KPI管理くん）が行う。担当者側は保存済みの行（status=saved、file_id あり）を見て、まだ紐づいて
+// いなければ紐づける（loadLinkableGeneratedDocs）。
 
 import { getCurrentSession, refreshTokenSilently } from './googleAuth';
 import { googleFetch, INTERVIEW_PREP_SPREADSHEET_ID } from './interviewPrepData';
@@ -32,6 +38,19 @@ export interface GeneratedDocDelivery {
   html: string;
   /** シート上の行番号（1始まり）。part の数だけある */
   rows: number[];
+  /** 候補者の担当者（作成者と違う場合だけ。保存した資料を共有する相手） */
+  owner: string;
+  /** 同じ資料（doc_key）を前に保存したファイル（送り直された時に上書きする） */
+  previousFileId: string;
+}
+
+/** 保存済みで、選考への紐づけだけが残っているかもしれない資料（担当者側で紐づける用）。 */
+export interface LinkableGeneratedDoc {
+  docKey: string;
+  applicationId: string;
+  fileId: string;
+  name: string;
+  savedAt: string;
 }
 
 /** 候補者の選考（CompanyApplication.interviewPrepDocs）に残す、保存済みの資料。 */
@@ -75,18 +94,27 @@ const isClaimable = (status: string) => {
 };
 
 /**
- * 受け取り待ちの資料のうち、applicationIds（自分の候補者の選考）に宛てたものを返す。
+ * 受け取り待ちの資料のうち、自分が受け取るものを返す：作成を押したのが自分（kpi_user）の資料と、
+ * 作成者の記録が無い古い資料のうち自分の候補者の選考（ownApplicationIds）宛てのもの。
  * 同じ資料（doc_key）が何度か送られていれば最新の送信分だけを返し、古い送信分は
  * superseded に書き換えて本文を消す。
  */
-export const loadPendingGeneratedDocs = async (applicationIds: Set<string>): Promise<GeneratedDocDelivery[]> => {
+export const loadPendingGeneratedDocs = async (myEmail: string, ownApplicationIds: Set<string>): Promise<GeneratedDocDelivery[]> => {
   const snap = await readSheet();
   if (!snap) return [];
   const col = (name: string) => snap.header.indexOf(name);
   const get = (row: string[], name: string) => (col(name) >= 0 ? row[col(name)] ?? '' : '');
+  const me = myEmail.trim().toLowerCase();
+  const isMine = (row: string[]) => {
+    const user = get(row, 'kpi_user').trim().toLowerCase();
+    return user ? user === me : ownApplicationIds.has(get(row, 'kpi_application_id'));
+  };
+  // 送り直された資料を、前に保存したファイルへ上書きするため
+  const savedFileByKey = new Map<string, string>();
+  snap.rows.forEach(row => { if (get(row, 'file_id')) savedFileByKey.set(get(row, 'doc_key'), get(row, 'file_id')); });
   const groups = new Map<string, { row: string[]; rowNo: number }[]>();
   snap.rows.forEach((row, i) => {
-    if (!isClaimable(get(row, 'status')) || !applicationIds.has(get(row, 'kpi_application_id'))) return;
+    if (!isClaimable(get(row, 'status')) || !isMine(row)) return;
     const id = `${get(row, 'doc_key')}\u0000${get(row, 'sent_at')}`;
     groups.set(id, [...(groups.get(id) || []), { row, rowNo: i + 2 }]);
   });
@@ -102,6 +130,8 @@ export const loadPendingGeneratedDocs = async (applicationIds: Set<string>): Pro
       applicationId: get(first, 'kpi_application_id'), candidateId: get(first, 'kpi_candidate_id'),
       companyName: get(first, 'company_name'), phase: get(first, 'phase'), position: get(first, 'position'),
       fileName: get(first, 'file_name'), html: parts.map(p => get(p.row, 'html')).join(''), rows: parts.map(p => p.rowNo),
+      owner: get(first, 'kpi_owner').trim().toLowerCase() === me ? '' : get(first, 'kpi_owner').trim(),
+      previousFileId: savedFileByKey.get(get(first, 'doc_key')) || '',
     };
     const prev = latestByKey.get(delivery.docKey);
     if (!prev || prev.sentAt < delivery.sentAt) {
@@ -115,11 +145,34 @@ export const loadPendingGeneratedDocs = async (applicationIds: Set<string>): Pro
   return Array.from(latestByKey.values());
 };
 
-const markRows = async (header: string[], rows: number[], status: string, clearHtml = true): Promise<void> => {
-  const cStatus = header.indexOf('status'), cHtml = header.indexOf('html'), cSaved = header.indexOf('saved_at');
+/**
+ * 保存済みの資料のうち、applicationIds（一覧にある候補者の選考）宛てのもの（doc_key ごとに最新）。
+ * 作成者がメンバーの候補者を一覧に持っていなかった時など、紐づけが残っている分を担当者側で拾う。
+ */
+export const loadLinkableGeneratedDocs = async (applicationIds: Set<string>): Promise<LinkableGeneratedDoc[]> => {
+  const snap = await readSheet();
+  if (!snap) return [];
+  const col = (name: string) => snap.header.indexOf(name);
+  const get = (row: string[], name: string) => (col(name) >= 0 ? row[col(name)] ?? '' : '');
+  const byKey = new Map<string, LinkableGeneratedDoc>();
+  snap.rows.forEach(row => {
+    if (get(row, 'status') !== 'saved' || !get(row, 'file_id') || !applicationIds.has(get(row, 'kpi_application_id'))) return;
+    const doc: LinkableGeneratedDoc = {
+      docKey: get(row, 'doc_key'), applicationId: get(row, 'kpi_application_id'), fileId: get(row, 'file_id'),
+      name: (get(row, 'file_name') || '面接対策資料').replace(/\.docx$/i, ''), savedAt: get(row, 'saved_at') || get(row, 'sent_at'),
+    };
+    const prev = byKey.get(doc.docKey);
+    if (!prev || prev.savedAt < doc.savedAt) byKey.set(doc.docKey, doc);
+  });
+  return Array.from(byKey.values());
+};
+
+const markRows = async (header: string[], rows: number[], status: string, clearHtml = true, fileId = ''): Promise<void> => {
+  const cStatus = header.indexOf('status'), cHtml = header.indexOf('html'), cSaved = header.indexOf('saved_at'), cFile = header.indexOf('file_id');
   const data: { range: string; values: string[][] }[] = [];
   rows.forEach(r => {
     data.push({ range: `${GENERATED_DOCS_SHEET}!${colLetter(cStatus)}${r}`, values: [[status]] });
+    if (fileId && cFile >= 0) data.push({ range: `${GENERATED_DOCS_SHEET}!${colLetter(cFile)}${r}`, values: [[fileId]] });
     if (clearHtml && cHtml >= 0) data.push({ range: `${GENERATED_DOCS_SHEET}!${colLetter(cHtml)}${r}`, values: [['']] });
     if (status === 'saved' && cSaved >= 0) data.push({ range: `${GENERATED_DOCS_SHEET}!${colLetter(cSaved)}${r}`, values: [[new Date().toISOString()]] });
   });
@@ -167,6 +220,14 @@ const ensurePrepDocsFolder = async (): Promise<string> => {
   return (folderIdCache = created.id as string);
 };
 
+/** 資料を、候補者の担当者に編集者として共有する（同じ組織内。通知メールは送らない）。 */
+const shareWith = async (fileId: string, email: string): Promise<void> => {
+  await googleFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?sendNotificationEmail=false&fields=id`, {
+    method: 'POST',
+    body: JSON.stringify({ type: 'user', role: 'writer', emailAddress: email }),
+  });
+};
+
 const docNameOf = (d: GeneratedDocDelivery) => (d.fileName || `面接対策_${d.companyName}_${d.phase}`).replace(/\.docx$/i, '');
 
 /** HTMLをGoogleドキュメントとして新規作成する（Drive がHTMLを変換する）。 */
@@ -204,17 +265,22 @@ export const saveGeneratedDocToDrive = async (d: GeneratedDocDelivery, existing:
   if (!(await claim(d))) return null;
   const header = (await readSheet())?.header || [];
   try {
-    const prev = existing.find(x => x.key === d.docKey);
+    const prev = existing.find(x => x.key === d.docKey)
+      || (d.previousFileId ? { key: d.docKey, fileId: d.previousFileId, name: docNameOf(d), savedAt: '' } : undefined);
     let saved: SavedPrepDoc;
     if (prev && await overwriteDoc(prev.fileId, d)) {
       saved = { ...prev, savedAt: new Date().toISOString() };
     } else {
       const file = await createDoc(d);
       saved = { key: d.docKey, fileId: file.id, name: file.name, savedAt: new Date().toISOString() };
+      // メンバーの候補者の資料なら、担当者にも編集者として共有する（通知メールは送らない）
+      if (d.owner) {
+        await shareWith(saved.fileId, d.owner).catch(err => console.warn(`担当者（${d.owner}）への共有に失敗しました`, err));
+      }
     }
     // ここで失敗しても保存自体は済んでいるので、資料は返す（行は5分後に再取得されうるが、
-    // 次回は existing に同じ key があるので新規作成ではなく上書きになる）
-    await markRows(header, d.rows, 'saved').catch(err => console.warn('受け取り済みの記録に失敗しました', err));
+    // 次回は同じ doc_key のファイルがあるので新規作成ではなく上書きになる）
+    await markRows(header, d.rows, 'saved', true, saved.fileId).catch(err => console.warn('受け取り済みの記録に失敗しました', err));
     return saved;
   } catch (err) {
     // 押さえた行を戻して、次の確認で再挑戦できるようにする

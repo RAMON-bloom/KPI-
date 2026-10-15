@@ -35,6 +35,7 @@ import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './se
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { loadLinkableGeneratedDocs } from './services/generatedPrepDocs';
 import { loadPendingGeneratedDocs, saveGeneratedDocToDrive, prepDocOpenUrl, prepDocDownloadUrl, googleDocIdFromUrl, PREP_DOCS_FOLDER_NAME, type SavedPrepDoc } from './services/generatedPrepDocs';
 import { defaultFeedbackTemplate, fillFeedbackTemplate, FEEDBACK_TEMPLATE_FIELDS, type FeedbackInviteTemplates, type FeedbackChannel, type FeedbackOutcome } from './services/interviewFeedbackForm';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
@@ -4430,6 +4431,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      'ミドル/BPがメンバーの候補者の面接対策資料を作った場合の保存先を変えた。作成を押した人のドライブ（「面接対策資料」フォルダ）にすぐ保存され、その候補者の担当者にも編集者として共有されます（通知メールは送りません）。これまでは担当者がKPI管理くんを開くまで保存されず、作った本人は資料を開けませんでした。選考への紐づけは作成者・担当者どちらの画面からでも自動で行われます',
       '選考情報の編集画面を、縦に長くならないようタブで切り替える形にした。「選考情報」（企業・次アクション・進捗状況・報酬・確度・メモ）「面接対策資料」「振り返り・ナレッジ」（面接振り返りアンケート・アンケート結果・企業ナレッジ）の3つのタブに分かれています。タブを切り替えても入力中の内容は消えず、最後の「保存」でまとめて保存されます',
       '面接振り返りアンケートの案内文を、自分用に編集できるようにした。選考情報の「面接振り返りアンケート」欄の「案内文を編集（自分用）」から、メール・LINEごと、選考の状況（選考中・お見送り・辞退）ごとに文面を書き換えて保存できます。候補者名・企業名・面接・URLは {候補者名} などの差し込み項目で自動で入ります（URLは消しても最後に自動で入ります）。「既定の文面に戻す」でいつでも元に戻せます',
       '選考情報に「ポジション」欄を追加した。面接対策ジェネレーターにその企業で登録されているポジションが候補に出ます。候補に無いポジションは「新規登録」でジェネレーターにも登録できます',
@@ -8442,6 +8444,8 @@ const InterviewPrepSection: React.FC<{
 
     // ---- 生成オプション（ジェネレーターの生成画面の設定を、ここでまとめて決める。2026-10-16） ----
     const companyId = prep.data && companyName ? resolveGeneratorCompanyId(prep.data, companyName, application.gasCompanyId) : null;
+    // ミドル/BPがメンバーの候補者を代理で見ている（作った資料は自分のドライブに保存し、担当者に共有する）
+    const isTeammateCandidate = !!candidate.ownerEmail && candidate.ownerEmail.toLowerCase() !== (getCurrentSession()?.identity.email || '').toLowerCase();
     const position = (application.position || '').trim();
     const [genPhase, setGenPhase] = useState(() => gasPhaseForStage(application.stage) || '一次面接');
     // 使う面談メモ（既定は全部）。null = まだ触っていない（全部）
@@ -8546,6 +8550,8 @@ const InterviewPrepSection: React.FC<{
                 resumeText: [useProfile ? buildCandidateProfileText(candidate) : '', resumeExtra.trim()].filter(Boolean).join('\n\n'),
                 position, jdContent: jdChanged ? jdValue : '',
                 generalKeys: generalKeys, customInstruction, honorific,
+                // メンバーの候補者（ミドル/BPの代理）なら、作った資料をその担当者にも共有する
+                ownerEmail: candidate.ownerEmail && candidate.ownerEmail.toLowerCase() !== createdBy.toLowerCase() ? candidate.ownerEmail : '',
             });
             handoff = token;
         } catch (err) {
@@ -8556,7 +8562,7 @@ const InterviewPrepSection: React.FC<{
         else window.open(url, '_blank', 'noopener');
         setCopyMessage(
             !handoff ? `面接対策ジェネレーターを開きました。受け渡しに失敗したため自動では作成されません。開いた画面で「資料を生成」を押してください${copied ? '（面談メモはコピー済みなので「面談メモ」欄に貼り付けてください）' : ''}。`
-            : `面接対策ジェネレーターで資料を自動作成しています。開いた画面は操作不要です。完了するとあなたのドライブに保存され、ここに紐づきます${memoText ? '' : '（面談メモが無いため、メモなしで作成します）'}。`,
+            : `面接対策ジェネレーターで資料を自動作成しています。開いた画面は操作不要です。完了するとあなたのドライブに保存され、ここに紐づきます${isTeammateCandidate ? '（担当者にも共有されます）' : ''}${memoText ? '' : '（面談メモが無いため、メモなしで作成します）'}。`,
         );
     };
 
@@ -8699,7 +8705,7 @@ const InterviewPrepSection: React.FC<{
                     {copyMessage || (!companyName
                         ? '先に企業名を入力してください。'
                         : memoText
-                            ? '押すと面接対策ジェネレーターが開き、この候補者の面談メモを使って資料を自動で作ります（開いた画面は操作不要）。できた資料は自動であなたのドライブに保存され、ここに紐づきます。'
+                            ? `押すと面接対策ジェネレーターが開き、この候補者の面談メモを使って資料を自動で作ります（開いた画面は操作不要）。できた資料は自動であなたのドライブに保存され、ここに紐づきます${isTeammateCandidate ? '（担当者にも共有されます）' : ''}。`
                             : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
                 </p>
                 <div className="prep-field">
@@ -9187,29 +9193,43 @@ const GeneratedPrepDocsCollector: React.FC<{
         if (busyRef.current) return;
         busyRef.current = true;
         try {
+            const myEmail = getCurrentSession()?.identity.email || '';
             const appIds = new Set<string>(candidatesRef.current.flatMap(c => c.applications.map(a => a.id)));
-            if (appIds.size === 0) return;
-            const deliveries = await loadPendingGeneratedDocs(appIds);
-            for (const d of deliveries) {
-                const owner = candidatesRef.current.find(c => c.applications.some(a => a.id === d.applicationId));
-                const app = owner?.applications.find(a => a.id === d.applicationId);
-                if (!owner || !app) continue;
-                const saved = await saveGeneratedDocToDrive(d, app.interviewPrepDocs || []);
-                if (!saved) continue;   // 別のタブが受け取り中
-                // 保存の間に候補者が更新されているかもしれないので、最新の状態に書き足す
-                const latest = candidatesRef.current.find(c => c.id === owner.id) || owner;
+            const ownAppIds = new Set<string>(candidatesRef.current.filter(c => !c.ownerEmail || c.ownerEmail.toLowerCase() === myEmail.toLowerCase())
+                .flatMap(c => c.applications.map(a => a.id)));
+            // 選考に資料を紐づける（保存の間に候補者が更新されているかもしれないので、最新の状態に書き足す）
+            const link = (applicationId: string, saved: SavedPrepDoc): Candidate | null => {
+                const latest = candidatesRef.current.find(c => c.applications.some(a => a.id === applicationId));
+                if (!latest) return null;
                 saveRef.current({
                     ...latest,
-                    applications: latest.applications.map(a => a.id !== d.applicationId ? a : {
+                    applications: latest.applications.map(a => a.id !== applicationId ? a : {
                         ...a,
                         interviewPrepDocs: [...(a.interviewPrepDocs || []).filter(x => x.key !== saved.key), saved],
                         interviewPrepDocUrl: prepDocOpenUrl(saved.fileId),
                     }),
                 });
+                return latest;
+            };
+            // 1) 自分が作成を押した資料を受け取り、自分のドライブに保存する（メンバーの候補者なら担当者に共有）
+            const deliveries = await loadPendingGeneratedDocs(myEmail, ownAppIds);
+            for (const d of deliveries) {
+                const app = candidatesRef.current.flatMap(c => c.applications).find(a => a.id === d.applicationId);
+                const saved = await saveGeneratedDocToDrive(d, app?.interviewPrepDocs || []);
+                if (!saved) continue;   // 別のタブが受け取り中
+                const linked = link(d.applicationId, saved);
                 setNotices(prev => [...prev, {
                     id: `${saved.key}_${saved.savedAt}`, fileId: saved.fileId,
-                    text: `${latest.name}さん・${d.companyName} ${d.phase}`,
+                    text: `${linked ? `${linked.name}さん・` : ''}${d.companyName} ${d.phase}${d.owner ? `（担当者 ${d.owner} にも共有しました）` : ''}`,
                 }]);
+            }
+            // 2) 他の人（ミドル/BP）が作って共有してくれた資料のうち、まだ選考に紐づいていないものを紐づける
+            if (appIds.size > 0) {
+                for (const doc of await loadLinkableGeneratedDocs(appIds)) {
+                    const app = candidatesRef.current.flatMap(c => c.applications).find(a => a.id === doc.applicationId);
+                    if (!app || (app.interviewPrepDocs || []).some(x => x.key === doc.docKey)) continue;
+                    link(doc.applicationId, { key: doc.docKey, fileId: doc.fileId, name: doc.name, savedAt: doc.savedAt || new Date().toISOString() });
+                }
             }
             setError('');
         } catch (err) {
@@ -15884,7 +15904,7 @@ const CandidatePipelineView: React.FC<{
             </div>
 
             <FeedbackResponsesPanel candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
-            <GeneratedPrepDocsCollector candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
+            <GeneratedPrepDocsCollector candidates={candidates.filter(c => isOwn(c) || isManagedByMiddle(c))} onSaveCandidate={saveCandidate} />
 
             <MailResultSuggestionsPanel
                 candidates={ownCandidatesForSuggestions}

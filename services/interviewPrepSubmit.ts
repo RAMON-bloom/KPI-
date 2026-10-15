@@ -161,6 +161,8 @@ export const HANDOFF_COLUMNS = [
   // KPI管理くんの「生成オプション」（2026-10-16）。求人票の本文・汎用ナレッジ（JSON配列。空なら
   // ジェネレーターの既定のまま）・追加要望・敬称。求人票と追加要望もジェネレーターが読んだら消す。
   'jd_content', 'general_keys', 'custom_instruction', 'honorific',
+  // 候補者の担当者（ミドル/BPがメンバーの候補者の資料を作る時だけ。作った資料を共有する相手）
+  'owner_email',
 ] as const;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -193,6 +195,7 @@ export const createHandoff = async (h: {
   generalKeys?: string[] | null;
   customInstruction?: string;
   honorific?: string;
+  ownerEmail?: string;
 }): Promise<void> => {
   await ensureSheet(HANDOFFS_SHEET, HANDOFF_COLUMNS);
   const now = Date.now();
@@ -210,6 +213,7 @@ export const createHandoff = async (h: {
     general_keys: h.generalKeys ? JSON.stringify(h.generalKeys) : '',
     custom_instruction: fitSheetCell((h.customInstruction || '').trim()),
     honorific: h.honorific || '',
+    owner_email: h.ownerEmail || '',
   };
   await appendRowByHeader(HANDOFFS_SHEET, row);
 };
