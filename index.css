@@ -4518,3 +4518,53 @@ p.memo-content-text {
   cursor: pointer;
 }
 .prep-delete-button:hover { background: #fdf0f1; }
+
+/* 選考情報モーダルの上半分（企業名〜メモ）。面接対策欄の prep-card と同じカードで色分けする。 */
+.prep-card.app-card--basic { --prep-accent: #475569; --prep-tint: #f1f5f9; }
+.prep-card.app-card--schedule { --prep-accent: #c2410c; --prep-tint: #fff4ec; }
+.prep-card.app-card--fee { --prep-accent: #7c3aed; --prep-tint: #f5f0ff; }
+.prep-card.app-card--memo { --prep-accent: #64748b; --prep-tint: #f4f6f8; }
+.application-modal .modal-body > .prep-card:first-child { margin-top: 0; }
+.prep-card .form-group { margin-bottom: 0.85rem; }
+.prep-card .form-group:last-child { margin-bottom: 0; }
+.prep-card .form-group > label {
+  margin-bottom: 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #495057;
+}
+.prep-card .form-group input:focus,
+.prep-card .form-group select:focus,
+.prep-card .form-group textarea:focus {
+  outline: none;
+  border-color: var(--prep-accent);
+  box-shadow: 0 0 0 3px var(--prep-tint);
+}
+.app-required {
+  margin-left: 0.3rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: #fdecee;
+  color: #b02a37;
+  font-size: 0.68rem;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+.app-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 0.75rem;
+  margin-bottom: 0.85rem;
+}
+.app-grid-2 > .form-group { margin-bottom: 0; }
+.app-grid-2:last-child { margin-bottom: 0; }
+.visually-hidden-label {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .app-grid-2 { grid-template-columns: 1fr; gap: 0.85rem; }
+}

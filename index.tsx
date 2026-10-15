@@ -4413,6 +4413,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '選考情報の編集画面の上半分（企業名〜メモ）も、面接対策欄と同じく色分けしたカードに整理した。「企業・次アクション」「進捗状況・選考日程」「報酬・確度」「メモ」に分かれ、報酬形態と料率、内定確度と入社確度は横に並べて見比べやすくしました',
       '取り込んだ面接振り返りアンケートの回答を削除できるようにした。選考情報の編集画面の「面接振り返りアンケート」欄で、回答ごとの「削除」から消せます（候補者カードの面談ログの×でも同じく削除できます）。一度削除した回答は、候補者パイプライン上部の「新しい回答」に再び出てくることはありません',
       '選考情報の編集画面の「面接対策」欄を見やすく整理した。「面接対策資料」「面接振り返りアンケート」「企業の実績・企業ナレッジ」を色分けしたカードに分け、「面接対策ジェネレーターで作る」を大きなボタンに、アンケートは「①対象の面接を選ぶ → ②メール用／LINE用をコピー」の順に並べました。ドライブの資料はどれが紐づけ済みか分かるようにし、通過実績は件数と通過率を大きく表示します',
       '選考情報の編集画面を開いている時に、画面の外側（暗くなっている背景）をクリックしても閉じないようにした。入力途中の内容がうっかり消えるのを防ぐためです。閉じる時は右上の×・キャンセル・保存を使ってください',
@@ -7830,8 +7831,16 @@ const ApplicationModal: React.FC<{
                     <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
                 </div>
                 <form id="application-form" className="modal-body" onSubmit={handleSubmit}>
+                    <section className="prep-card app-card--basic">
+                        <header className="prep-card-header">
+                            <span className="prep-card-icon" aria-hidden="true">🏢</span>
+                            <div>
+                                <h4 className="prep-card-title">企業・次アクション</h4>
+                                <p className="prep-card-desc">応募先の企業と、次にやることを入力します</p>
+                            </div>
+                        </header>
                     <div className="form-group">
-                        <label htmlFor="companyName">企業名 *</label>
+                        <label htmlFor="companyName">企業名 <span className="app-required">必須</span></label>
                         <CompanyNameInput
                             id="companyName"
                             value={application.companyName}
@@ -7848,10 +7857,20 @@ const ApplicationModal: React.FC<{
                             name="nextAction"
                             value={application.nextAction}
                             onChange={handleChange}
+                            placeholder="例: 一次面接の日程調整の連絡"
                         />
                     </div>
+                    </section>
+                    <section className="prep-card app-card--schedule">
+                        <header className="prep-card-header">
+                            <span className="prep-card-icon" aria-hidden="true">🗓️</span>
+                            <div>
+                                <h4 className="prep-card-title">進捗状況・選考日程</h4>
+                                <p className="prep-card-desc">現在のフェーズと面接日程、意思決定の見込み時期</p>
+                            </div>
+                        </header>
                     <div className="form-group">
-                        <label>進捗状況・選考日程</label>
+                        <label className="visually-hidden-label">進捗状況・選考日程</label>
                         <SelectionTimeline
                             app={application}
                             editable
@@ -7872,6 +7891,16 @@ const ApplicationModal: React.FC<{
                             onChange={handleChange}
                         />
                     </div>
+                    </section>
+                    <section className="prep-card app-card--fee">
+                        <header className="prep-card-header">
+                            <span className="prep-card-icon" aria-hidden="true">💰</span>
+                            <div>
+                                <h4 className="prep-card-title">報酬・確度</h4>
+                                <p className="prep-card-desc">想定粗利の計算や確度の集計に使われます</p>
+                            </div>
+                        </header>
+                    <div className="app-grid-2">
                     <div className="form-group">
                         <label htmlFor="feeType">報酬形態</label>
                         <select
@@ -7913,6 +7942,7 @@ const ApplicationModal: React.FC<{
                             />
                         </div>
                     )}
+                    </div>
                     {applicationHasReceivedOffer(application) && (
                         <div className="form-group">
                             <label htmlFor="offerAmount">オファー金額 (円)</label>
@@ -7936,6 +7966,7 @@ const ApplicationModal: React.FC<{
                             </p>
                         </div>
                     )}
+                    <div className="app-grid-2">
                     <div className="form-group">
                         <label htmlFor="offerConfidence">内定確度</label>
                         <select
@@ -7960,8 +7991,18 @@ const ApplicationModal: React.FC<{
                             {CONFIDENCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}
                         </select>
                     </div>
+                    </div>
+                    </section>
+                    <section className="prep-card app-card--memo">
+                        <header className="prep-card-header">
+                            <span className="prep-card-icon" aria-hidden="true">🗒️</span>
+                            <div>
+                                <h4 className="prep-card-title">メモ</h4>
+                                <p className="prep-card-desc">この選考に関するメモ（社内用）</p>
+                            </div>
+                        </header>
                     <div className="form-group">
-                        <label htmlFor="memo">メモ</label>
+                        <label htmlFor="memo" className="visually-hidden-label">メモ</label>
                         <textarea
                             id="memo"
                             name="memo"
@@ -7971,6 +8012,7 @@ const ApplicationModal: React.FC<{
                             placeholder="選考状況に関するメモ"
                         />
                     </div>
+                    </section>
                     {candidate && (
                         <InterviewPrepSection
                             candidate={candidate}
