@@ -4413,6 +4413,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '面接振り返りアンケートの回答が、候補者パイプラインの「新しい回答」に出るまでに時間がかかる（ページを再読み込みするまで出ない）ことがあったのを改善した。画面を開いている間は1分ごと、別のタブから戻ってきた時にも自動で回答を確認します',
       '選考情報の編集画面のデザインを、落ち着いた色合いに統一した。見出しのアイコンを絵文字から細い線のアイコンに変え、カードごとの色分けをやめて紺を基調にまとめました。カードは背景から少し浮かせ、見出し・入力欄・ボタンの強弱をはっきりさせています',
     ],
   },
@@ -8695,7 +8696,21 @@ const FeedbackResponsesPanel: React.FC<{
             .catch(err => console.warn('面接振り返りアンケートの回答を読み込めませんでした', err))
             .finally(() => setLoading(false));
     }, []);
-    useEffect(() => { load(); }, [load]);
+    // 回答は画面を開いた時に1回読むだけだと、開きっぱなしの間に届いた回答がページを再読み込み
+    // するまで出なかった（一覧が空の間は「再読み込み」ボタンも出ない）。表示中は1分ごとと、
+    // タブに戻ってきた時に読み直す（Sheets APIの読み取り上限は1分60回なので十分に余裕がある）。
+    useEffect(() => {
+        load();
+        const refreshIfVisible = () => { if (document.visibilityState === 'visible') load(); };
+        const intervalId = window.setInterval(refreshIfVisible, 60 * 1000);
+        document.addEventListener('visibilitychange', refreshIfVisible);
+        window.addEventListener('focus', refreshIfVisible);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', refreshIfVisible);
+            window.removeEventListener('focus', refreshIfVisible);
+        };
+    }, [load]);
 
     const pending = useMemo(() => {
         const byAppId = new Map<string, { candidate: Candidate; app: CompanyApplication }>();
