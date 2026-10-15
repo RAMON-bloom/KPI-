@@ -2,7 +2,8 @@
 // （vercel.json の rewrite で /q/:code → /api/q?code=:code）
 // 転送先は常に固定のフォームURLで、コードから復元した受付番号・企業名・面接の段階を
 // 事前入力として付けるだけ。何も保存しない。
-import { decodeFeedbackCode, buildFeedbackFormUrl } from '../services/feedbackLink';
+// package.json が "type": "module" のため、Vercel上のNode（ESM）では拡張子 .js が必須。
+import { decodeFeedbackCode, buildFeedbackFormUrl } from '../services/feedbackLink.js';
 
 export default function handler(req: any, res: any) {
   const code = typeof req.query?.code === 'string' ? req.query.code : '';
