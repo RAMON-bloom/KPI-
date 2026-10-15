@@ -11,6 +11,7 @@
 // 候補者の氏名・連絡先は送らない。AI下書きでも氏名を「候補者」に置き換える。
 
 import { GoogleGenAI, Type } from '@google/genai';
+import { INTERVIEW_PREP_GENERATOR_URL } from './interviewPrep';
 import { googleFetch, INTERVIEW_PREP_SPREADSHEET_ID, companyNamesEqual, companyNamesMatch, type InterviewPrepData } from './interviewPrepData';
 
 export const SUBMISSIONS_SHEET = 'kpi_submissions';
@@ -120,7 +121,21 @@ export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewP
     reviewed_at: '', reviewed_by: '', review_note: '',
   };
   await appendRowByHeader(SUBMISSIONS_SHEET, row);
+  requestImmediateImport();
   return id;
+};
+
+/**
+ * 投稿をジェネレーターにその場で取り込ませる（待たずに戻る）。ジェネレーター側は1分ごとにも
+ * 取り込むので、これが届かなくても（ブラウザがGoogleのログイン情報を送らない設定など）最大1分で
+ * 反映される。応答は読めない（no-cors）ため、成否は見ない。
+ */
+const requestImmediateImport = () => {
+  try {
+    void fetch(`${INTERVIEW_PREP_GENERATOR_URL}?action=kpi_import_now&t=${Date.now()}`, {
+      mode: 'no-cors', credentials: 'include', cache: 'no-store',
+    }).catch(() => { /* 1分ごとの自動取り込みに任せる */ });
+  } catch { /* 同上 */ }
 };
 
 // --- 生成画面への受け渡し（自動生成用） ---

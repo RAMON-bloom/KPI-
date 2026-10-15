@@ -4413,6 +4413,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '企業ナレッジ・選考結果をジェネレーターに投稿してから反映されるまでの待ち時間を短くした（最大10分 → 送信直後、遅くとも1分ほど）。送信と同時にジェネレーターへ取り込みを依頼し、届かなかった場合もジェネレーター側が1分ごとに取り込みます',
       '面接振り返りアンケートの回答が、候補者パイプラインの「新しい回答」に出るまでに時間がかかる（ページを再読み込みするまで出ない）ことがあったのを改善した。画面を開いている間は1分ごと、別のタブから戻ってきた時にも自動で回答を確認します',
       '選考情報の編集画面のデザインを、落ち着いた色合いに統一した。見出しのアイコンを絵文字から細い線のアイコンに変え、カードごとの色分けをやめて紺を基調にまとめました。カードは背景から少し浮かせ、見出し・入力欄・ボタンの強弱をはっきりさせています',
     ],
@@ -8567,7 +8568,7 @@ const KnowledgeSubmitForm: React.FC<{
                 content, candidateAttr, applicationId: application.id, submittedBy, gasCompanyId: companyId,
             }, data);
             setContent(''); setInterviewer(''); setCandidateAttr(''); setResult(''); setReason(''); setPosition('');
-            setMessage('面接対策ジェネレーターに送信しました。10分以内に自動で企業ナレッジ・選考実績に取り込まれます。');
+            setMessage('面接対策ジェネレーターに送信しました。すぐに（遅くとも1分ほどで）企業ナレッジ・選考実績に取り込まれます。');
         } catch (err) {
             console.error('企業ナレッジの送信に失敗しました', err);
             setMessage(err instanceof InterviewPrepAccessError ? err.message : '送信に失敗しました。時間をおいて再度お試しください。');
