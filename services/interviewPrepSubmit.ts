@@ -43,25 +43,27 @@ export interface KnowledgeSubmission {
 
 const SHEETS_BASE = `https://sheets.googleapis.com/v4/spreadsheets/${INTERVIEW_PREP_SPREADSHEET_ID}`;
 
-const ensureSubmissionsSheet = async (): Promise<void> => {
+/** KPI管理くん専用のシート（kpi_submissions / kpi_handoffs）が無ければ見出し付きで作る。 */
+const ensureSheet = async (title: string, columns: readonly string[]): Promise<void> => {
   const meta = await googleFetch(`${SHEETS_BASE}?fields=sheets.properties.title`);
-  const exists = (meta.sheets || []).some((sh: any) => sh.properties?.title === SUBMISSIONS_SHEET);
+  const exists = (meta.sheets || []).some((sh: any) => sh.properties?.title === title);
   if (exists) return;
   try {
     await googleFetch(`${SHEETS_BASE}:batchUpdate`, {
       method: 'POST',
-      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SUBMISSIONS_SHEET } } }] }),
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
     });
   } catch (err: any) {
     // 同時に別の人が作った場合は「既に存在」で失敗するので、それは成功扱い。
     if (!/already exists/i.test(err?.body || '')) throw err;
     return;
   }
-  await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${SUBMISSIONS_SHEET}!A1`)}?valueInputOption=RAW`, {
+  await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${title}!A1`)}?valueInputOption=RAW`, {
     method: 'PUT',
-    body: JSON.stringify({ values: [SUBMISSION_COLUMNS as unknown as string[]] }),
+    body: JSON.stringify({ values: [[...columns]] }),
   });
 };
+const ensureSubmissionsSheet = () => ensureSheet(SUBMISSIONS_SHEET, SUBMISSION_COLUMNS);
 
 const newSubmissionId = () => `ks_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
@@ -91,6 +93,58 @@ export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewP
     { method: 'POST', body: JSON.stringify({ values: [SUBMISSION_COLUMNS.map(c => row[c])] }) },
   );
   return id;
+};
+
+// --- 生成画面への受け渡し（自動生成用） ---
+//
+// 「面接対策ジェネレーターで作る」を押した時、面談メモ（氏名・連絡先は伏せる）を専用シート
+// `kpi_handoffs` に一時的に置き、ジェネレーターのURLに受け渡し番号（handoff）を付けて開く。
+// ジェネレーター側が対応すれば、番号でメモを読み込んで、企業・フェーズ・メモ入りで自動的に
+// 生成を始める（開発者への依頼「お願い6」）。対応前はURLのパラメータが無視されるだけ。
+// メモは個人を特定しにくい形にしてあるが、ジェネレーター側には読み込んだら memo を消して
+// status=used にしてもらう（24時間で期限切れ）。
+
+export const HANDOFFS_SHEET = 'kpi_handoffs';
+export const HANDOFF_COLUMNS = [
+  'token', 'status', 'created_at', 'expires_at', 'created_by',
+  'kpi_candidate_id', 'kpi_application_id', 'company_id', 'company_name', 'phase', 'position',
+  'interview_memo', 'used_at',
+] as const;
+const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** 推測されにくい受け渡し番号（URLに載る）。 */
+export const newHandoffToken = (): string => {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return 'kh_' + Array.from(bytes, b => b.toString(36).padStart(2, '0')).join('');
+};
+
+export const createHandoff = async (h: {
+  token: string;
+  createdBy: string;
+  candidateId: string;
+  candidateName: string;
+  applicationId: string;
+  gasCompanyId?: string;
+  companyName: string;
+  phase: string;
+  memoText: string;
+}): Promise<void> => {
+  await ensureSheet(HANDOFFS_SHEET, HANDOFF_COLUMNS);
+  const now = Date.now();
+  const row: Record<(typeof HANDOFF_COLUMNS)[number], string> = {
+    token: h.token, status: 'pending', created_at: new Date(now).toISOString(),
+    expires_at: new Date(now + HANDOFF_TTL_MS).toISOString(), created_by: h.createdBy,
+    kpi_candidate_id: h.candidateId, kpi_application_id: h.applicationId,
+    company_id: h.gasCompanyId || '', company_name: h.companyName.trim(), phase: h.phase, position: '',
+    // 面談メモは氏名・メール・電話番号を伏せてから置く（ジェネレーター側の自動マスクも通る）。
+    interview_memo: maskPersonalInfo(h.memoText, h.candidateName),
+    used_at: '',
+  };
+  await googleFetch(
+    `${SHEETS_BASE}/values/${encodeURIComponent(`${HANDOFFS_SHEET}!A1`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    { method: 'POST', body: JSON.stringify({ values: [HANDOFF_COLUMNS.map(c => row[c])] }) },
+  );
 };
 
 // --- 企業の新規登録 ---

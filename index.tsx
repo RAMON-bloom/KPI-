@@ -32,7 +32,7 @@ import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQ
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
-import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4410,6 +4410,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '「面接対策ジェネレーターで作る」を押した時に、面談メモ（氏名・連絡先は伏せたもの）をジェネレーターに受け渡す準備をした。ジェネレーター側の対応が済むと、企業・フェーズ・面談メモが入った状態で面接対策資料の生成が自動で始まるようになります（対応までは、これまで通りコピーした面談メモを貼り付けてください）',
       '選考情報・候補者情報の「企業名」欄で、入力を始めると面接対策ジェネレーターに登録済みの企業だけが候補に出るようにした。候補から選ぶと表記がそろい、ジェネレーターの通過実績・企業ナレッジ・メールの選考結果とも確実に紐づきます（↑↓キーで選んでEnterでも確定できます）。登録されていない企業は、候補の一番下の「新規登録」を押すと、面接対策ジェネレーターの企業一覧にも追加されて使えるようになります（似た企業がすでに登録されている場合は、登録前に確認が出ます）',
       '【不具合修正】候補者カードの見出し行で、ボタンやバッジが1行に収まらない時に、候補者名が途中で改行されたり、操作ボタンが2段に積み重なったりしていた表示崩れを修正。候補者名は改行せず、収まらない場合は操作ボタンのまとまりごと次の行（右寄せ）に表示します',
       '面接振り返りアンケートの案内に入るURLを短くした（約250文字 → 70〜90文字程度の https://kpi-mgr-five.vercel.app/q/… 形式）。開くと、これまでと同じく受付番号・企業名・面接の段階が入った状態でアンケートが開きます（外部の短縮サービスは使っていません）',
@@ -8183,18 +8184,38 @@ const InterviewPrepSection: React.FC<{
     };
 
     const handleOpenGenerator = async () => {
-        // window.openは非同期処理の後だとポップアップブロックされるため、先に開く。
-        window.open(buildGeneratorUrl(candidate.id, application), '_blank', 'noopener');
-        if (!memoText) {
-            setCopyMessage('面談メモが登録されていないため、コピーはしていません。');
-            return;
+        // 1) 面談メモをクリップボードへ（ジェネレーターが自動受け取りに対応するまでの手貼り用）。
+        //    クリップボードと新しいタブはクリック直後でないと使えないので、どちらも最初に行う。
+        let copied = false;
+        if (memoText) {
+            try { await navigator.clipboard.writeText(memoText); copied = true; } catch { /* 下でメッセージ */ }
         }
+        // 2) 先に空のタブを開いておき、受け渡しの準備ができてからジェネレーターのURLへ移す
+        //    （ジェネレーターが受け渡し番号を読みに来た時に、まだ書き込まれていない、を防ぐ）。
+        const win = window.open('', '_blank');
+        if (win) win.opener = null;
+        // 3) 面談メモを kpi_handoffs に置き、受け渡し番号付きのURLで開く（自動生成用）。
+        let handoff: string | undefined;
+        const createdBy = getCurrentSession()?.identity.email || '';
         try {
-            await navigator.clipboard.writeText(memoText);
-            setCopyMessage('面談メモをコピーしました。生成画面の「面談メモ」欄に貼り付けてください。');
-        } catch {
-            setCopyMessage('面談メモのコピーに失敗しました。');
+            const token = newHandoffToken();
+            await createHandoff({
+                token, createdBy, candidateId: candidate.id, candidateName: candidate.name,
+                applicationId: application.id, gasCompanyId: application.gasCompanyId,
+                companyName: application.companyName, phase: gasPhaseForStage(application.stage) || '', memoText,
+            });
+            handoff = token;
+        } catch (err) {
+            console.warn('面接対策ジェネレーターへの面談メモの受け渡しに失敗しました（手貼りで続行できます）', err);
         }
+        const url = buildGeneratorUrl(candidate.id, application, { handoff });
+        if (win) win.location.href = url;
+        else window.open(url, '_blank', 'noopener');
+        setCopyMessage(
+            !memoText ? '面談メモが登録されていないため、メモは渡していません。'
+            : copied ? '面談メモをコピーしました。生成画面の「面談メモ」欄に入っていなければ貼り付けてください。'
+            : '面談メモのコピーに失敗しました。',
+        );
     };
 
     return (

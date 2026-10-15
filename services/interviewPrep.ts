@@ -28,11 +28,24 @@ export const toGeneratorPhase = (stage: string): string | null => GAS_PHASE_BY_S
 /** 面接対策資料を作れる（＝面接系の）ステージかどうか。 */
 export const isInterviewPrepStage = (stage: string): boolean => toGeneratorPhase(stage) !== null;
 
-export const buildGeneratorUrl = (candidateId: string, app: { id: string; companyName: string; stage: string }): string => {
+/**
+ * opts.handoff を付けると、kpi_handoffs シートに置いた面談メモの受け渡し番号と auto=1 を付ける
+ * （ジェネレーター側が対応すれば、メモを読み込んで自動で生成を始める）。
+ */
+export const buildGeneratorUrl = (
+  candidateId: string,
+  app: { id: string; companyName: string; stage: string; gasCompanyId?: string },
+  opts?: { handoff?: string },
+): string => {
   const params = new URLSearchParams({ from: 'kpi-mgr', candidateId, applicationId: app.id });
   if (app.companyName.trim()) params.set('company', app.companyName.trim());
+  if (app.gasCompanyId) params.set('companyId', app.gasCompanyId);
   const phase = toGeneratorPhase(app.stage);
   if (phase) params.set('phase', phase);
+  if (opts?.handoff) {
+    params.set('handoff', opts.handoff);
+    params.set('auto', '1');
+  }
   return `${INTERVIEW_PREP_GENERATOR_URL}?${params.toString()}`;
 };
 
