@@ -4418,6 +4418,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '候補者カードの選考バッジにある「対策資料」と「Word」を見分けやすくした。白地の「対策資料を開く」（開くアイコン付き）と、紺地の「Word」（ダウンロードアイコン付き）の小さなボタンにしています',
       '面接対策ジェネレーターで作った面接対策資料が、自動で自分のGoogleドライブに保存され、その選考に紐づくようにした。候補者カードの選考バッジの「対策資料」や、選考情報の「面接対策資料」欄から、いつでも開いたりWordでダウンロードしたりできます。対象は選考情報の「面接対策ジェネレーターで作る」から開いて生成した資料で、ドライブの「面接対策資料」フォルダにGoogleドキュメントとして保存されます（KPI管理くんを開いている間に1分以内に保存されます。生成後に本文を編集してWordをダウンロードした場合は、編集後の内容に更新されます）',
       '企業ナレッジ・選考結果をジェネレーターに投稿してから反映されるまでの待ち時間を短くした（最大10分 → 送信直後、遅くとも1分ほど）。送信と同時にジェネレーターへ取り込みを依頼し、届かなかった場合もジェネレーター側が1分ごとに取り込みます',
       '面接振り返りアンケートの回答が、候補者パイプラインの「新しい回答」に出るまでに時間がかかる（ページを再読み込みするまで出ない）ことがあったのを改善した。画面を開いている間は1分ごと、別のタブから戻ってきた時にも自動で回答を確認します',
@@ -12929,7 +12930,7 @@ const ApplicationStageBadge: React.FC<{
         onClick={e => e.stopPropagation()}
         onKeyDown={e => e.stopPropagation()}
       >
-        対策資料
+        <PrepIcon name="external" size={12} />対策資料を開く
       </a>
     )}
     {(() => {
@@ -12937,12 +12938,12 @@ const ApplicationStageBadge: React.FC<{
       return docId && (
         <a
           href={prepDocDownloadUrl(docId)}
-          className="interview-prep-badge-link"
+          className="interview-prep-badge-link interview-prep-badge-link--download"
           title="面接対策資料をWordでダウンロード"
           onClick={e => e.stopPropagation()}
           onKeyDown={e => e.stopPropagation()}
         >
-          Word
+          <PrepIcon name="download" size={12} />Word
         </a>
       );
     })()}
