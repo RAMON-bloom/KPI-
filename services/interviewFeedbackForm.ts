@@ -59,8 +59,9 @@ export const defaultFeedbackStage = (app: {
 };
 
 /**
- * 候補者に送る案内文。メールは件名付きの丁寧な文面、LINEは短め。お見送りになった選考には
- * 結果に触れつつ受けてもらったことへのお礼から入り、「次の選考」のような表現は使わない。
+ * 候補者に送る案内文。メールは件名付きの丁寧な文面、LINEは短め。
+ * お見送りになった選考でも、選考の結果には一切触れない（ユーザー指示 2026-10-15）。結果をまだ
+ * 伝えていない場合もあるため。「次の選考」のような、選考が続く前提の表現も使わない。
  */
 export const buildFeedbackInviteText = (
   channel: 'email' | 'line',
@@ -70,15 +71,12 @@ export const buildFeedbackInviteText = (
   const target = `${params.companyName}の${params.interviewStage}`;
   const opening = {
     in_progress: { line: `${target}、お疲れさまでした！`, email: `先日は${target}、お疲れさまでした。` },
-    rejected: {
-      line: `${target}、お疲れさまでした。今回は残念な結果となりましたが、選考に臨んでいただきありがとうございました。`,
-      email: `先日は${target}にご参加いただき、ありがとうございました。今回は残念な結果となりましたが、真摯に選考に臨んでいただいたことに改めて御礼申し上げます。`,
-    },
+    rejected: { line: `${target}、お疲れさまでした！`, email: `先日は${target}、お疲れさまでした。` },
     withdrawn: { line: `${target}、ありがとうございました。`, email: `先日は${target}にご参加いただき、ありがとうございました。` },
   }[params.outcome];
   const purpose = {
     in_progress: { line: '今後の対策のため、', email: '今後の選考に向けた対策のため、' },
-    rejected: { line: '今後の転職活動のサポートに活かすため、', email: '今後の転職活動のサポートにより活かしていくため、' },
+    rejected: { line: '今後のサポートに活かすため、', email: '今後のサポートに活かすため、' },
     withdrawn: { line: '今後のサポートの参考にするため、', email: '今後のサポートの参考にさせていただくため、' },
   }[params.outcome];
   if (channel === 'line') {
