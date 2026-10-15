@@ -33,6 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { buildFeedbackFormUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -4405,6 +4406,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '候補者向けの「面接振り返りアンケート」（Googleフォーム）を追加した。選考情報の「面接対策資料」欄の「メール用の文面をコピー」「LINE用の文面をコピー」で、その選考の受付番号・企業名・フェーズが入ったアンケートの案内をコピーできます。候補者が回答すると、候補者パイプラインの上部に「面接振り返りアンケートの新しい回答」として出るので、「面談ログに取り込む」で面談ログに追加できます（取り込んだ回答は企業ナレッジ投稿の「AIで下書き」にも使えます。手応え・志望度・他社状況などの任意回答も入ります）',
       '選考情報の「面接対策資料」欄に「この選考のナレッジ・結果をジェネレーターに投稿」を追加した。面接で聞かれたこと・面接官・雰囲気などの企業ナレッジと、電話や口頭で伝えられた選考結果を、面接対策ジェネレーターに送れます。「AIで下書き」を押すと、選んだ面談ログから下書きを作ります（候補者の氏名・連絡先は伏せて送ります）。送った内容は、ジェネレーター側で承認されると企業ナレッジに反映されます',
     ],
   },
@@ -7978,6 +7980,18 @@ const InterviewPrepSection: React.FC<{
     const url = application.interviewPrepDocUrl || '';
     const isValidUrl = /^https?:\/\//.test(url.trim());
 
+    const copyInvite = async (channel: 'email' | 'line') => {
+        const text = buildFeedbackInviteText(channel, {
+            candidateName: candidate.name, companyName, stage: application.stage, url: buildFeedbackFormUrl(application),
+        });
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopyMessage(`振り返りアンケートの案内（${channel === 'email' ? 'メール' : 'LINE'}用）をコピーしました。候補者に送ってください。回答は候補者パイプラインの上部から面談ログに取り込めます。`);
+        } catch {
+            setCopyMessage('案内文のコピーに失敗しました。');
+        }
+    };
+
     const handleOpenGenerator = async () => {
         // window.openは非同期処理の後だとポップアップブロックされるため、先に開く。
         window.open(buildGeneratorUrl(candidate.id, application), '_blank', 'noopener');
@@ -8016,6 +8030,13 @@ const InterviewPrepSection: React.FC<{
                     ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
                     : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
             </p>
+            {companyName && (
+                <div className="interview-prep-actions">
+                    <span className="interview-prep-subtitle">面接振り返りアンケート（候補者向け）</span>
+                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('email')}>メール用の文面をコピー</button>
+                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('line')}>LINE用の文面をコピー</button>
+                </div>
+            )}
             {companyName && (
                 <div className="interview-prep-insights">
                     {prep.loading && <p className="interview-prep-hint">面接対策ジェネレーターのデータを読み込み中...</p>}
@@ -8200,6 +8221,84 @@ const KnowledgeSubmitForm: React.FC<{
  * そのフェーズで止まっているもの（＝反映漏れの可能性）を一覧で出す。「反映する」は結果を
  * 先に入れた状態で選考情報モーダルを開くだけで、保存するかどうかは担当者が決める。
  */
+/**
+ * 候補者が回答した「面接振り返りアンケート」のうち、まだ面談ログに取り込んでいないものを一覧で
+ * 出し、ボタンで取り込む。受付番号（＝応募ID）で選考に紐づけ、取り込み済みかどうかは面談ログの
+ * sourceFileId（form:タイムスタンプ_応募ID）で判定する。
+ */
+const FeedbackResponsesPanel: React.FC<{
+    candidates: Candidate[];
+    onSaveCandidate: (candidate: Candidate) => void;
+}> = ({ candidates, onSaveCandidate }) => {
+    const [responses, setResponses] = useState<FeedbackResponse[]>([]);
+    const [loading, setLoading] = useState(false);
+    const load = useCallback(() => {
+        setLoading(true);
+        loadFeedbackResponses()
+            .then(setResponses)
+            .catch(err => console.warn('面接振り返りアンケートの回答を読み込めませんでした', err))
+            .finally(() => setLoading(false));
+    }, []);
+    useEffect(() => { load(); }, [load]);
+
+    const pending = useMemo(() => {
+        const byAppId = new Map<string, { candidate: Candidate; app: CompanyApplication }>();
+        for (const c of candidates) for (const app of c.applications) byAppId.set(app.id, { candidate: c, app });
+        return responses.flatMap(r => {
+            const hit = byAppId.get(r.applicationId);
+            if (!hit || (hit.candidate.memos || []).some(m => m.sourceFileId === r.key)) return [];
+            return [{ ...hit, response: r }];
+        });
+    }, [responses, candidates]);
+    if (pending.length === 0) return null;
+
+    const importItems = (items: typeof pending) => {
+        const byCandidate = new Map<string, typeof pending>();
+        for (const item of items) byCandidate.set(item.candidate.id, [...(byCandidate.get(item.candidate.id) || []), item]);
+        byCandidate.forEach(group => {
+            const c = group[0].candidate;
+            // 旧形式の面談メモ（interviewMemo / interviewSummary）が残っている候補者は、カード側の
+            // commitMemosと同じく memos に畳み込んでから追記する（表示から消えないように）。
+            const base: MemoEntry[] = c.memos && c.memos.length > 0 ? c.memos : [
+                ...(c.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: c.interviewMemo, updatedAt: '' }] : []),
+                ...(c.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約（旧形式・統合済み）', content: c.interviewSummary, updatedAt: '' }] : []),
+            ];
+            const added: MemoEntry[] = group.map(({ app, response }) => ({
+                id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                title: `面接振り返りアンケート（${app.companyName} ${response.phase || app.stage}）`,
+                content: response.content,
+                updatedAt: new Date().toISOString(),
+                logDate: toIsoDate(response.interviewDate) || toIsoDate(response.submittedAt) || undefined,
+                sourceFileId: response.key,
+            }));
+            onSaveCandidate({ ...c, memos: [...base, ...added], interviewMemo: undefined, interviewSummary: undefined });
+        });
+    };
+
+    return (
+        <div className="mail-result-suggestions feedback-responses">
+            <div className="mail-result-suggestions-header">
+                <strong>面接振り返りアンケートの新しい回答（{pending.length}件）</strong>
+                <span className="interview-prep-hint">取り込むと候補者の面談ログに追加され、企業ナレッジ投稿の「AIで下書き」にも使えます。</span>
+                <button type="button" className="interview-prep-generate-button" onClick={() => importItems(pending)}>すべて取り込む</button>
+                <button type="button" className="interview-prep-link-button" onClick={load} disabled={loading}>{loading ? '読み込み中...' : '再読み込み'}</button>
+            </div>
+            <ul>
+                {pending.map(item => (
+                    <li key={item.response.key}>
+                        <span className="mail-result-text">
+                            {item.candidate.name}さん／{item.app.companyName}：{item.response.phase || item.app.stage}（{toIsoDate(item.response.submittedAt) || item.response.submittedAt}回答）
+                        </span>
+                        <span className="mail-result-actions">
+                            <button type="button" className="interview-prep-link-button" onClick={() => importItems([item])}>面談ログに取り込む</button>
+                        </span>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+};
+
 const DISMISSED_PROPOSALS_KEY = 'kpi-mgr-dismissed-mail-proposals';
 const readDismissedProposals = (): Set<string> => {
     try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_PROPOSALS_KEY) || '[]')); } catch { return new Set(); }
@@ -14688,6 +14787,8 @@ const CandidatePipelineView: React.FC<{
                      <button onClick={handleExportCSV} className="export-button">CSV出力</button>
                 </div>
             </div>
+
+            <FeedbackResponsesPanel candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
 
             <MailResultSuggestionsPanel
                 candidates={ownCandidatesForSuggestions}
