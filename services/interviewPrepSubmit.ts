@@ -140,6 +140,9 @@ export const HANDOFF_COLUMNS = [
   // 候補者名（ジェネレーターの候補者名欄に入れる。ジェネレーターは画面上の「あなた」の置き換えにだけ
   // 使い、AIには送らない）。面談メモと同じく、ジェネレーターが読み込んだら消す。
   'candidate_name',
+  // 候補者の登録情報（現職・職種・学歴・年齢・現年収・経歴概要）をレジュメ代わりのテキストにしたもの。
+  // kpi-mgrにはレジュメのファイル本体が無いため。氏名・連絡先は含めない。読んだら消す。
+  'resume_text',
 ] as const;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -166,6 +169,7 @@ export const createHandoff = async (h: {
   companyName: string;
   phase: string;
   memoText: string;
+  resumeText?: string;
 }): Promise<void> => {
   await ensureSheet(HANDOFFS_SHEET, HANDOFF_COLUMNS);
   const now = Date.now();
@@ -178,6 +182,7 @@ export const createHandoff = async (h: {
     interview_memo: fitSheetCell(maskPersonalInfo(h.memoText, h.candidateName)),
     used_at: '',
     candidate_name: h.candidateName.trim(),
+    resume_text: fitSheetCell(maskPersonalInfo(h.resumeText || '', h.candidateName)),
   };
   await appendRowByHeader(HANDOFFS_SHEET, row);
 };
@@ -307,4 +312,27 @@ export const draftKnowledgeFromMemo = async (params: {
     result,
     reason: clean(parsed.reason),
   };
+};
+
+/**
+ * kpi-mgrの登録情報から、レジュメ代わりのプロフィール文を作る（面接対策ジェネレーターのレジュメ欄用）。
+ * 氏名・電話番号・メールアドレスは入れない。登録が無い項目は省く。何も無ければ空文字。
+ */
+export const buildCandidateProfileText = (c: {
+  age?: number; currentCompany?: string; jobType?: string; education?: string;
+  currentSalary?: number; summary?: string;
+}): string => {
+  const lines: string[] = [];
+  if (c.age) lines.push(`・年齢：${c.age}歳`);
+  if (c.currentCompany?.trim()) lines.push(`・現職：${c.currentCompany.trim()}`);
+  if (c.jobType?.trim()) lines.push(`・職種：${c.jobType.trim()}`);
+  if (c.education?.trim()) lines.push(`・最終学歴：${c.education.trim()}`);
+  if (c.currentSalary) lines.push(`・現年収：${c.currentSalary}万円`);
+  const summary = c.summary?.trim();
+  if (lines.length === 0 && !summary) return '';
+  return [
+    '【候補者プロフィール（KPI管理くんの登録情報。レジュメ原本ではありません）】',
+    ...lines,
+    ...(summary ? ['', '【経歴概要】', summary] : []),
+  ].join('\n');
 };

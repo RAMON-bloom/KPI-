@@ -32,7 +32,7 @@ import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQ
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
-import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -8237,6 +8237,7 @@ const InterviewPrepSection: React.FC<{
                 token, createdBy, candidateId: candidate.id, candidateName: candidate.name,
                 applicationId: application.id, gasCompanyId: application.gasCompanyId,
                 companyName: application.companyName, phase: gasPhaseForStage(application.stage) || '', memoText,
+                resumeText: buildCandidateProfileText(candidate),
             });
             handoff = token;
         } catch (err) {
