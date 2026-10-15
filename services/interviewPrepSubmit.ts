@@ -254,6 +254,27 @@ export interface KnowledgeDraft {
   reason: string;
 }
 
+// 候補者アンケートの取り込み本文で、任意回答（確度の参考）が始まる区切り（interviewFeedbackForm.ts と同じ文字列）。
+const FEEDBACK_PRIVATE_SECTION_MARK = '――― 任意回答（確度の参考）―――';
+
+const KNOWLEDGE_HEADINGS = ['形式・所要時間', '面接官', '聞かれた質問', '評価されたポイント・懸念された点', '逆質問とその回答', '雰囲気・その他'];
+
+/**
+ * AIが改行を落として1行に詰めて返すことがあるので、見出し（■…）の前後に改行を入れ直す。
+ * 見出し名に「・」を含むものがあるため、箇条書きの「・」では区切らない（見出し単位で直す）。
+ */
+export const restoreKnowledgeLineBreaks = (text: string): string => {
+  let out = text.trim();
+  if (!out) return out;
+  for (const h of KNOWLEDGE_HEADINGS) {
+    // 見出しの前：行頭でなければ空行を入れる。見出しの後：改行でなければ改行を入れる。
+    out = out.split(`■${h}`).map((part, i) => (i === 0 ? part : part.replace(/^[ \t]*(?!\n)/, '\n'))).join(`■${h}`);
+    out = out.replace(new RegExp(`([^\\n])[ \\t]*■${h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), `$1\n\n■${h}`);
+  }
+  // 見出しの直後の箇条書きが「・」で始まっていない時は付けない（そのまま）。連続する空行は1つに。
+  return out.replace(/\n{3,}/g, '\n\n');
+};
+
 /**
  * 面接後の振り返り面談のログ（議事録の要約・メモ）から、企業ナレッジの下書きを作る。
  * ログは送信前に氏名・連絡先を伏せてからAIに渡す。
@@ -264,7 +285,10 @@ export const draftKnowledgeFromMemo = async (params: {
   companyName: string;
   phase: string;
 }): Promise<KnowledgeDraft> => {
-  const masked = maskPersonalInfo(params.memoText, params.candidateName);
+  // 候補者アンケートの任意回答（手応え・志望度・他社状況・担当者への伝言）は候補者個人の情報で、
+  // 全員が見る企業ナレッジに載せるものではないので、AIに渡す前に切り落とす。
+  const withoutPrivate = params.memoText.split(FEEDBACK_PRIVATE_SECTION_MARK)[0];
+  const masked = maskPersonalInfo(withoutPrivate, params.candidateName);
   const instruction = [
     'あなたは人材紹介会社のキャリアアドバイザーです。次の「面談ログ」は、候補者が企業の面接を受けた後に担当者と行った振り返り面談などの記録です。',
     `ここから「${params.companyName}」の「${params.phase}」について、今後同じ企業を受ける別の候補者の面接対策に使える企業ナレッジを抜き出してください。`,
@@ -274,8 +298,10 @@ export const draftKnowledgeFromMemo = async (params: {
     '- 要約しすぎない。次に同じ企業を受ける候補者がそのまま準備に使えるよう、ログにある情報は省略せず具体的に書く。',
     '- 聞かれた質問は、ログに出たものをすべて、聞かれた言い回しにできるだけ近い形で列挙する。深掘りされた点や、候補者の回答に対する面接官の反応も書く。',
     '- 数字（所要時間・人数・選考の段階数など）や、企業側が重視していると分かる点は必ず残す。',
+    '- 候補者本人の手応え・志望度・志望度の変化・他社の選考状況・個人的な感想や不安は、企業の情報ではないので書かない。',
     '- content は次の見出しで、箇条書き中心に書く（情報が無い見出しは省く）:',
     '  ■形式・所要時間 ■面接官 ■聞かれた質問 ■評価されたポイント・懸念された点 ■逆質問とその回答 ■雰囲気・その他',
+    '- content の書式：見出しは1行に「■見出し」だけを書き、その下に箇条書きを1項目1行で「・」から始めて書く。見出しと見出しの間は空行を1行入れる。改行は必ず入れる。',
     '- interviewer は面接官の役職・人数（例:「事業部長1名、人事1名」）。個人名がわかる場合も役職だけにする。',
     '- candidateAttr は候補者のタイプを個人が特定できない粒度で（例:「30代前半・事業会社の経理経験者」）。',
     `- result はログから選考結果が読み取れる場合のみ ${GENERATOR_RESULTS.join('／')} のいずれか。わからなければ空文字。reason はその理由（企業側の評価）。`,
@@ -306,7 +332,7 @@ export const draftKnowledgeFromMemo = async (params: {
   const clean = (v: unknown) => maskPersonalInfo(typeof v === 'string' ? v : '', params.candidateName);
   const result = (GENERATOR_RESULTS as readonly string[]).includes(parsed.result) ? parsed.result : '';
   return {
-    content: clean(parsed.content),
+    content: restoreKnowledgeLineBreaks(clean(parsed.content)),
     interviewer: clean(parsed.interviewer),
     candidateAttr: clean(parsed.candidateAttr),
     result,

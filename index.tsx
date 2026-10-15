@@ -4410,6 +4410,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '企業ナレッジ・選考結果の投稿フォームに「企業」欄を追加した。面接対策ジェネレーターの企業一覧から選ぶ（無ければ新規登録する）と送信できます。一覧に無い企業のままだとジェネレーターに自動で取り込まれないため、その場合は送信できないようにしました。送信した内容は10分以内に自動で取り込まれます',
+      '「AIで下書き」で、候補者アンケートの任意回答（手応え・志望度・他社の選考状況・担当者への伝言）を企業ナレッジに含めないようにした（候補者個人の情報のため）。あわせて、下書きの改行が消えて1行に詰まってしまうことがあったのを直した',
       '面談ログ（Meet議事録・面談音声・ファイル）を取り込む時のAI要約を、短くまとめず詳しく残すように変更した。固有名詞や数字、面接で話せるエピソード（状況・役割・行動・結果）、強み・懸念点、企業選びの軸、選考中の企業ごとの面接内容（聞かれた質問・回答・面接官の反応）、印象的な発言を残します。面接対策資料やブラインドレジュメ、企業ナレッジの下書きの材料が増え、内容が具体的になります（すでに取り込み済みのログは変わりません）。企業ナレッジ投稿の「AIで下書き」も、聞かれた質問をすべて詳しく書き出すようにした',
       '「面接対策ジェネレーターで作る」を押した時に、面談メモ（氏名・連絡先は伏せたもの）をジェネレーターに受け渡す準備をした。ジェネレーター側の対応が済むと、企業・フェーズ・面談メモが入った状態で面接対策資料の生成が自動で始まるようになります（対応までは、これまで通りコピーした面談メモを貼り付けてください）',
       '選考情報・候補者情報の「企業名」欄で、入力を始めると面接対策ジェネレーターに登録済みの企業だけが候補に出るようにした。候補から選ぶと表記がそろい、ジェネレーターの通過実績・企業ナレッジ・メールの選考結果とも確実に紐づきます（↑↓キーで選んでEnterでも確定できます）。登録されていない企業は、候補の一番下の「新規登録」を押すと、面接対策ジェネレーターの企業一覧にも追加されて使えるようになります（似た企業がすでに登録されている場合は、登録前に確認が出ます）',
@@ -8371,6 +8373,12 @@ const KnowledgeSubmitForm: React.FC<{
     const [reason, setReason] = useState('');
     const [busy, setBusy] = useState<'' | 'drafting' | 'submitting'>('');
     const [message, setMessage] = useState('');
+    // 投稿先の企業。ジェネレーターの企業一覧の企業でないと自動で取り込めない（企業を特定できず
+    // 管理者確認に回ってしまう）ため、選考の企業名を初期値にしつつ、一覧から選ぶ／新規登録してもらう。
+    const [companyName, setCompanyName] = useState(application.companyName);
+    const [companyId, setCompanyId] = useState<string | undefined>(application.gasCompanyId);
+    const masterAvailable = !!data && !data.sheetsError && data.companies.size > 0;
+    const companyReady = !masterAvailable || !!(companyId && data?.companies.has(companyId));
     const blockEnter = (e: React.KeyboardEvent) => { if (e.key === 'Enter') e.preventDefault(); };
 
     const handleDraft = async () => {
@@ -8380,7 +8388,7 @@ const KnowledgeSubmitForm: React.FC<{
         setMessage('');
         try {
             const draft = await draftKnowledgeFromMemo({
-                memoText: memo.content, candidateName: candidate.name, companyName: application.companyName, phase,
+                memoText: memo.content, candidateName: candidate.name, companyName: companyName || application.companyName, phase,
             });
             setContent(draft.content);
             setInterviewer(draft.interviewer);
@@ -8397,17 +8405,17 @@ const KnowledgeSubmitForm: React.FC<{
     };
 
     const handleSubmit = async () => {
-        if (!content.trim() && !result) return;
+        if ((!content.trim() && !result) || !companyReady) return;
         const submittedBy = getCurrentSession()?.identity.email || '';
         setBusy('submitting');
         setMessage('');
         try {
             await submitKnowledge({
-                companyName: application.companyName, phase, position, result, reason, interviewer,
-                content, candidateAttr, applicationId: application.id, submittedBy, gasCompanyId: application.gasCompanyId,
+                companyName, phase, position, result, reason, interviewer,
+                content, candidateAttr, applicationId: application.id, submittedBy, gasCompanyId: companyId,
             }, data);
             setContent(''); setInterviewer(''); setCandidateAttr(''); setResult(''); setReason(''); setPosition('');
-            setMessage('面接対策ジェネレーターに送信しました。ジェネレーター側で承認されると企業ナレッジに反映されます。');
+            setMessage('面接対策ジェネレーターに送信しました。10分以内に自動で企業ナレッジ・選考実績に取り込まれます。');
         } catch (err) {
             console.error('企業ナレッジの送信に失敗しました', err);
             setMessage(err instanceof InterviewPrepAccessError ? err.message : '送信に失敗しました。時間をおいて再度お試しください。');
@@ -8427,6 +8435,13 @@ const KnowledgeSubmitForm: React.FC<{
     return (
         <div className="knowledge-submit knowledge-submit-open">
             <div className="interview-prep-subtitle">面接対策ジェネレーターに投稿（候補者の氏名・連絡先は送りません）</div>
+            <label>企業（ジェネレーターの企業一覧から選ぶか、新規登録）
+                <CompanyNameInput
+                    id={`knowledge-company-${application.id}`}
+                    value={companyName}
+                    onChange={(name, id) => { setCompanyName(name); setCompanyId(id); }}
+                />
+            </label>
             <div className="knowledge-submit-row">
                 <label>フェーズ
                     <select value={phase} onChange={e => setPhase(e.target.value)}>
@@ -8474,8 +8489,13 @@ const KnowledgeSubmitForm: React.FC<{
                     <input type="text" value={reason} onChange={e => setReason(e.target.value)} onKeyDown={blockEnter} />
                 </label>
             </div>
+            {!companyReady && (
+                <p className="interview-prep-hint company-name-unregistered">
+                    企業がジェネレーターの企業一覧に無いため、このままでは送信できません（取り込み先の企業が決まらないため）。上の企業欄で候補から選ぶか、「新規登録」してください。
+                </p>
+            )}
             <div className="knowledge-submit-actions">
-                <button type="button" className="interview-prep-generate-button" onClick={handleSubmit} disabled={!!busy || (!content.trim() && !result)}>
+                <button type="button" className="interview-prep-generate-button" onClick={handleSubmit} disabled={!!busy || (!content.trim() && !result) || !companyReady}>
                     {busy === 'submitting' ? '送信中...' : '送信する'}
                 </button>
                 <button type="button" className="interview-prep-link-button" onClick={() => setOpen(false)} disabled={!!busy}>閉じる</button>
