@@ -104,16 +104,20 @@ export const loadFeedbackResponses = async (): Promise<FeedbackResponse[]> => {
   const values: string[][] = json.values || [];
   if (values.length < 2) return [];
   const header = values[0];
-  return values.slice(1).flatMap(v => {
+  // タイムスタンプ列の見出しはスプレッドシートの言語設定で変わる（「タイムスタンプ」「Timestamp」）
+  // ため、見つからなければフォームの回答シートで常に先頭にある1列目を使う。
+  const timestampCol = header.find(h => h === COL.timestamp || /^timestamp$/i.test(h)) ?? header[0];
+  return values.slice(1).flatMap((v, rowIndex) => {
     const row = Object.fromEntries(header.map((h, i) => [h, v[i] ?? '']));
     const applicationId = (row[COL.applicationId] || '').trim();
     if (!applicationId) return [];
+    const timestamp = row[timestampCol] || `row${rowIndex + 2}`;
     return [{
-      key: `form:${row[COL.timestamp]}_${applicationId}`,
+      key: `form:${timestamp}_${applicationId}`,
       applicationId,
       companyName: row[COL.company] || '',
       phase: row[COL.phase] || '',
-      submittedAt: row[COL.timestamp] || '',
+      submittedAt: row[timestampCol] || '',
       interviewDate: row[COL.interviewDate] || '',
       content: formatResponse(row),
     }];

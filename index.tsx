@@ -4406,6 +4406,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '取り込んだ面接振り返りアンケートの回答を、その選考の選考情報（「面接対策資料」欄）でも表示するようにした（これまでは候補者カードの面談ログにだけ表示されていました）。あわせて、同じ選考に複数回の回答があった場合に2件目以降が取り込めないことがある不具合を修正',
       '候補者向けの「面接振り返りアンケート」（Googleフォーム）を追加した。選考情報の「面接対策資料」欄の「メール用の文面をコピー」「LINE用の文面をコピー」で、その選考の受付番号・企業名・フェーズが入ったアンケートの案内をコピーできます。候補者が回答すると、候補者パイプラインの上部に「面接振り返りアンケートの新しい回答」として出るので、「面談ログに取り込む」で面談ログに追加できます（取り込んだ回答は企業ナレッジ投稿の「AIで下書き」にも使えます。手応え・志望度・他社状況などの任意回答も入ります）',
       '選考情報の「面接対策資料」欄に「この選考のナレッジ・結果をジェネレーターに投稿」を追加した。面接で聞かれたこと・面接官・雰囲気などの企業ナレッジと、電話や口頭で伝えられた選考結果を、面接対策ジェネレーターに送れます。「AIで下書き」を押すと、選んだ面談ログから下書きを作ります（候補者の氏名・連絡先は伏せて送ります）。送った内容は、ジェネレーター側で承認されると企業ナレッジに反映されます',
     ],
@@ -7977,6 +7978,11 @@ const InterviewPrepSection: React.FC<{
     const knowledge = prep.data && companyName ? getKnowledge(prep.data, companyName, application.stage) : [];
     const docs = prep.data && companyName ? findDocsForApplication(prep.data, companyName, application.stage).slice(0, 5) : [];
     const memoText = useMemo(() => buildInterviewMemoText(sortMemosChronologically(candidate.memos || [])), [candidate.memos]);
+    // この選考について取り込んだ面接振り返りアンケート（sourceFileId = form:<タイムスタンプ>_<応募ID>）。
+    const surveyMemos = useMemo(
+        () => sortMemosChronologically((candidate.memos || []).filter(m => m.sourceFileId?.startsWith('form:') && m.sourceFileId.endsWith(`_${application.id}`))),
+        [candidate.memos, application.id],
+    );
     const url = application.interviewPrepDocUrl || '';
     const isValidUrl = /^https?:\/\//.test(url.trim());
 
@@ -8036,6 +8042,17 @@ const InterviewPrepSection: React.FC<{
                     <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('email')}>メール用の文面をコピー</button>
                     <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('line')}>LINE用の文面をコピー</button>
                 </div>
+            )}
+            {surveyMemos.length > 0 && (
+                <details className="interview-prep-knowledge" open>
+                    <summary>この選考の面接振り返りアンケートの回答（{surveyMemos.length}件）</summary>
+                    {surveyMemos.map(m => (
+                        <div key={m.id} className="interview-prep-knowledge-item">
+                            <div className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</div>
+                            <pre>{m.content}</pre>
+                        </div>
+                    ))}
+                </details>
             )}
             {companyName && (
                 <div className="interview-prep-insights">
@@ -8244,9 +8261,18 @@ const FeedbackResponsesPanel: React.FC<{
     const pending = useMemo(() => {
         const byAppId = new Map<string, { candidate: Candidate; app: CompanyApplication }>();
         for (const c of candidates) for (const app of c.applications) byAppId.set(app.id, { candidate: c, app });
+        // 2026-10-15の初版はタイムスタンプ列を読めず「form:undefined_応募ID」で取り込んでいた。
+        // その応募の最初の回答は取り込み済みとして扱う（再表示・二重取り込みを防ぐ）。
+        const legacyClaimed = new Set<string>();
         return responses.flatMap(r => {
             const hit = byAppId.get(r.applicationId);
-            if (!hit || (hit.candidate.memos || []).some(m => m.sourceFileId === r.key)) return [];
+            if (!hit) return [];
+            const memos = hit.candidate.memos || [];
+            if (memos.some(m => m.sourceFileId === r.key)) return [];
+            if (!legacyClaimed.has(r.applicationId) && memos.some(m => m.sourceFileId === `form:undefined_${r.applicationId}`)) {
+                legacyClaimed.add(r.applicationId);
+                return [];
+            }
             return [{ ...hit, response: r }];
         });
     }, [responses, candidates]);
