@@ -4036,6 +4036,17 @@ p.memo-content-text {
 .single-blind-resume-modal .modal-footer .blind-resume-estimate { order: 0; margin-right: auto; }
 .candidate-card-header .similar-career-launch-inline:has(+ .blind-resume-launch-inline) { margin-right: 0; }
 .candidate-card-header .similar-career-launch-inline + .blind-resume-launch-inline { margin-left: 0; }
+/* 候補者カードの見出し行に、ボタン・バッジが増えて1行に収まらなくなった時の崩れ対策。
+   これまでは折り返さない1行のflexだったため、全体が押し縮められて氏名が途中で改行され、
+   右端の操作ボタンもその場で2段に積み重なっていた。氏名は改行させず、収まらない時は
+   操作ボタンのまとまりごと次の行（右寄せ）に送る。 */
+.candidate-card-header { flex-wrap: wrap; row-gap: 0.5rem; }
+.candidate-card-header h3,
+.candidate-card-header .candidate-name-display { white-space: nowrap; flex-shrink: 0; }
+.candidate-card-header .candidate-card-actions { flex-wrap: nowrap; margin-left: auto; }
+@media (max-width: 900px) {
+  .candidate-card-header .candidate-card-actions { flex-wrap: wrap; }
+}
 
 /* 面接対策ジェネレーター連携（選考情報モーダルの「面接対策資料」欄・カードのバッジ内リンク） */
 .interview-prep-section .interview-prep-actions {
