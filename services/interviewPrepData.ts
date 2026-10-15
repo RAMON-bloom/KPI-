@@ -124,6 +124,9 @@ export interface InterviewPrepData {
   knowledge: PrepKnowledge[];
   proposals: MailProposal[];
   docs: PrepDoc[];
+  // KPI管理くんから企業ナレッジ・選考結果を投稿したことがある選考のID（kpi_submissions の
+  // kpi_application_id。却下されたものは除く）。候補者カードの金色表示に使う。
+  submittedApplicationIds: Set<string>;
   // スプレッドシートだけ読めなかった場合の理由（資料の検索は別に成功していることがある）。
   sheetsError?: string;
   loadedAt: number;
@@ -148,6 +151,14 @@ const loadSheets = async () => {
       result: r.result, reason: r.reason, confidence: r.confidence, status: r.status, createdAt: r.created_at,
     }));
   return { companies, cases, knowledge, proposals };
+};
+
+// kpi_submissions は初回投稿時に作られるシートなので、他のシートとは別に読む（無くても他は読める）。
+const loadSubmittedApplicationIds = async (): Promise<Set<string>> => {
+  const json = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${INTERVIEW_PREP_SPREADSHEET_ID}/values/${encodeURIComponent('kpi_submissions!A:Z')}`);
+  return new Set(toRows(json.values, ['kpi_application_id', 'status'])
+    .filter(r => r.kpi_application_id && r.status !== 'rejected')
+    .map(r => r.kpi_application_id));
 };
 
 // 「面接対策_企業名_ポジション_フェーズ_YYYY-MM-DD.docx」を後ろから分解する（ポジションに
@@ -184,13 +195,17 @@ export const loadInterviewPrepData = (force = false): Promise<InterviewPrepData>
   if (!force && cache && Date.now() - cache.at < CACHE_MS) return cache.promise;
   const promise = (async () => {
     // シートが読めなくても（権限なし等）資料の検索は自分のドライブなので独立して試す。
-    const [sheets, docs] = await Promise.allSettled([loadSheets(), loadDocs()]);
+    const [sheets, docs, submitted] = await Promise.allSettled([loadSheets(), loadDocs(), loadSubmittedApplicationIds()]);
     if (sheets.status === 'rejected' && docs.status === 'rejected') throw sheets.reason;
     const s = sheets.status === 'fulfilled' ? sheets.value : { companies: new Map(), cases: [], knowledge: [], proposals: [] };
     const sheetsError = sheets.status === 'rejected'
       ? (sheets.reason instanceof InterviewPrepAccessError ? sheets.reason.message : '面接対策ジェネレーターのデータを読み込めませんでした。')
       : undefined;
-    return { ...s, docs: docs.status === 'fulfilled' ? docs.value : [], sheetsError, loadedAt: Date.now() };
+    return {
+      ...s, docs: docs.status === 'fulfilled' ? docs.value : [],
+      submittedApplicationIds: submitted.status === 'fulfilled' ? submitted.value : new Set<string>(),
+      sheetsError, loadedAt: Date.now(),
+    };
   })();
   cache = { promise, at: Date.now() };
   promise.catch(() => { if (cache?.promise === promise) cache = null; });

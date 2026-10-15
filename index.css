@@ -4641,3 +4641,33 @@ p.memo-content-text {
 .prep-docs-notice-item span { flex: 1 1 260px; }
 .prep-docs-notice-item a { font-weight: 600; color: #1f2a44; }
 .prep-docs-notice-item.is-error { border-color: #e3c9c9; border-left-color: #9b3a3a; background: #fdf7f7; color: #7a2e2e; }
+
+/* 振り返り完了（同じ選考でアンケート回収とナレッジ投稿まで済んだ候補者）。主張しすぎない金色調。 */
+.candidate-list-item.is-review-completed {
+  position: relative;
+  border-color: #d9c38a;
+  background: linear-gradient(180deg, #fffcf3 0%, #ffffff 120px);
+  box-shadow: 0 0 0 1px rgba(201, 168, 92, 0.35), 0 4px 10px rgba(166, 132, 52, 0.10);
+}
+.candidate-list-item.is-review-completed::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, #b8913f, #e6cf8f 50%, #b8913f);
+}
+.candidate-list-item.is-review-completed:hover {
+  box-shadow: 0 0 0 1px rgba(201, 168, 92, 0.5), 0 8px 16px rgba(166, 132, 52, 0.14);
+}
+.review-completed-chip {
+  flex-shrink: 0;
+  padding: 0.1rem 0.6rem;
+  border: 1px solid #d4b86e;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #fff9e8, #f6e7bd);
+  color: #7d5f17;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}

@@ -689,6 +689,9 @@ interface CompanyApplication {
   // 資料（Googleドキュメント）。新しい順ではなく保存順。最新のものが interviewPrepDocUrl にも入る
   // （services/generatedPrepDocs.ts、GeneratedPrepDocsCollector）。
   interviewPrepDocs?: SavedPrepDoc[];
+  // この選考の企業ナレッジ・選考結果を面接対策ジェネレーターに投稿した日時（ISO）。この機能より
+  // 前の投稿は記録が無いので、候補者カードの金色表示ではジェネレーター側の kpi_submissions も見る。
+  knowledgeSubmittedAt?: string;
   // 企業名を面接対策ジェネレーターの企業マスタ（companies シート）から選んだ場合の企業ID。
   // ジェネレーターのデータとの突き合わせに名前より優先して使う。企業名を後から書き換えて
   // マスタの名前と合わなくなった場合は無視される（services/interviewPrepData.ts）。
@@ -4418,6 +4421,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '候補者カードの選考バッジから「対策資料を開く」「Word」ボタンをなくした。面接対策資料は、選考情報の編集画面の「面接対策資料」欄から開く・Wordでダウンロードできます',
+      '面接振り返りアンケートを取り込み、その選考の企業ナレッジ・選考結果もジェネレーターに投稿した選考がある候補者は、候補者カードが金色調になり「振り返り完了」と表示されるようにした（同じ選考でアンケートと投稿の両方が済んでいる場合が対象です）',
       '候補者カードの選考バッジにある「対策資料」と「Word」を見分けやすくした。白地の「対策資料を開く」（開くアイコン付き）と、紺地の「Word」（ダウンロードアイコン付き）の小さなボタンにしています',
       '面接対策ジェネレーターで作った面接対策資料が、自動で自分のGoogleドライブに保存され、その選考に紐づくようにした。候補者カードの選考バッジの「対策資料」や、選考情報の「面接対策資料」欄から、いつでも開いたりWordでダウンロードしたりできます。対象は選考情報の「面接対策ジェネレーターで作る」から開いて生成した資料で、ドライブの「面接対策資料」フォルダにGoogleドキュメントとして保存されます（KPI管理くんを開いている間に1分以内に保存されます。生成後に本文を編集してWordをダウンロードした場合は、編集後の内容に更新されます）',
       '企業ナレッジ・選考結果をジェネレーターに投稿してから反映されるまでの待ち時間を短くした（最大10分 → 送信直後、遅くとも1分ほど）。送信と同時にジェネレーターへ取り込みを依頼し、届かなかった場合もジェネレーター側が1分ごとに取り込みます',
@@ -7769,8 +7774,10 @@ const ApplicationModal: React.FC<{
   candidate?: Candidate;
   // 選考情報の「面接振り返りアンケート」欄から、取り込んだ回答（面談ログ）を削除する。
   onDeleteMemo?: (memoId: string) => void;
+  // この選考の企業ナレッジ・選考結果をジェネレーターに投稿した（選考に投稿日時を記録する）
+  onKnowledgeSubmitted?: (applicationId: string) => void;
   initialData: CompanyApplication | null; // null for new, object for edit
-}> = ({ isOpen, onClose, onSave, candidateName, candidate, onDeleteMemo, initialData }) => {
+}> = ({ isOpen, onClose, onSave, candidateName, candidate, onDeleteMemo, onKnowledgeSubmitted, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
@@ -8054,6 +8061,7 @@ const ApplicationModal: React.FC<{
                             application={application}
                             onUrlChange={url => setApplication(prev => ({ ...prev, interviewPrepDocUrl: url || undefined }))}
                             onDeleteMemo={onDeleteMemo}
+                            onKnowledgeSubmitted={onKnowledgeSubmitted && (() => onKnowledgeSubmitted(application.id))}
                         />
                     )}
                 </form>
@@ -8268,7 +8276,8 @@ const InterviewPrepSection: React.FC<{
     application: CompanyApplication;
     onUrlChange: (url: string) => void;
     onDeleteMemo?: (memoId: string) => void;
-}> = ({ candidate, application, onUrlChange, onDeleteMemo }) => {
+    onKnowledgeSubmitted?: () => void;
+}> = ({ candidate, application, onUrlChange, onDeleteMemo, onKnowledgeSubmitted }) => {
     const [copyMessage, setCopyMessage] = useState('');
     const prep = useInterviewPrepData();
     const companyName = application.companyName.trim();
@@ -8528,7 +8537,7 @@ const InterviewPrepSection: React.FC<{
                     {prep.data && !prep.loading && !hasStats && knowledge.length === 0 && (
                         <p className="prep-note">この企業・フェーズの実績やナレッジはまだありません。</p>
                     )}
-                    <KnowledgeSubmitForm candidate={candidate} application={application} data={prep.data} />
+                    <KnowledgeSubmitForm candidate={candidate} application={application} data={prep.data} onSubmitted={onKnowledgeSubmitted} />
                 </section>
             )}
         </div>
@@ -8544,7 +8553,8 @@ const KnowledgeSubmitForm: React.FC<{
     candidate: Candidate;
     application: CompanyApplication;
     data: InterviewPrepData | null;
-}> = ({ candidate, application, data }) => {
+    onSubmitted?: () => void;
+}> = ({ candidate, application, data, onSubmitted }) => {
     const memos = useMemo(() => [...sortMemosChronologically(candidate.memos || [])].reverse().filter(m => m.content.trim()), [candidate.memos]);
     const [open, setOpen] = useState(false);
     const [phase, setPhase] = useState(gasPhaseForStage(application.stage) || '一次面接');
@@ -8600,6 +8610,7 @@ const KnowledgeSubmitForm: React.FC<{
             }, data);
             setContent(''); setInterviewer(''); setCandidateAttr(''); setResult(''); setReason(''); setPosition('');
             setMessage('面接対策ジェネレーターに送信しました。すぐに（遅くとも1分ほどで）企業ナレッジ・選考実績に取り込まれます。');
+            onSubmitted?.();
         } catch (err) {
             console.error('企業ナレッジの送信に失敗しました', err);
             setMessage(err instanceof InterviewPrepAccessError ? err.message : '送信に失敗しました。時間をおいて再度お試しください。');
@@ -8699,6 +8710,17 @@ const KnowledgeSubmitForm: React.FC<{
  * 出し、ボタンで取り込む。受付番号（＝応募ID）で選考に紐づけ、取り込み済みかどうかは面談ログの
  * sourceFileId（form:タイムスタンプ_応募ID）で判定する。
  */
+/**
+ * 「振り返り完了」— 同じ選考で、面接振り返りアンケートを取り込み（面談ログに残っている）、かつ
+ * その選考の企業ナレッジ・選考結果をジェネレーターに投稿済み、の選考が1つでもある候補者。
+ * 候補者カードを金色調で表示する。投稿済みかどうかは選考に記録した日時と、記録を始める前の
+ * 投稿も拾えるようジェネレーター側の kpi_submissions（submittedApplicationIds）の両方を見る。
+ */
+const hasCompletedInterviewReview = (c: Candidate, submittedApplicationIds?: Set<string>): boolean =>
+    c.applications.some(app =>
+        (c.memos || []).some(m => m.sourceFileId?.startsWith('form:') && m.sourceFileId.endsWith(`_${app.id}`))
+        && (!!app.knowledgeSubmittedAt || !!submittedApplicationIds?.has(app.id)));
+
 /**
  * 面談ログ（memos）から指定のメモを消した候補者を返す。面接振り返りアンケートから取り込んだメモ
  * （sourceFileId = form:...）なら、そのキーを dismissedFeedbackKeys に残して再表示を防ぐ。
@@ -12920,33 +12942,6 @@ const ApplicationStageBadge: React.FC<{
   >
     {app.companyName}: {app.stage}
     <SchedulingBallBadgeSuffix app={app} />
-    {app.interviewPrepDocUrl && /^https?:\/\//.test(app.interviewPrepDocUrl) && (
-      <a
-        href={app.interviewPrepDocUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="interview-prep-badge-link"
-        title="面接対策資料を開く"
-        onClick={e => e.stopPropagation()}
-        onKeyDown={e => e.stopPropagation()}
-      >
-        <PrepIcon name="external" size={12} />対策資料を開く
-      </a>
-    )}
-    {(() => {
-      const docId = googleDocIdFromUrl(app.interviewPrepDocUrl || '');
-      return docId && (
-        <a
-          href={prepDocDownloadUrl(docId)}
-          className="interview-prep-badge-link interview-prep-badge-link--download"
-          title="面接対策資料をWordでダウンロード"
-          onClick={e => e.stopPropagation()}
-          onKeyDown={e => e.stopPropagation()}
-        >
-          <PrepIcon name="download" size={12} />Word
-        </a>
-      );
-    })()}
   </span>
 );
 
@@ -13484,12 +13479,14 @@ const PipelineCandidateCard: React.FC<{
   onOpenSimilarResearch: (candidate: Candidate) => void;
   // 「ブラインドレジュメ」— 親（CandidatePipelineView）がSingleBlindResumeModalを開く。
   onOpenBlindResume: (candidate: Candidate) => void;
+  // 同じ選考でアンケート回収とナレッジ投稿まで済んでいる（hasCompletedInterviewReview）→ 金色調で表示
+  reviewCompleted?: boolean;
 }> = ({
   candidate: c, allMedia, candidateIsOwn, isManagedByMiddle, visibilityFilter, isExpanded, showHiddenApps,
   onToggleExpand, onToggleShowHiddenApps, onSave, onToggleVisibility, onDeleteCandidate, onToggleApplicationVisibility,
   onOpenRevivalModal, onRemoveFromRevivalList, onMoveRevivalToHidden,
   isTeamsEditable, onToggleTeammateVisibility, isContactRevealed, onToggleContactReveal,
-  onEditApplication, onOpenSimilarResearch, onOpenBlindResume,
+  onEditApplication, onOpenSimilarResearch, onOpenBlindResume, reviewCompleted,
 }) => {
   const activeMedia = allMedia.filter(m => !m.isArchived);
   // c.sourceはMediaEntry.id（例: 名前が日本語だけの媒体だと'media'のような機械的なスラッグに
@@ -13806,7 +13803,7 @@ const PipelineCandidateCard: React.FC<{
   };
 
   return (
-    <div className="candidate-list-item">
+    <div className={`candidate-list-item${reviewCompleted ? ' is-review-completed' : ''}`}>
       <div className="candidate-card-main">
         <div className="candidate-card-header">
           {candidateIsOwn ? (
@@ -13820,6 +13817,9 @@ const PipelineCandidateCard: React.FC<{
             />
           ) : (
             <h3 title={c.name}>{c.name}</h3>
+          )}
+          {reviewCompleted && (
+            <span className="review-completed-chip" title="アンケート回収とナレッジ投稿まで済んだ選考があります">振り返り完了</span>
           )}
           <button
               type="button"
@@ -14978,6 +14978,17 @@ const CandidatePipelineView: React.FC<{
         setApplicationModalData(prev => ({ ...prev, candidate: updated }));
     };
 
+    const handleKnowledgeSubmitted = (applicationId: string) => {
+        const candidate = latestModalCandidate();
+        if (!candidate || !candidate.applications.some(a => a.id === applicationId)) return;
+        const updated = {
+            ...candidate,
+            applications: candidate.applications.map(a => a.id === applicationId ? { ...a, knowledgeSubmittedAt: new Date().toISOString() } : a),
+        };
+        saveCandidate(updated);
+        setApplicationModalData(prev => ({ ...prev, candidate: updated }));
+    };
+
     const handleSaveApplication = (applicationData: CompanyApplication) => {
         const candidate = latestModalCandidate();
         if (!candidate) return;
@@ -14991,6 +15002,7 @@ const CandidatePipelineView: React.FC<{
         const merged: CompanyApplication = latestApp ? {
             ...applicationData,
             interviewPrepDocs: latestApp.interviewPrepDocs,
+            knowledgeSubmittedAt: latestApp.knowledgeSubmittedAt,
             interviewPrepDocUrl: applicationData.interviewPrepDocUrl === openedApp?.interviewPrepDocUrl
                 ? latestApp.interviewPrepDocUrl
                 : applicationData.interviewPrepDocUrl,
@@ -15240,6 +15252,8 @@ const CandidatePipelineView: React.FC<{
         });
     }, [candidates, searchTerm, visibilityFilter, selectedStageFilters, agentInterviewStatusFilter, bizSurveySentOnly, scope, selectedMemberFilters, decisionMonthFilter]);
 
+    // 候補者カードの金色表示（振り返り完了）の判定に、ジェネレーターへの投稿済み選考を使う
+    const reviewPrep = useInterviewPrepData();
     const sortedCandidates = useMemo(() => {
         let sortableItems = [...filteredCandidates];
         if (sortConfig !== null) {
@@ -15388,6 +15402,7 @@ const CandidatePipelineView: React.FC<{
                     candidateName={applicationModalData.candidate.name}
                     candidate={latestModalCandidate() || applicationModalData.candidate}
                     onDeleteMemo={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleDeleteModalMemo : undefined}
+                    onKnowledgeSubmitted={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleKnowledgeSubmitted : undefined}
                     initialData={applicationModalData.application}
                 />
             )}
@@ -15829,6 +15844,7 @@ const CandidatePipelineView: React.FC<{
                         onEditApplication={handleOpenApplicationModal}
                         onOpenSimilarResearch={setSimilarResearchCandidate}
                         onOpenBlindResume={setBlindResumeCandidate}
+                        reviewCompleted={hasCompletedInterviewReview(c, reviewPrep.data?.submittedApplicationIds)}
                     />
                 )) : (
                     candidates.length === 0 ? (
