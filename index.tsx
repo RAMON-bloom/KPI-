@@ -31,6 +31,8 @@ import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPl
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
+import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
+import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { loadPendingGeneratedDocs, saveGeneratedDocToDrive, prepDocOpenUrl, prepDocDownloadUrl, googleDocIdFromUrl, PREP_DOCS_FOLDER_NAME, type SavedPrepDoc } from './services/generatedPrepDocs';
@@ -692,6 +694,9 @@ interface CompanyApplication {
   // この選考の企業ナレッジ・選考結果を面接対策ジェネレーターに投稿した日時（ISO）。この機能より
   // 前の投稿は記録が無いので、候補者カードの金色表示ではジェネレーター側の kpi_submissions も見る。
   knowledgeSubmittedAt?: string;
+  // 選考ポジション（例: アクイジション、AM）。面接対策ジェネレーターのポジションと同じ名前にそろえる
+  // （ジェネレーターは企業×ポジションでナレッジ・求人票を持つ）。PositionInput で候補から選ぶか新規登録する。
+  position?: string;
   // 企業名を面接対策ジェネレーターの企業マスタ（companies シート）から選んだ場合の企業ID。
   // ジェネレーターのデータとの突き合わせに名前より優先して使う。企業名を後から書き換えて
   // マスタの名前と合わなくなった場合は無視される（services/interviewPrepData.ts）。
@@ -4421,6 +4426,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '選考情報に「ポジション」欄を追加した。面接対策ジェネレーターにその企業で登録されているポジションが候補に出ます。候補に無いポジションは「新規登録」でジェネレーターにも登録できます',
+      '選考情報の「面接対策資料」欄に「生成オプション」を追加し、ジェネレーターの生成画面で行っていた設定をKPI管理くんからできるようにした。フェーズ、求人票（保存済みのものを自動で読み込み・PDF/Wordファイルから読み取り・ジェネレーターへの保存）、使う面談メモの選択、レジュメファイルの追加、汎用ナレッジの選択、追加要望、資料内の敬称を指定してから「面接対策ジェネレーターで作る」を押すと、その内容で自動作成されます',
       '「面接対策ジェネレーターで作る」で開くジェネレーターの画面を、操作を間違えないよう専用の進行画面にした。開いた画面には「準備 → 資料を作成 → KPI管理くんへ送信」の進み具合だけが表示され、ほかのボタンは押せません。完了したら「このタブを閉じる」で閉じれば大丈夫です（内容を確認・編集したい場合は「内容を確認・編集する」で通常の画面に切り替えられます）',
       '候補者カードの選考バッジから「対策資料を開く」「Word」ボタンをなくした。面接対策資料は、選考情報の編集画面の「面接対策資料」欄から開く・Wordでダウンロードできます',
       '面接振り返りアンケートを取り込み、その選考の企業ナレッジ・選考結果もジェネレーターに投稿した選考がある候補者は、候補者カードが金色調になり「振り返り完了」と表示されるようにした（同じ選考でアンケートと投稿の両方が済んでいる場合が対象です）',
@@ -7893,6 +7900,16 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
+                        <label htmlFor="applicationPosition">ポジション</label>
+                        <PositionInput
+                            id="applicationPosition"
+                            companyName={application.companyName}
+                            gasCompanyId={application.gasCompanyId}
+                            value={application.position || ''}
+                            onChange={position => setApplication(prev => ({ ...prev, position: position || undefined }))}
+                        />
+                    </div>
+                    <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
                         <input
                             type="text"
@@ -8097,6 +8114,79 @@ const useInterviewPrepData = () => {
     return { ...state, reload: () => load(true) };
 };
 
+// ジェネレーターの生成画面の「選考フェーズ」の基本の選択肢（ナレッジ未登録でも選べるもの）
+const GENERATOR_GEN_PHASES = ['書類選考', 'カジュアル面談', '一次面接', '二次面接', '三次面接', '最終面接', '適性検査', 'ケース面接', 'リファレンス', 'オファー面談'];
+
+/**
+ * 選考ポジションの入力欄（候補付き）。面接対策ジェネレーターにその企業で登録されているポジション
+ * （企業ナレッジ・求人票に出てくる名前）を候補に出す。候補に無いポジションは「新規登録」で
+ * ジェネレーターに登録する（本文が空の求人票として作る。services/interviewPrepSubmit.ts saveJdToGenerator）。
+ */
+const PositionInput: React.FC<{
+    id: string;
+    companyName: string;
+    gasCompanyId?: string;
+    value: string;
+    onChange: (position: string) => void;
+}> = ({ id, companyName, gasCompanyId, value, onChange }) => {
+    const prep = useInterviewPrepData();
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState('');
+    const name = companyName.trim();
+    const companyId = prep.data && name ? resolveGeneratorCompanyId(prep.data, name, gasCompanyId) : null;
+    const positions = prep.data && name ? getCompanyPositions(prep.data, name, gasCompanyId) : [];
+    const trimmed = value.trim();
+    const isNew = !!trimmed && !positions.includes(trimmed);
+
+    const handleRegister = async () => {
+        if (!companyId || !trimmed) return;
+        setBusy(true);
+        setMessage('');
+        try {
+            await saveJdToGenerator(companyId, trimmed, '');
+            invalidateInterviewPrepData();
+            prep.reload();
+            setMessage(`「${trimmed}」を面接対策ジェネレーターに登録しました。`);
+        } catch (err) {
+            setMessage(err instanceof Error ? err.message : 'ポジションの登録に失敗しました。');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div className="position-input">
+            <input
+                type="text"
+                id={id}
+                list={`${id}-list`}
+                value={value}
+                onChange={e => { onChange(e.target.value); setMessage(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
+                placeholder={positions.length ? '候補から選ぶか入力（例: アクイジション、AM）' : '例: アクイジション、AM、PM'}
+            />
+            <datalist id={`${id}-list`}>
+                {positions.map(p => <option key={p} value={p} />)}
+            </datalist>
+            {name && prep.data && !companyId && (
+                <p className="interview-prep-hint">企業を面接対策ジェネレーターの企業一覧から選ぶと、登録済みのポジションが候補に出ます。</p>
+            )}
+            {companyId && positions.length > 0 && !trimmed && (
+                <p className="interview-prep-hint">ジェネレーターに登録済み: {positions.join('、')}</p>
+            )}
+            {companyId && isNew && (
+                <p className="interview-prep-hint company-name-unregistered">
+                    「{trimmed}」はジェネレーターに未登録のポジションです。
+                    <button type="button" className="interview-prep-link-button" onClick={handleRegister} disabled={busy}>
+                        {busy ? '登録中...' : '新規登録'}
+                    </button>
+                </p>
+            )}
+            {message && <p className="interview-prep-hint">{message}</p>}
+        </div>
+    );
+};
+
 /**
  * 企業名の入力欄（候補付き）。打ち始めると、面接対策ジェネレーターの企業マスタ（companies シート）
  * に登録済みの企業だけを候補に出す。選ぶとジェネレーターの企業IDも一緒に返す（以後は名前ではなく
@@ -8288,13 +8378,63 @@ const InterviewPrepSection: React.FC<{
     const docs = prep.data && companyName ? findDocsForApplication(prep.data, companyName, application.stage).slice(0, 5) : [];
     // 面談メモ。まだ新形式（memos）に移っていない候補者は、カードと同じく旧形式の面談メモ・
     // 面談要約を使う（これが無いと、旧形式のメモしか無い候補者で空のメモを渡してしまっていた）。
-    const memoText = useMemo(() => {
+    const allMemos = useMemo(() => {
         const memos: MemoEntry[] = candidate.memos && candidate.memos.length > 0 ? candidate.memos : [
             ...(candidate.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: candidate.interviewMemo, updatedAt: '' }] : []),
             ...(candidate.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約', content: candidate.interviewSummary, updatedAt: '' }] : []),
         ];
-        return buildInterviewMemoText(sortMemosChronologically(memos));
+        return sortMemosChronologically(memos).filter(m => m.content.trim());
     }, [candidate.memos, candidate.interviewMemo, candidate.interviewSummary]);
+
+    // ---- 生成オプション（ジェネレーターの生成画面の設定を、ここでまとめて決める。2026-10-16） ----
+    const companyId = prep.data && companyName ? resolveGeneratorCompanyId(prep.data, companyName, application.gasCompanyId) : null;
+    const position = (application.position || '').trim();
+    const [genPhase, setGenPhase] = useState(() => gasPhaseForStage(application.stage) || '一次面接');
+    // 使う面談メモ（既定は全部）。null = まだ触っていない（全部）
+    const [excludedMemoIds, setExcludedMemoIds] = useState<Set<string>>(new Set());
+    const memoText = useMemo(() => buildInterviewMemoText(allMemos.filter(m => !excludedMemoIds.has(m.id))), [allMemos, excludedMemoIds]);
+    // 求人票。企業×ポジションで保存済みのものを初期値にし、担当者が書き換えたらそれを使う
+    const savedJd = prep.data && companyName ? getSavedJd(prep.data, companyName, position, application.gasCompanyId) : null;
+    const [jdText, setJdText] = useState<string | null>(null);   // null = 保存済みのまま
+    const jdValue = jdText ?? (savedJd?.content || '');
+    const [saveJd, setSaveJd] = useState(true);
+    const jdChanged = jdText !== null && jdText.trim() !== (savedJd?.content || '').trim();
+    useEffect(() => { setJdText(null); }, [companyName, position]);
+    // レジュメ：KPIの登録情報（プロフィール）＋添付ファイルから書き起こした本文
+    const [useProfile, setUseProfile] = useState(true);
+    const [resumeExtra, setResumeExtra] = useState('');
+    const [extracting, setExtracting] = useState<'' | 'jd' | 'resume'>('');
+    const [optionMessage, setOptionMessage] = useState('');
+    // 仕上げの調整：汎用ナレッジ（null = ジェネレーターの既定＝コンサル用以外すべて）、追加要望、敬称
+    const generals = prep.data?.generals || [];
+    const [generalKeys, setGeneralKeys] = useState<string[] | null>(null);
+    const checkedGeneralKeys = generalKeys ?? generals.filter(g => g.category !== 'consul').map(g => g.key);
+    const [customInstruction, setCustomInstruction] = useState('');
+    const [honorific, setHonorific] = useState('様');
+
+    const extractFiles = async (files: FileList | null, kind: 'jd' | 'resume') => {
+        if (!files || files.length === 0) return;
+        setExtracting(kind);
+        setOptionMessage('');
+        try {
+            const texts: string[] = [];
+            for (const file of Array.from(files)) {
+                const { mimeType, error } = resolveResumeFile(file);
+                if (error) { setOptionMessage(error); continue; }
+                texts.push(await extractDocumentText({ mimeType, base64: await fileToBase64(file), name: file.name }, kind));
+            }
+            const joined = texts.filter(Boolean).join('\n\n');
+            if (!joined) return;
+            if (kind === 'jd') setJdText(prev => [((prev ?? savedJd?.content) || '').trim(), joined].filter(Boolean).join('\n\n'));
+            else setResumeExtra(prev => [prev.trim(), joined].filter(Boolean).join('\n\n'));
+            setOptionMessage(`${files.length}件のファイルを読み取りました。内容を確認してください。`);
+        } catch (err) {
+            console.error('ファイルの読み取りに失敗しました', err);
+            setOptionMessage('ファイルの読み取りに失敗しました。本文を貼り付けてください。');
+        } finally {
+            setExtracting('');
+        }
+    };
     // この選考について取り込んだ面接振り返りアンケート（sourceFileId = form:<タイムスタンプ>_<応募ID>）。
     const surveyMemos = useMemo(
         () => sortMemosChronologically((candidate.memos || []).filter(m => m.sourceFileId?.startsWith('form:') && m.sourceFileId.endsWith(`_${application.id}`))),
@@ -8340,11 +8480,18 @@ const InterviewPrepSection: React.FC<{
         const createdBy = getCurrentSession()?.identity.email || '';
         try {
             const token = newHandoffToken();
+            // 求人票を「ジェネレーターに保存」する指定なら、受け渡しの前に保存しておく（生成画面でも読み込まれる）
+            if (saveJd && jdChanged && companyId) {
+                try { await saveJdToGenerator(companyId, position, jdValue); invalidateInterviewPrepData(); }
+                catch (err) { console.warn('求人票の保存に失敗しました（生成には使います）', err); }
+            }
             await createHandoff({
                 token, createdBy, candidateId: candidate.id, candidateName: candidate.name,
-                applicationId: application.id, gasCompanyId: application.gasCompanyId,
-                companyName: application.companyName, phase: gasPhaseForStage(application.stage) || '', memoText,
-                resumeText: buildCandidateProfileText(candidate),
+                applicationId: application.id, gasCompanyId: companyId || application.gasCompanyId,
+                companyName: application.companyName, phase: genPhase, memoText,
+                resumeText: [useProfile ? buildCandidateProfileText(candidate) : '', resumeExtra.trim()].filter(Boolean).join('\n\n'),
+                position, jdContent: jdChanged ? jdValue : '',
+                generalKeys: generalKeys, customInstruction, honorific,
             });
             handoff = token;
         } catch (err) {
@@ -8383,6 +8530,115 @@ const InterviewPrepSection: React.FC<{
                         <a href={prepDocDownloadUrl(urlDocId)} className="prep-secondary-button">Word<PrepIcon name="download" size={14} /></a>
                     )}
                 </div>
+                <details className="prep-details prep-options">
+                    <summary>
+                        生成オプション
+                        <span className="prep-count">
+                            {[genPhase, position || 'ポジション指定なし', jdValue.trim() ? '求人票あり' : '求人票なし', customInstruction.trim() ? '追加要望あり' : ''].filter(Boolean).join('・')}
+                        </span>
+                    </summary>
+                    <div className="prep-options-body">
+                        <div className="prep-options-group">対象</div>
+                        <div className="app-grid-2">
+                            <div className="prep-field">
+                                <span className="prep-field-label">フェーズ</span>
+                                <select value={genPhase} onChange={e => setGenPhase(e.target.value)}>
+                                    {GENERATOR_GEN_PHASES.map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                            </div>
+                            <div className="prep-field">
+                                <span className="prep-field-label">ポジション</span>
+                                <div className="prep-readonly">{position || '指定なし（企業共通）'}</div>
+                                <p className="prep-note">上の「ポジション」欄で変更できます</p>
+                            </div>
+                        </div>
+
+                        <div className="prep-options-group">求人票（JD）</div>
+                        <label className="prep-drop">
+                            <input type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple
+                                onChange={e => { extractFiles(e.target.files, 'jd'); e.target.value = ''; }} disabled={!!extracting} />
+                            <PrepIcon name="note" />
+                            {extracting === 'jd' ? '求人票を読み取っています…' : '求人票ファイル（PDF / Word）を選ぶ・ドロップ'}
+                        </label>
+                        <textarea rows={6} value={jdValue} onChange={e => setJdText(e.target.value)}
+                            placeholder="募集要項・職務内容・必須スキルなどを貼り付け（空欄でも生成できます）" />
+                        <p className="prep-note">
+                            {savedJd ? `ジェネレーターに保存済みの求人票（${companyName}${position ? `・${position}` : '・企業共通'}）を読み込んでいます。` : 'この企業・ポジションの求人票はまだ保存されていません。'}
+                        </p>
+                        {jdChanged && (
+                            <label className="prep-check">
+                                <input type="checkbox" checked={saveJd && !!companyId} disabled={!companyId} onChange={e => setSaveJd(e.target.checked)} />
+                                この求人票をジェネレーターに保存する（{position || '企業共通'}）{!companyId && '（企業がジェネレーターの企業一覧に無いため保存できません）'}
+                            </label>
+                        )}
+
+                        <div className="prep-options-group">候補者の材料</div>
+                        <span className="prep-field-label">使う面談メモ</span>
+                        {allMemos.length > 0 ? (
+                            <div className="prep-check-list">
+                                {allMemos.map(m => (
+                                    <label key={m.id} className="prep-check">
+                                        <input type="checkbox" checked={!excludedMemoIds.has(m.id)}
+                                            onChange={() => setExcludedMemoIds(prev => { const n = new Set(prev); if (n.has(m.id)) n.delete(m.id); else n.add(m.id); return n; })} />
+                                        {m.title || 'メモ'}{(m.logDate || m.updatedAt) ? `（${(m.logDate || m.updatedAt).slice(0, 10)}）` : ''}
+                                    </label>
+                                ))}
+                            </div>
+                        ) : <p className="prep-note">面談メモがありません。</p>}
+                        <span className="prep-field-label">レジュメ</span>
+                        <label className="prep-check">
+                            <input type="checkbox" checked={useProfile} onChange={e => setUseProfile(e.target.checked)} />
+                            KPI管理くんの登録情報（現職・経歴概要など）を使う
+                        </label>
+                        <label className="prep-drop">
+                            <input type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple
+                                onChange={e => { extractFiles(e.target.files, 'resume'); e.target.value = ''; }} disabled={!!extracting} />
+                            <PrepIcon name="note" />
+                            {extracting === 'resume' ? 'レジュメを読み取っています…' : 'レジュメファイル（PDF / Word）を追加する'}
+                        </label>
+                        {resumeExtra && (
+                            <textarea rows={4} value={resumeExtra} onChange={e => setResumeExtra(e.target.value)} />
+                        )}
+                        <p className="prep-note">氏名・連絡先は送る前に伏せ、ジェネレーター側でも自動でマスクされます。</p>
+
+                        <div className="prep-options-group">仕上げの調整</div>
+                        {generals.length > 0 && (
+                            <>
+                                <span className="prep-field-label">汎用ナレッジを含める</span>
+                                {(['general', 'consul'] as const).map(cat => {
+                                    const items = generals.filter(g => (cat === 'consul') === (g.category === 'consul'));
+                                    if (items.length === 0) return null;
+                                    return (
+                                        <div key={cat} className="prep-pill-group">
+                                            <span className="prep-pill-group-label">{cat === 'consul' ? 'コンサル用' : '汎用'}</span>
+                                            {items.map(g => {
+                                                const on = checkedGeneralKeys.includes(g.key);
+                                                return (
+                                                    <button type="button" key={g.key} className={`prep-pill${on ? ' is-on' : ''}`}
+                                                        onClick={() => setGeneralKeys(on ? checkedGeneralKeys.filter(k => k !== g.key) : [...checkedGeneralKeys, g.key])}>
+                                                        {g.key}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })}
+                            </>
+                        )}
+                        <div className="prep-field">
+                            <span className="prep-field-label">追加要望（任意）</span>
+                            <textarea rows={3} value={customInstruction} onChange={e => setCustomInstruction(e.target.value)}
+                                placeholder="例: シニア層なので語り口を落ち着かせたい / モデリングテストへの言及も入れたい" />
+                        </div>
+                        <div className="prep-field prep-field--inline">
+                            <span className="prep-field-label">資料内の敬称</span>
+                            <select value={honorific} onChange={e => setHonorific(e.target.value)}>
+                                {['様', 'さん', '氏'].map(h => <option key={h} value={h}>{h}</option>)}
+                            </select>
+                        </div>
+                        {optionMessage && <p className="prep-status is-active">{optionMessage}</p>}
+                    </div>
+                </details>
                 <p className={`prep-status${copyMessage ? ' is-active' : ''}`}>
                     {copyMessage || (!companyName
                         ? '先に企業名を入力してください。'
@@ -8559,7 +8815,7 @@ const KnowledgeSubmitForm: React.FC<{
     const [open, setOpen] = useState(false);
     const [phase, setPhase] = useState(gasPhaseForStage(application.stage) || '一次面接');
     const [memoId, setMemoId] = useState(memos[0]?.id || '');
-    const [position, setPosition] = useState('');
+    const [position, setPosition] = useState(application.position || '');
     const [content, setContent] = useState('');
     const [interviewer, setInterviewer] = useState('');
     const [candidateAttr, setCandidateAttr] = useState('');

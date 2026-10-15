@@ -158,6 +158,9 @@ export const HANDOFF_COLUMNS = [
   // 候補者の登録情報（現職・職種・学歴・年齢・現年収・経歴概要）をレジュメ代わりのテキストにしたもの。
   // kpi-mgrにはレジュメのファイル本体が無いため。氏名・連絡先は含めない。読んだら消す。
   'resume_text',
+  // KPI管理くんの「生成オプション」（2026-10-16）。求人票の本文・汎用ナレッジ（JSON配列。空なら
+  // ジェネレーターの既定のまま）・追加要望・敬称。求人票と追加要望もジェネレーターが読んだら消す。
+  'jd_content', 'general_keys', 'custom_instruction', 'honorific',
 ] as const;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -185,6 +188,11 @@ export const createHandoff = async (h: {
   phase: string;
   memoText: string;
   resumeText?: string;
+  position?: string;
+  jdContent?: string;
+  generalKeys?: string[] | null;
+  customInstruction?: string;
+  honorific?: string;
 }): Promise<void> => {
   await ensureSheet(HANDOFFS_SHEET, HANDOFF_COLUMNS);
   const now = Date.now();
@@ -192,12 +200,16 @@ export const createHandoff = async (h: {
     token: h.token, status: 'pending', created_at: new Date(now).toISOString(),
     expires_at: new Date(now + HANDOFF_TTL_MS).toISOString(), created_by: h.createdBy,
     kpi_candidate_id: h.candidateId, kpi_application_id: h.applicationId,
-    company_id: h.gasCompanyId || '', company_name: h.companyName.trim(), phase: h.phase, position: '',
+    company_id: h.gasCompanyId || '', company_name: h.companyName.trim(), phase: h.phase, position: (h.position || '').trim(),
     // 面談メモは氏名・メール・電話番号を伏せてから置く（ジェネレーター側の自動マスクも通る）。
     interview_memo: fitSheetCell(maskPersonalInfo(h.memoText, h.candidateName)),
     used_at: '',
     candidate_name: h.candidateName.trim(),
     resume_text: fitSheetCell(maskPersonalInfo(h.resumeText || '', h.candidateName)),
+    jd_content: fitSheetCell((h.jdContent || '').trim()),
+    general_keys: h.generalKeys ? JSON.stringify(h.generalKeys) : '',
+    custom_instruction: fitSheetCell((h.customInstruction || '').trim()),
+    honorific: h.honorific || '',
   };
   await appendRowByHeader(HANDOFFS_SHEET, row);
 };
@@ -376,4 +388,54 @@ export const buildCandidateProfileText = (c: {
     ...lines,
     ...(summary ? ['', '【経歴概要】', summary] : []),
   ].join('\n');
+};
+
+// --- 求人票（jds）の保存・ファイルからの読み取り（「生成オプション」用、2026-10-16） ---
+
+const JDS_SHEET = 'jds';
+
+/**
+ * 企業×ポジションの求人票をジェネレーターの jds シートに保存する（同じ組み合わせがあれば上書き）。
+ * ジェネレーターの「このJDを保存」と同じ扱い。ポジションの新規登録は、本文が空の求人票として作る
+ * （ジェネレーターはポジションを企業ナレッジ・求人票などに出てくる名前から一覧にしているため）。
+ */
+export const saveJdToGenerator = async (companyId: string, position: string, content: string): Promise<void> => {
+  if (!companyId) throw new Error('企業がジェネレーターの企業一覧に無いため、保存できません。');
+  const values: string[][] = (await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent(`${JDS_SHEET}!A:E`)}`)).values || [];
+  const header = values[0] || [];
+  const c = (name: string) => header.indexOf(name);
+  if (c('id') < 0 || c('company_id') < 0 || c('position') < 0 || c('content') < 0) {
+    throw new Error('ジェネレーターの求人票シートの形式が想定と違うため、保存できませんでした。');
+  }
+  const now = new Date().toISOString();
+  const pos = position.trim();
+  const rowIndex = values.findIndex((r, i) => i > 0 && (r[c('company_id')] || '') === companyId && (r[c('position')] || '').trim() === pos);
+  if (rowIndex > 0) {
+    const data = [{ range: `${JDS_SHEET}!${colLetter(c('content'))}${rowIndex + 1}`, values: [[fitSheetCell(content)]] }];
+    if (c('updated_at') >= 0) data.push({ range: `${JDS_SHEET}!${colLetter(c('updated_at'))}${rowIndex + 1}`, values: [[now]] });
+    await googleFetch(`${SHEETS_BASE}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+    return;
+  }
+  const id = `jd_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  await appendRowByHeader(JDS_SHEET, { id, company_id: companyId, position: pos, content: fitSheetCell(content), updated_at: now });
+};
+
+/**
+ * 求人票・レジュメのファイル（PDF / Word）から本文を書き起こす。要約はせず、書かれている内容を
+ * そのまま文字にする（ジェネレーターに貼り付けるのと同じ扱いにするため）。
+ */
+export const extractDocumentText = async (file: { mimeType: string; base64: string; name: string }, kind: 'jd' | 'resume'): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const what = kind === 'jd' ? '求人票（募集要項）' : '職務経歴書・履歴書';
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType: file.mimeType, data: file.base64 } },
+        { text: `添付ファイル「${file.name}」は${what}です。書かれている文章を、要約・省略・言い換えをせず、そのままテキストに書き起こしてください。見出しや箇条書きの構造は改行と「・」で残してください。前置きや説明は書かず、本文だけを出力してください。` },
+      ],
+    }],
+  });
+  return (response.text || '').trim();
 };

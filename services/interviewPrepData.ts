@@ -104,6 +104,10 @@ const toRows = (values: string[][] | undefined, columns: string[]): Row[] => {
 
 export interface PrepCase { companyId: string; phase: string; result: string; createdAt: string }
 export interface PrepKnowledge { companyId: string; phase: string; position: string; content: string; updatedAt: string }
+/** ジェネレーターに保存された求人票（jds シート。企業×ポジションで1件） */
+export interface PrepJd { id: string; companyId: string; position: string; content: string }
+/** ジェネレーターの汎用ナレッジ（general シート）。category が consul のものは既定で使わない */
+export interface PrepGeneral { key: string; category: string }
 export interface MailProposal {
   id: string;
   companyId: string;
@@ -123,6 +127,8 @@ export interface InterviewPrepData {
   cases: PrepCase[];
   knowledge: PrepKnowledge[];
   proposals: MailProposal[];
+  jds: PrepJd[];
+  generals: PrepGeneral[];
   docs: PrepDoc[];
   // KPI管理くんから企業ナレッジ・選考結果を投稿したことがある選考のID（kpi_submissions の
   // kpi_application_id。却下されたものは除く）。候補者カードの金色表示に使う。
@@ -134,10 +140,10 @@ export interface InterviewPrepData {
 
 const loadSheets = async () => {
   // 見出しを含めて列全体を取る（A:Zで足りる。読むシートだけ指定）。
-  const ranges = ['companies!A:Z', 'cases!A:Z', 'phases!A:Z', 'mail_proposals!A:Z'];
+  const ranges = ['companies!A:Z', 'cases!A:Z', 'phases!A:Z', 'mail_proposals!A:Z', 'jds!A:Z', 'general!A:Z'];
   const qs = ranges.map(r => `ranges=${encodeURIComponent(r)}`).join('&');
   const json = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${INTERVIEW_PREP_SPREADSHEET_ID}/values:batchGet?${qs}&majorDimension=ROWS`);
-  const [companiesV, casesV, phasesV, proposalsV] = (json.valueRanges || []).map((r: any) => r.values as string[][]);
+  const [companiesV, casesV, phasesV, proposalsV, jdsV, generalV] = (json.valueRanges || []).map((r: any) => r.values as string[][]);
   const companies = new Map(toRows(companiesV, ['id', 'name']).map(r => [r.id, r.name]));
   const cases = toRows(casesV, ['company_id', 'phase', 'result', 'created_at'])
     .map(r => ({ companyId: r.company_id, phase: r.phase, result: r.result, createdAt: r.created_at }));
@@ -150,7 +156,14 @@ const loadSheets = async () => {
       id: r.id, companyId: r.company_id, companyHint: r.company_hint, candidate: r.candidate, phase: r.phase,
       result: r.result, reason: r.reason, confidence: r.confidence, status: r.status, createdAt: r.created_at,
     }));
-  return { companies, cases, knowledge, proposals };
+  const jds = toRows(jdsV, ['id', 'company_id', 'position', 'content'])
+    .filter(r => r.id && r.company_id)
+    .map(r => ({ id: r.id, companyId: r.company_id, position: r.position.trim(), content: r.content }));
+  const generals = toRows(generalV, ['key', 'category'])
+    .filter(r => r.key.trim())
+    .map(r => ({ key: r.key, category: r.category || 'general' }))
+    .sort((a, b) => a.key.localeCompare(b.key, 'ja'));
+  return { companies, cases, knowledge, proposals, jds, generals };
 };
 
 // kpi_submissions は初回投稿時に作られるシートなので、他のシートとは別に読む（無くても他は読める）。
@@ -197,7 +210,7 @@ export const loadInterviewPrepData = (force = false): Promise<InterviewPrepData>
     // シートが読めなくても（権限なし等）資料の検索は自分のドライブなので独立して試す。
     const [sheets, docs, submitted] = await Promise.allSettled([loadSheets(), loadDocs(), loadSubmittedApplicationIds()]);
     if (sheets.status === 'rejected' && docs.status === 'rejected') throw sheets.reason;
-    const s = sheets.status === 'fulfilled' ? sheets.value : { companies: new Map(), cases: [], knowledge: [], proposals: [] };
+    const s = sheets.status === 'fulfilled' ? sheets.value : { companies: new Map(), cases: [], knowledge: [], proposals: [], jds: [], generals: [] };
     const sheetsError = sheets.status === 'rejected'
       ? (sheets.reason instanceof InterviewPrepAccessError ? sheets.reason.message : '面接対策ジェネレーターのデータを読み込めませんでした。')
       : undefined;
@@ -347,4 +360,36 @@ export const findResultSuggestions = (
     }
   }
   return suggestions;
+};
+
+// --- ポジション・求人票（KPI管理くんの「選考ポジション」と「生成オプション」用） ---
+
+/** その企業でジェネレーターに登録されているポジション（企業ナレッジ・求人票に出てくるもの）。 */
+export const getCompanyPositions = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): string[] => {
+  const ids = companyIdsFor(data, companyName, gasCompanyId);
+  if (ids.length === 0) return [];
+  const set = new Set<string>();
+  data.knowledge.forEach(k => { if (ids.includes(k.companyId) && k.position.trim()) set.add(k.position.trim()); });
+  data.jds.forEach(j => { if (ids.includes(j.companyId) && j.position) set.add(j.position); });
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'ja'));
+};
+
+/** 企業×ポジションで保存されている求人票（ジェネレーターと同じく完全一致。空欄ポジション＝企業共通）。 */
+export const getSavedJd = (data: InterviewPrepData, companyName: string, position: string, gasCompanyId?: string): PrepJd | null => {
+  const ids = companyIdsFor(data, companyName, gasCompanyId);
+  return data.jds.find(j => ids.includes(j.companyId) && j.position === position.trim()) || null;
+};
+
+const companyIdsFor = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): string[] => {
+  const valid = validGasCompanyId(data, companyName, gasCompanyId);
+  if (valid) return [valid];
+  const ids: string[] = [];
+  data.companies.forEach((name, id) => { if (companyNamesEqual(name, companyName)) ids.push(id); });
+  return ids;
+};
+
+/** 企業名（と選んだ企業ID）から、ジェネレーターの企業IDを1つに決める（決まらなければ null）。 */
+export const resolveGeneratorCompanyId = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): string | null => {
+  const ids = companyIdsFor(data, companyName, gasCompanyId);
+  return ids.length === 1 ? ids[0] : null;
 };
