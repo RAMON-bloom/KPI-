@@ -84,7 +84,7 @@ export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewP
   const row: Record<(typeof SUBMISSION_COLUMNS)[number], string> = {
     id, status: 'pending', kind, submitted_at: new Date().toISOString(), submitted_by: sub.submittedBy,
     company_id: companyId, company_name: sub.companyName.trim(), phase: sub.phase, position: sub.position.trim(),
-    result: sub.result, reason: sub.reason.trim(), interviewer: sub.interviewer.trim(), content: sub.content.trim(),
+    result: sub.result, reason: sub.reason.trim(), interviewer: sub.interviewer.trim(), content: fitSheetCell(sub.content.trim()),
     candidate_attr: sub.candidateAttr.trim(), kpi_application_id: sub.applicationId,
     reviewed_at: '', reviewed_by: '', review_note: '',
   };
@@ -112,6 +112,12 @@ export const HANDOFF_COLUMNS = [
 ] as const;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Googleスプレッドシートの1セルは最大50,000文字。面談ログは詳しく残す方針なので、何件分も
+// つなぐと超えることがある。超える場合は、時系列で後ろ（＝新しい面談）の方を残す。
+const SHEET_CELL_LIMIT = 49000;
+const fitSheetCell = (text: string): string =>
+  text.length <= SHEET_CELL_LIMIT ? text : `（文字数の上限のため、古い面談ログの一部を省略しています）\n\n${text.slice(text.length - SHEET_CELL_LIMIT + 60)}`;
+
 /** 推測されにくい受け渡し番号（URLに載る）。 */
 export const newHandoffToken = (): string => {
   const bytes = new Uint8Array(16);
@@ -138,7 +144,7 @@ export const createHandoff = async (h: {
     kpi_candidate_id: h.candidateId, kpi_application_id: h.applicationId,
     company_id: h.gasCompanyId || '', company_name: h.companyName.trim(), phase: h.phase, position: '',
     // 面談メモは氏名・メール・電話番号を伏せてから置く（ジェネレーター側の自動マスクも通る）。
-    interview_memo: maskPersonalInfo(h.memoText, h.candidateName),
+    interview_memo: fitSheetCell(maskPersonalInfo(h.memoText, h.candidateName)),
     used_at: '',
   };
   await googleFetch(
@@ -232,6 +238,9 @@ export const draftKnowledgeFromMemo = async (params: {
     'ルール:',
     '- 候補者個人を特定できる情報（氏名・現職の社名・年齢の具体値・連絡先）は書かない。候補者は「候補者」と呼ぶ。',
     '- ログに書かれていないことは推測で書かない。該当する情報が無い項目は空文字にする。',
+    '- 要約しすぎない。次に同じ企業を受ける候補者がそのまま準備に使えるよう、ログにある情報は省略せず具体的に書く。',
+    '- 聞かれた質問は、ログに出たものをすべて、聞かれた言い回しにできるだけ近い形で列挙する。深掘りされた点や、候補者の回答に対する面接官の反応も書く。',
+    '- 数字（所要時間・人数・選考の段階数など）や、企業側が重視していると分かる点は必ず残す。',
     '- content は次の見出しで、箇条書き中心に書く（情報が無い見出しは省く）:',
     '  ■形式・所要時間 ■面接官 ■聞かれた質問 ■評価されたポイント・懸念された点 ■逆質問とその回答 ■雰囲気・その他',
     '- interviewer は面接官の役職・人数（例:「事業部長1名、人事1名」）。個人名がわかる場合も役職だけにする。',
