@@ -9,13 +9,12 @@
 // 回答スプレッドシートを他のメンバーが読むには閲覧権限が必要（無いと取り込み一覧が出ないだけ）。
 
 import { googleFetch } from './interviewPrepData';
+import { isFeedbackStage } from './feedbackLink';
 
-export const FEEDBACK_FORM_RESPONDER_URL =
-  'https://docs.google.com/forms/d/e/1FAIpQLSdj3HPCvNbh7p9COmZfmLUmpfhTJCmB8jbZWoKEODGl_hS7BA/viewform';
+// フォームURL・事前入力・短縮リンクは feedbackLink.ts（サーバー関数 api/q.ts と共用）。
+export { FEEDBACK_INTERVIEW_STAGES, buildFeedbackFormUrl, buildShortFeedbackUrl } from './feedbackLink';
+
 export const FEEDBACK_RESPONSE_SPREADSHEET_ID = '1PVwq1Dqw1AkfWGqGcQk7VVVEZGgpkrJLBYQ48ZJ4CKM';
-const ENTRY_APPLICATION_ID = '1841117153';
-const ENTRY_COMPANY = '1783941001';
-const ENTRY_PHASE = '1671602610';
 
 // フォームの質問タイトル（回答スプレッドシートの見出しになる）。フォーム側で文言を変えたらここも直す。
 const COL = {
@@ -35,11 +34,8 @@ const OPTIONAL_COLUMNS = [
   '他社の選考状況（内定・最終面接の予定など）', '担当者に伝えたいこと・不安な点',
 ];
 
-// アンケートの対象にできる（＝候補者が実際に受ける）面接の段階。フォームの「選考フェーズ」欄には
-// これ以外（お見送り・選考辞退・内定など、kpi-mgr内部の選考ステータス）を絶対に入れない —
-// 候補者に見えてしまうため。
-export const FEEDBACK_INTERVIEW_STAGES = ['カジュアル面談', '1次面接', '2次面接', '最終面接', 'オファー面談'] as const;
-const isFeedbackStage = (s: string | undefined): s is string => !!s && (FEEDBACK_INTERVIEW_STAGES as readonly string[]).includes(s);
+// フォームの「選考フェーズ」欄には面接の段階（FEEDBACK_INTERVIEW_STAGES）以外——お見送り・
+// 選考辞退・内定など、kpi-mgr内部の選考ステータス——を絶対に入れない。候補者に見えてしまうため。
 
 /** 選考が今どういう状態か（案内文の書き分け用）。 */
 export type FeedbackOutcome = 'in_progress' | 'rejected' | 'withdrawn';
@@ -60,14 +56,6 @@ export const defaultFeedbackStage = (app: {
   if (isFeedbackStage(app.stage)) return app.stage;
   const past = [...(app.stageHistory || [])].reverse().find(h => isFeedbackStage(h.stage));
   return past ? past.stage : null;
-};
-
-export const buildFeedbackFormUrl = (app: { id: string; companyName: string }, interviewStage: string): string => {
-  const params = new URLSearchParams({ usp: 'pp_url' });
-  params.set(`entry.${ENTRY_APPLICATION_ID}`, app.id);
-  params.set(`entry.${ENTRY_COMPANY}`, app.companyName.trim());
-  params.set(`entry.${ENTRY_PHASE}`, isFeedbackStage(interviewStage) ? interviewStage : '');
-  return `${FEEDBACK_FORM_RESPONDER_URL}?${params.toString()}`;
 };
 
 /**

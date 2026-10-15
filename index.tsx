@@ -33,7 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
-import { buildFeedbackFormUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
+import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
   getWeekOfMonth, getWeekCountOfMonth, getWeekRangeLabel, formatMonthLabel, formatTimingLabel,
@@ -4406,6 +4406,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '面接振り返りアンケートの案内に入るURLを短くした（約250文字 → 70〜90文字程度の https://kpi-mgr-five.vercel.app/q/… 形式）。開くと、これまでと同じく受付番号・企業名・面接の段階が入った状態でアンケートが開きます（外部の短縮サービスは使っていません）',
       '面接振り返りアンケートの案内で、「お見送り」「選考辞退」などの選考ステータスが候補者に見えないようにした。アンケートには候補者が受けた面接（例：2次面接）だけが入り、対象の面接はプルダウンで選べます（初期値は、お見送り・辞退の選考なら終わった段階、それ以外は直近に受けた面接）。お見送りの選考では結果に配慮した文面、辞退の選考では参加へのお礼の文面で案内文を作ります。面接をまだ受けていない選考では、対象の面接を選ぶまでコピーできません',
       '取り込んだ面接振り返りアンケートの回答を、その選考の選考情報（「面接対策資料」欄）でも表示するようにした（これまでは候補者カードの面談ログにだけ表示されていました）。あわせて、同じ選考に複数回の回答があった場合に2件目以降が取り込めないことがある不具合を修正',
       '候補者向けの「面接振り返りアンケート」（Googleフォーム）を追加した。選考情報の「面接対策資料」欄の「メール用の文面をコピー」「LINE用の文面をコピー」で、その選考の受付番号・企業名・フェーズが入ったアンケートの案内をコピーできます。候補者が回答すると、候補者パイプラインの上部に「面接振り返りアンケートの新しい回答」として出るので、「面談ログに取り込む」で面談ログに追加できます（取り込んだ回答は企業ナレッジ投稿の「AIで下書き」にも使えます。手応え・志望度・他社状況などの任意回答も入ります）',
@@ -7993,7 +7994,7 @@ const InterviewPrepSection: React.FC<{
         if (!feedbackStage) return;
         const text = buildFeedbackInviteText(channel, {
             candidateName: candidate.name, companyName, interviewStage: feedbackStage,
-            outcome: feedbackOutcomeOf(application.stage), url: buildFeedbackFormUrl(application, feedbackStage),
+            outcome: feedbackOutcomeOf(application.stage), url: buildShortFeedbackUrl(window.location.origin, application, feedbackStage),
         });
         try {
             await navigator.clipboard.writeText(text);
