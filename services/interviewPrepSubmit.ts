@@ -93,6 +93,46 @@ export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewP
   return id;
 };
 
+// --- 企業の新規登録 ---
+
+/** 新規登録する企業名の表記をそろえる（全角英数→半角、空白の連続を1つに）。 */
+export const cleanCompanyName = (name: string): string =>
+  name.normalize('NFKC').replace(/\s+/g, ' ').trim();
+
+/**
+ * 面接対策ジェネレーターの企業マスタ（companies シート）に企業を1件追加し、その企業IDを返す。
+ * ジェネレーター自身も、求人票の貼り付け時に未登録企業を承認なしで自動登録しているので、
+ * それと同じ形式（id = c_<ミリ秒>_<数字>、created_at / updated_at = ISO）で1行追記する。
+ * 列は見出し行の名前に合わせて並べる（列の並び替え・追加に耐える）。既存の行は変更しない。
+ * 追記の直前にマスタを読み直し、同じ企業（表記ゆれ込み）が既にあればそのIDを返す。
+ */
+export const registerCompany = async (rawName: string): Promise<{ id: string; name: string; created: boolean }> => {
+  const name = cleanCompanyName(rawName);
+  if (!name) throw new Error('企業名が空です。');
+  const fullHeader: string[] = ((await googleFetch(`${SHEETS_BASE}/values/${encodeURIComponent('companies!1:1')}`)).values || [[]])[0];
+  const idCol = fullHeader.indexOf('id');
+  const nameCol = fullHeader.indexOf('name');
+  if (idCol < 0 || nameCol < 0) throw new Error('ジェネレーターの企業マスタの形式が想定と違うため、登録できませんでした。');
+  // id列とname列だけを読み直す（memo列などの長い本文は読まない）。
+  const colLetter = (i: number): string => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + (i % 26));
+  const ranges = [idCol, nameCol].map(i => `ranges=${encodeURIComponent(`companies!${colLetter(i)}:${colLetter(i)}`)}`).join('&');
+  const cols = (await googleFetch(`${SHEETS_BASE}/values:batchGet?${ranges}&majorDimension=COLUMNS`)).valueRanges || [];
+  const ids: string[] = (cols[0]?.values?.[0] || []).slice(1);
+  const names: string[] = (cols[1]?.values?.[0] || []).slice(1);
+  const dupIndex = names.findIndex(n => n && companyNamesEqual(n, name));
+  if (dupIndex >= 0) return { id: ids[dupIndex], name: names[dupIndex], created: false };
+
+  const now = new Date().toISOString();
+  const id = `c_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  const fields: Record<string, string> = { id, name, created_at: now, updated_at: now };
+  const row = fullHeader.map(h => fields[h] ?? '');
+  await googleFetch(
+    `${SHEETS_BASE}/values/${encodeURIComponent('companies!A1')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    { method: 'POST', body: JSON.stringify({ values: [row] }) },
+  );
+  return { id, name, created: true };
+};
+
 // --- AI下書き ---
 
 const MODEL = 'gemini-2.5-flash';

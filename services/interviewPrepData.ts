@@ -174,6 +174,9 @@ const loadDocs = async (): Promise<PrepDoc[]> => {
 };
 
 let cache: { promise: Promise<InterviewPrepData>; at: number } | null = null;
+
+/** 企業の新規登録などでジェネレーター側のデータを変えた後、次の読み込みで取り直させる。 */
+export const invalidateInterviewPrepData = () => { cache = null; };
 const CACHE_MS = 10 * 60 * 1000;
 
 /** 10分キャッシュ付きで読み込む。force=trueで再読込。 */

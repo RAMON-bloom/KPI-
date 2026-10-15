@@ -31,8 +31,8 @@ import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPl
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
-import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
-import { submitKnowledge, draftKnowledgeFromMemo, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
+import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -4410,7 +4410,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
-      '選考情報・候補者情報の「企業名」欄で、入力を始めると企業名の候補が出るようにした。候補は面接対策ジェネレーターに登録済みの企業（473社）と、これまでにkpi-mgrで入力された企業名です。候補から選ぶと表記がそろい、ジェネレーターの通過実績・企業ナレッジ・メールの選考結果とも確実に紐づきます（↑↓キーで選んでEnterでも確定できます）。候補にない企業はこれまで通り自由に入力でき、似た企業名がある場合は注意を表示します',
+      '選考情報・候補者情報の「企業名」欄で、入力を始めると面接対策ジェネレーターに登録済みの企業だけが候補に出るようにした。候補から選ぶと表記がそろい、ジェネレーターの通過実績・企業ナレッジ・メールの選考結果とも確実に紐づきます（↑↓キーで選んでEnterでも確定できます）。登録されていない企業は、候補の一番下の「新規登録」を押すと、面接対策ジェネレーターの企業一覧にも追加されて使えるようになります（似た企業がすでに登録されている場合は、登録前に確認が出ます）',
       '【不具合修正】候補者カードの見出し行で、ボタンやバッジが1行に収まらない時に、候補者名が途中で改行されたり、操作ボタンが2段に積み重なったりしていた表示崩れを修正。候補者名は改行せず、収まらない場合は操作ボタンのまとまりごと次の行（右寄せ）に表示します',
       '面接振り返りアンケートの案内に入るURLを短くした（約250文字 → 70〜90文字程度の https://kpi-mgr-five.vercel.app/q/… 形式）。開くと、これまでと同じく受付番号・企業名・面接の段階が入った状態でアンケートが開きます（外部の短縮サービスは使っていません）',
       '面接振り返りアンケートの案内で、「お見送り」「選考辞退」などの選考ステータスが候補者に見えないようにした。アンケートには候補者が受けた面接（例：2次面接）だけが入り、対象の面接はプルダウンで選べます（初期値は、お見送り・辞退の選考なら終わった段階、それ以外は直近に受けた面接）。お見送りの選考では結果に配慮した文面、辞退の選考では参加へのお礼の文面で案内文を作ります。面接をまだ受けていない選考では、対象の面接を選ぶまでコピーできません',
@@ -6577,9 +6577,7 @@ const CandidateModal: React.FC<{
     // 突き合わせるが、直前の登録がまだDriveへ保存されていない場合もここで拾えるように）。
     ownerEmail?: string;
     ownerCandidates?: Candidate[];
-    // 企業名の入力候補（kpi-mgrでこれまでに入力された企業名）。
-    knownCompanyNames?: string[];
-}> = ({ onSave, onClose, initialData, allMedia, currentUserEmail, ownerEmail, ownerCandidates = [], knownCompanyNames = [] }) => {
+}> = ({ onSave, onClose, initialData, allMedia, currentUserEmail, ownerEmail, ownerCandidates = [] }) => {
     const activeMedia = allMedia.filter(m => !m.isArchived);
     const defaultCandidate: Candidate = {
         id: initialData?.id || generateCandidateId(),
@@ -7528,7 +7526,6 @@ const CandidateModal: React.FC<{
                             placeholder="企業名"
                             value={app.companyName}
                             onChange={(companyName, gasCompanyId) => handleApplicationSchedulingPatch(index, { companyName, gasCompanyId })}
-                            knownNames={knownCompanyNames}
                             ariaLabel={`企業名 ${index + 1}`}
                           />
                        </div>
@@ -7698,10 +7695,8 @@ const ApplicationModal: React.FC<{
   candidateName: string;
   // 面接対策ジェネレーターに渡す候補者IDと面談メモ用（未指定ならその欄を出さない）。
   candidate?: Candidate;
-  // 企業名の入力候補（kpi-mgrでこれまでに入力された企業名）。
-  knownCompanyNames?: string[];
   initialData: CompanyApplication | null; // null for new, object for edit
-}> = ({ isOpen, onClose, onSave, candidateName, candidate, knownCompanyNames = [], initialData }) => {
+}> = ({ isOpen, onClose, onSave, candidateName, candidate, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
@@ -7802,7 +7797,6 @@ const ApplicationModal: React.FC<{
                             id="companyName"
                             value={application.companyName}
                             onChange={(companyName, gasCompanyId) => setApplication(prev => ({ ...prev, companyName, gasCompanyId }))}
-                            knownNames={knownCompanyNames}
                             required
                             autoFocus
                         />
@@ -7978,24 +7972,28 @@ const useInterviewPrepData = () => {
 };
 
 /**
- * 企業名の入力欄（候補付き）。打ち始めると、面接対策ジェネレーターの企業マスタと、これまでに
- * kpi-mgrで入力された企業名から候補を出す。マスタの企業を選ぶとジェネレーターの企業IDも
- * 一緒に返す（以後は名前ではなくIDで突き合わせられる）。マスタに無い企業は自由入力のまま使える。
+ * 企業名の入力欄（候補付き）。打ち始めると、面接対策ジェネレーターの企業マスタ（companies シート）
+ * に登録済みの企業だけを候補に出す。選ぶとジェネレーターの企業IDも一緒に返す（以後は名前ではなく
+ * IDで突き合わせられる）。マスタに無い企業は、候補の最後の「新規登録」でジェネレーターの企業マスタに
+ * 追加してから使う（services/interviewPrepSubmit.ts の registerCompany）。マスタが読めない時だけは
+ * 自由入力にフォールバックする。
  */
-type CompanyOption = { name: string; gasCompanyId?: string; norm: string };
+type CompanyOption = { name: string; gasCompanyId: string; norm: string };
 const CompanyNameInput: React.FC<{
     id: string;
     value: string;
     onChange: (name: string, gasCompanyId: string | undefined) => void;
-    knownNames: string[];
     autoFocus?: boolean;
     required?: boolean;
     ariaLabel?: string;
     placeholder?: string;
-}> = ({ id, value, onChange, knownNames, autoFocus, required, ariaLabel, placeholder }) => {
+}> = ({ id, value, onChange, autoFocus, required, ariaLabel, placeholder }) => {
     const prep = useInterviewPrepData();
     const [open, setOpen] = useState(false);
     const [highlight, setHighlight] = useState(0);
+    const [registering, setRegistering] = useState(false);
+    const [message, setMessage] = useState('');
+    const masterAvailable = !!prep.data && !prep.data.sheetsError && prep.data.companies.size > 0;
 
     const options = useMemo(() => {
         const list: CompanyOption[] = [];
@@ -8009,14 +8007,8 @@ const CompanyNameInput: React.FC<{
                 list.push({ name: variant, gasCompanyId: companyId, norm });
             }
         });
-        for (const name of knownNames) {
-            const norm = normalizeCompanyName(name);
-            if (!norm || seen.has(norm)) continue;
-            seen.add(norm);
-            list.push({ name: name.trim(), norm });
-        }
         return list;
-    }, [prep.data, knownNames]);
+    }, [prep.data]);
 
     const query = normalizeCompanyName(value);
     const suggestions = useMemo(() => {
@@ -8026,32 +8018,69 @@ const CompanyNameInput: React.FC<{
             .sort((a, b) =>
                 Number(b.norm === query) - Number(a.norm === query)
                 || Number(b.norm.startsWith(query)) - Number(a.norm.startsWith(query))
-                || Number(!!b.gasCompanyId) - Number(!!a.gasCompanyId)
                 || a.name.length - b.name.length)
             .slice(0, 8);
     }, [options, query]);
     const exact = options.find(o => o.norm === query);
-    // 入力が既存の表記と（正規化して）一致しないが、似た企業がある場合だけ注意を出す。
-    const similar = !exact && query.length >= 2 ? suggestions.slice(0, 3) : [];
+    // 候補の最後に出す「新規登録」（マスタに完全一致が無い時だけ）。
+    const canRegister = masterAvailable && !!value.trim() && !exact;
+    const itemCount = suggestions.length + (canRegister ? 1 : 0);
 
     const choose = (o: CompanyOption) => {
         onChange(o.name, o.gasCompanyId);
         setOpen(false);
+        setMessage('');
+    };
+    const register = async () => {
+        const name = cleanCompanyName(value);
+        if (!name) return;
+        setOpen(false);
+        const similarNames = suggestions.slice(0, 5).map(o => o.name);
+        const ok = window.confirm(
+            `「${name}」を面接対策ジェネレーターの企業一覧に新規登録します。` +
+            (similarNames.length > 0
+                ? `\n\n似た企業がすでに登録されています：\n・${similarNames.join('\n・')}\n\n同じ会社なら「キャンセル」して候補から選んでください。`
+                : '') +
+            '\n\n新規登録してよろしいですか？',
+        );
+        if (!ok) return;
+        setRegistering(true);
+        setMessage('');
+        try {
+            const result = await registerCompany(name);
+            onChange(result.name, result.id);
+            invalidateInterviewPrepData();
+            prep.reload();
+            setMessage(result.created
+                ? `「${result.name}」を面接対策ジェネレーターに新規登録しました。`
+                : `「${result.name}」は登録済みだったため、その企業を選択しました。`);
+        } catch (err) {
+            console.error('企業の新規登録に失敗しました', err);
+            setMessage(err instanceof InterviewPrepAccessError ? err.message : '企業の新規登録に失敗しました。時間をおいて再度お試しください。');
+        } finally {
+            setRegistering(false);
+        }
+    };
+    const activate = (index: number) => {
+        if (index < suggestions.length) choose(suggestions[index]);
+        else if (canRegister) void register();
     };
     const handleTyping = (text: string) => {
         // 手入力でもマスタの表記と一致したら企業IDを付ける。一致しなければIDは外す。
-        const match = options.find(o => o.norm === normalizeCompanyName(text) && o.gasCompanyId);
+        const match = options.find(o => o.norm === normalizeCompanyName(text));
         onChange(text, match?.gasCompanyId);
         setOpen(true);
         setHighlight(0);
+        setMessage('');
     };
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (!open || suggestions.length === 0) return;
-        if (e.key === 'ArrowDown') { e.preventDefault(); setHighlight(h => Math.min(h + 1, suggestions.length - 1)); }
+        if (!open || itemCount === 0) return;
+        if (e.key === 'ArrowDown') { e.preventDefault(); setHighlight(h => Math.min(h + 1, itemCount - 1)); }
         else if (e.key === 'ArrowUp') { e.preventDefault(); setHighlight(h => Math.max(h - 1, 0)); }
-        else if (e.key === 'Enter') { e.preventDefault(); choose(suggestions[highlight]); }
+        else if (e.key === 'Enter') { e.preventDefault(); activate(highlight); }
         else if (e.key === 'Escape') { setOpen(false); }
     };
+    const showList = open && itemCount > 0 && !(exact && suggestions.length === 1 && suggestions[0].name === value);
 
     return (
         <div className="company-name-input">
@@ -8065,18 +8094,19 @@ const CompanyNameInput: React.FC<{
                 onKeyDown={handleKeyDown}
                 autoFocus={autoFocus}
                 required={required}
+                disabled={registering}
                 aria-label={ariaLabel}
                 placeholder={placeholder}
                 autoComplete="off"
                 role="combobox"
-                aria-expanded={open && suggestions.length > 0}
+                aria-expanded={showList}
                 aria-controls={`${id}-suggestions`}
             />
-            {open && suggestions.length > 0 && !(suggestions.length === 1 && suggestions[0].name === value) && (
+            {showList && (
                 <ul className="company-name-suggestions" id={`${id}-suggestions`} role="listbox">
                     {suggestions.map((o, i) => (
                         <li
-                            key={`${o.name}-${o.gasCompanyId || ''}`}
+                            key={`${o.name}-${o.gasCompanyId}`}
                             role="option"
                             aria-selected={i === highlight}
                             className={i === highlight ? 'is-highlighted' : ''}
@@ -8085,15 +8115,32 @@ const CompanyNameInput: React.FC<{
                             onMouseEnter={() => setHighlight(i)}
                         >
                             <span>{o.name}</span>
-                            <span className="company-name-source">{o.gasCompanyId ? 'ジェネレーター登録済み' : 'kpi-mgrで入力済み'}</span>
                         </li>
                     ))}
+                    {canRegister && (
+                        <li
+                            role="option"
+                            aria-selected={highlight === suggestions.length}
+                            className={`company-name-register ${highlight === suggestions.length ? 'is-highlighted' : ''}`}
+                            onMouseDown={e => { e.preventDefault(); void register(); }}
+                            onMouseEnter={() => setHighlight(suggestions.length)}
+                        >
+                            ＋「{cleanCompanyName(value)}」を新規登録（面接対策ジェネレーターにも追加）
+                        </li>
+                    )}
                 </ul>
             )}
-            {!open && similar.length > 0 && (
-                <p className="interview-prep-hint">
-                    似た企業名があります：{similar.map(o => o.name).join('、')}。入力欄をクリックして候補から選ぶと、表記をそろえられます。
-                </p>
+            {registering && <p className="interview-prep-hint">面接対策ジェネレーターに登録しています...</p>}
+            {message && <p className="interview-prep-hint">{message}</p>}
+            {!registering && !message && !open && (
+                prep.loading && !prep.data ? null
+                : !masterAvailable ? (
+                    <p className="interview-prep-hint">面接対策ジェネレーターの企業一覧を読み込めないため、企業名は自由入力になります。</p>
+                ) : value.trim() && !exact ? (
+                    <p className="interview-prep-hint company-name-unregistered">
+                        ジェネレーターに未登録の企業名です。入力欄をクリックして候補から選ぶか、「新規登録」してください。
+                    </p>
+                ) : null
             )}
         </div>
     );
@@ -14289,11 +14336,6 @@ const CandidatePipelineView: React.FC<{
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     const ownCandidatesForSuggestions = useMemo(() => candidates.filter(isOwn), [candidates, currentUserEmail]);
-    // 企業名の入力候補：今見えている候補者（チーム表示ならメンバー分も）の選考で使われている企業名。
-    const knownCompanyNames = useMemo(
-        () => Array.from(new Set(candidates.flatMap(c => c.applications.map(a => a.companyName.trim())).filter(Boolean))),
-        [candidates],
-    );
     // ミドルが自分の所属チームのメンバー(middleManagedMemberEmails)の候補者を編集しようとしている
     // かどうか。isOwnとは独立した判定 — 両方falseなら誰も編集できない、両方trueにはならない
     // （ownerEmailが自分ならisOwnがtrueになるため）。
@@ -14912,7 +14954,6 @@ const CandidatePipelineView: React.FC<{
                   currentUserEmail={currentUserEmail}
                   ownerEmail={addTargetEmail || currentUserEmail}
                   ownerCandidates={addTargetEmail ? candidates.filter(c => c.ownerEmail === addTargetEmail) : candidates.filter(isOwn)}
-                  knownCompanyNames={knownCompanyNames}
               />
             )}
             
@@ -14923,7 +14964,6 @@ const CandidatePipelineView: React.FC<{
                     onSave={handleSaveApplication}
                     candidateName={applicationModalData.candidate.name}
                     candidate={applicationModalData.candidate}
-                    knownCompanyNames={knownCompanyNames}
                     initialData={applicationModalData.application}
                 />
             )}

@@ -4254,3 +4254,11 @@ p.memo-content-text {
   color: #6c757d;
   white-space: nowrap;
 }
+.company-name-suggestions li.company-name-register {
+  border-top: 1px solid #e9ecef;
+  color: #0b5ed7;
+  font-weight: 600;
+}
+.company-name-unregistered {
+  color: #b45309;
+}
