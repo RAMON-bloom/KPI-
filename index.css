@@ -4262,3 +4262,240 @@ p.memo-content-text {
 .company-name-unregistered {
   color: #b45309;
 }
+
+/* 選考情報モーダルの「面接対策」欄。資料作成・アンケート・実績ナレッジを色分けしたカードに分け、
+   各カードの主操作（生成ボタン・コピー）を一目で分かるようにする。 */
+.modal-content.application-modal { max-width: 580px; }
+.interview-prep-section > label { font-size: 1rem; font-weight: 700; }
+.prep-card {
+  --prep-accent: #8b1e2d;
+  --prep-tint: #fbf4f5;
+  margin-top: 0.75rem;
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid #e3e6ea;
+  border-left: 4px solid var(--prep-accent);
+  border-radius: 8px;
+  background: #fff;
+}
+.prep-card--survey { --prep-accent: #0f7b6c; --prep-tint: #eef8f6; }
+.prep-card--insights { --prep-accent: #3b5bdb; --prep-tint: #f1f4fe; }
+.prep-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+.prep-card-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--prep-tint);
+  font-size: 1rem;
+}
+.prep-card-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #212529;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.prep-card-desc {
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  color: #6c757d;
+}
+.prep-chip {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: var(--prep-tint);
+  color: var(--prep-accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.prep-chip--ok { background: #e6f4ea; color: #1e7b34; }
+.prep-primary-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.prep-primary-button {
+  flex: 1 1 auto;
+  padding: 0.65rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--prep-accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.prep-primary-button:hover:not(:disabled) { filter: brightness(1.12); }
+.prep-primary-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.prep-secondary-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.65rem 1rem;
+  border: 1px solid var(--prep-accent);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--prep-accent);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.prep-secondary-button:hover { background: var(--prep-tint); }
+.prep-status {
+  margin: 0.45rem 0 0;
+  font-size: 0.78rem;
+  color: #6c757d;
+}
+.prep-status.is-active {
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  background: #e6f4ea;
+  color: #1e5e2f;
+}
+.prep-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.76rem;
+  color: #6c757d;
+}
+.prep-field { margin-top: 0.85rem; }
+.prep-field-label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #495057;
+}
+.prep-docs {
+  margin-top: 0.85rem;
+}
+.prep-docs ul { list-style: none; margin: 0; padding: 0; }
+.prep-docs li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #edf0f2;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.prep-docs li + li { margin-top: 0.3rem; }
+.prep-docs li.is-linked { border-color: #b7dfc3; background: #f4fbf6; }
+.prep-docs li a { font-weight: 600; }
+.prep-docs-date { font-size: 0.75rem; color: #6c757d; }
+.prep-docs li .interview-prep-link-button,
+.prep-docs li .prep-chip { margin-left: auto; }
+.prep-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.prep-steps > li {
+  display: flex;
+  gap: 0.65rem;
+}
+.prep-steps > li + li { margin-top: 0.85rem; }
+.prep-steps > li.is-disabled .prep-field-label { color: #adb5bd; }
+.prep-step-num {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--prep-accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.05rem;
+}
+.prep-steps > li.is-disabled .prep-step-num { background: #ced4da; }
+.prep-step-body { flex: 1; min-width: 0; }
+.prep-copy-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+.prep-copy-buttons button {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--prep-accent);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--prep-accent);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.prep-copy-buttons button:hover:not(:disabled) { background: var(--prep-tint); }
+.prep-copy-buttons button:disabled {
+  border-color: #dee2e6;
+  color: #adb5bd;
+  cursor: not-allowed;
+}
+.prep-details {
+  margin-top: 0.85rem;
+  border: 1px solid #edf0f2;
+  border-radius: 6px;
+  background: #fcfcfd;
+}
+.prep-details > summary {
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #343a40;
+}
+.prep-details > .interview-prep-knowledge-item { padding: 0 0.7rem; }
+.prep-count {
+  margin-left: 0.25rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: var(--prep-tint);
+  color: var(--prep-accent);
+  font-size: 0.72rem;
+}
+.prep-stats {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  border-radius: 6px;
+  background: var(--prep-tint);
+  font-size: 0.82rem;
+}
+.prep-stats-label { font-weight: 700; color: #343a40; margin-right: 0.25rem; }
+.prep-stat strong { font-size: 1.05rem; margin: 0 0.1rem; }
+.prep-stat--pass strong { color: #1e7b34; }
+.prep-stat--fail strong { color: #b02a37; }
+.prep-stat--rate { margin-left: auto; }
+.prep-stat--rate strong { color: var(--prep-accent); font-size: 1.2rem; }
+.prep-card--insights .knowledge-submit { margin-top: 0.85rem; }
+.prep-card--insights .knowledge-submit > .interview-prep-link-button {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px dashed var(--prep-accent);
+  border-radius: 6px;
+  color: var(--prep-accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.prep-card--insights .knowledge-submit > .interview-prep-link-button:hover { background: var(--prep-tint); }
+@media (max-width: 480px) {
+  .prep-copy-buttons { grid-template-columns: 1fr; }
+}

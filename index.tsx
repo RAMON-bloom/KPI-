@@ -4410,6 +4410,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-15',
     items: [
+      '選考情報の編集画面の「面接対策」欄を見やすく整理した。「面接対策資料」「面接振り返りアンケート」「企業の実績・企業ナレッジ」を色分けしたカードに分け、「面接対策ジェネレーターで作る」を大きなボタンに、アンケートは「①対象の面接を選ぶ → ②メール用／LINE用をコピー」の順に並べました。ドライブの資料はどれが紐づけ済みか分かるようにし、通過実績は件数と通過率を大きく表示します',
       '選考情報の編集画面を開いている時に、画面の外側（暗くなっている背景）をクリックしても閉じないようにした。入力途中の内容がうっかり消えるのを防ぐためです。閉じる時は右上の×・キャンセル・保存を使ってください',
       '面接振り返りアンケートの案内文で、お見送りになった選考でも結果には一切触れないようにした（「残念な結果となりましたが」などの表現をやめ、選考中と同じ「お疲れさまでした」から始まる文面にしました）',
       '企業ナレッジ・選考結果の投稿フォームに「企業」欄を追加した。面接対策ジェネレーターの企業一覧から選ぶ（無ければ新規登録する）と送信できます。一覧に無い企業のままだとジェネレーターに自動で取り込まれないため、その場合は送信できないようにしました。送信した内容は10分以内に自動で取り込まれます',
@@ -8187,6 +8188,7 @@ const InterviewPrepSection: React.FC<{
     const prep = useInterviewPrepData();
     const companyName = application.companyName.trim();
     const stats = prep.data && companyName ? getPhaseStats(prep.data, companyName, application.stage, application.gasCompanyId) : null;
+    const hasStats = !!stats && (stats.passed + stats.rejected + stats.other) > 0;
     const knowledge = prep.data && companyName ? getKnowledge(prep.data, companyName, application.stage, application.gasCompanyId) : [];
     const docs = prep.data && companyName ? findDocsForApplication(prep.data, companyName, application.stage).slice(0, 5) : [];
     // 面談メモ。まだ新形式（memos）に移っていない候補者は、カードと同じく旧形式の面談メモ・
@@ -8208,6 +8210,7 @@ const InterviewPrepSection: React.FC<{
 
     // アンケートで聞く面接の段階。選考のステータス（お見送り等）ではなく、候補者が受けた面接を入れる。
     const [feedbackStage, setFeedbackStage] = useState<string>(() => defaultFeedbackStage(application) || '');
+    const [surveyMessage, setSurveyMessage] = useState('');
     const copyInvite = async (channel: 'email' | 'line') => {
         if (!feedbackStage) return;
         const text = buildFeedbackInviteText(channel, {
@@ -8216,9 +8219,9 @@ const InterviewPrepSection: React.FC<{
         });
         try {
             await navigator.clipboard.writeText(text);
-            setCopyMessage(`振り返りアンケートの案内（${channel === 'email' ? 'メール' : 'LINE'}用）をコピーしました。候補者に送ってください。回答は候補者パイプラインの上部から面談ログに取り込めます。`);
+            setSurveyMessage(`振り返りアンケートの案内（${channel === 'email' ? 'メール' : 'LINE'}用）をコピーしました。候補者に送ってください。回答は候補者パイプラインの上部から面談ログに取り込めます。`);
         } catch {
-            setCopyMessage('案内文のコピーに失敗しました。');
+            setSurveyMessage('案内文のコピーに失敗しました。');
         }
     };
 
@@ -8260,85 +8263,141 @@ const InterviewPrepSection: React.FC<{
 
     return (
         <div className="form-group interview-prep-section">
-            <label htmlFor="interviewPrepDocUrl">面接対策資料</label>
-            <div className="interview-prep-actions">
-                <button type="button" className="interview-prep-generate-button" onClick={handleOpenGenerator} disabled={!application.companyName.trim()}>
-                    面接対策ジェネレーターで作る
-                </button>
-                {isValidUrl && (
-                    <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="interview-prep-open-link">資料を開く</a>
-                )}
-            </div>
-            <input
-                type="url"
-                id="interviewPrepDocUrl"
-                value={url}
-                onChange={e => onUrlChange(e.target.value)}
-                placeholder="作成した資料のURLを貼り付け（任意）"
-            />
-            <p className="interview-prep-hint">
-                {copyMessage || (memoText
-                    ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
-                    : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
-            </p>
-            {companyName && (
-                <div className="interview-prep-actions">
-                    <span className="interview-prep-subtitle">面接振り返りアンケート（候補者向け）</span>
-                    <select value={feedbackStage} onChange={e => setFeedbackStage(e.target.value)} aria-label="アンケートで聞く面接">
-                        <option value="">対象の面接を選択</option>
-                        {FEEDBACK_INTERVIEW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('email')} disabled={!feedbackStage}>メール用の文面をコピー</button>
-                    <button type="button" className="interview-prep-link-button" onClick={() => copyInvite('line')} disabled={!feedbackStage}>LINE用の文面をコピー</button>
-                </div>
-            )}
-            {companyName && !feedbackStage && (
-                <p className="interview-prep-hint">この選考はまだ面接を受けていないため、アンケートの対象にする面接を選んでからコピーしてください。</p>
-            )}
-            {companyName && feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
-                <p className="interview-prep-hint">
-                    この選考は「{application.stage}」ですが、案内文・アンケートのどちらにも選考の結果は書かれません（アンケートには「{feedbackStage}」だけが入ります）。
-                </p>
-            )}
-            {surveyMemos.length > 0 && (
-                <details className="interview-prep-knowledge" open>
-                    <summary>この選考の面接振り返りアンケートの回答（{surveyMemos.length}件）</summary>
-                    {surveyMemos.map(m => (
-                        <div key={m.id} className="interview-prep-knowledge-item">
-                            <div className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</div>
-                            <pre>{m.content}</pre>
-                        </div>
-                    ))}
-                </details>
-            )}
-            {companyName && (
-                <div className="interview-prep-insights">
-                    {prep.loading && <p className="interview-prep-hint">面接対策ジェネレーターのデータを読み込み中...</p>}
-                    {(prep.error || prep.data?.sheetsError) && <p className="interview-prep-hint">{prep.error || prep.data?.sheetsError}</p>}
-                    {docs.length > 0 && (
-                        <div className="interview-prep-docs">
-                            <div className="interview-prep-subtitle">ドライブにある{companyName}の面接対策資料</div>
-                            <ul>
-                                {docs.map(d => (
-                                    <li key={d.id}>
-                                        <a href={d.url} target="_blank" rel="noopener noreferrer">{d.phase}{d.position ? `・${d.position}` : ''}（{d.date || d.createdTime.slice(0, 10)}作成）</a>
-                                        {url.trim() !== d.url && (
-                                            <button type="button" className="interview-prep-link-button" onClick={() => onUrlChange(d.url)}>この選考に紐づける</button>
-                                        )}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
+            <label htmlFor="interviewPrepDocUrl">面接対策</label>
+
+            {/* 1. 面接対策資料を作る・紐づける */}
+            <section className="prep-card prep-card--generate">
+                <header className="prep-card-header">
+                    <span className="prep-card-icon" aria-hidden="true">📝</span>
+                    <div>
+                        <h4 className="prep-card-title">面接対策資料</h4>
+                        <p className="prep-card-desc">面接対策ジェネレーターで資料を作り、この選考に紐づけます</p>
+                    </div>
+                </header>
+                <div className="prep-primary-row">
+                    <button type="button" className="prep-primary-button" onClick={handleOpenGenerator} disabled={!companyName}>
+                        面接対策ジェネレーターで作る
+                    </button>
+                    {isValidUrl && (
+                        <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く ↗</a>
                     )}
-                    {stats && (stats.passed + stats.rejected + stats.other) > 0 && (
-                        <p className="interview-prep-stats">
-                            ジェネレーターに記録された{companyName}の{application.stage}：通過 {stats.passed}件／不採用 {stats.rejected}件
-                            {stats.rate !== null && `（通過率 ${Math.round(stats.rate * 100)}%）`}
-                        </p>
+                </div>
+                <p className={`prep-status${copyMessage ? ' is-active' : ''}`}>
+                    {copyMessage || (!companyName
+                        ? '先に企業名を入力してください。'
+                        : memoText
+                            ? '押すと生成画面が開き、この候補者の面談メモがクリップボードにコピーされます。'
+                            : 'この候補者には面談メモがまだありません。生成画面だけ開きます。')}
+                </p>
+                <div className="prep-field">
+                    <span className="prep-field-label">作成した資料のURL（任意）</span>
+                    <input
+                        type="url"
+                        id="interviewPrepDocUrl"
+                        value={url}
+                        onChange={e => onUrlChange(e.target.value)}
+                        placeholder="https://docs.google.com/... を貼り付け"
+                    />
+                </div>
+                {docs.length > 0 && (
+                    <div className="prep-docs">
+                        <span className="prep-field-label">ドライブにある{companyName}の資料</span>
+                        <ul>
+                            {docs.map(d => {
+                                const linked = url.trim() === d.url;
+                                return (
+                                    <li key={d.id} className={linked ? 'is-linked' : ''}>
+                                        <a href={d.url} target="_blank" rel="noopener noreferrer">{d.phase}{d.position ? `・${d.position}` : ''}</a>
+                                        <span className="prep-docs-date">{d.date || d.createdTime.slice(0, 10)}作成</span>
+                                        {linked
+                                            ? <span className="prep-chip prep-chip--ok">紐づけ済み</span>
+                                            : <button type="button" className="interview-prep-link-button" onClick={() => onUrlChange(d.url)}>この選考に紐づける</button>}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    </div>
+                )}
+            </section>
+
+            {/* 2. 候補者向けの面接振り返りアンケート */}
+            {companyName && (
+                <section className="prep-card prep-card--survey">
+                    <header className="prep-card-header">
+                        <span className="prep-card-icon" aria-hidden="true">📋</span>
+                        <div>
+                            <h4 className="prep-card-title">面接振り返りアンケート <span className="prep-chip">候補者向け</span></h4>
+                            <p className="prep-card-desc">面接の感想を候補者に回答してもらい、面談ログに取り込めます</p>
+                        </div>
+                    </header>
+                    <ol className="prep-steps">
+                        <li>
+                            <span className="prep-step-num">1</span>
+                            <div className="prep-step-body">
+                                <span className="prep-field-label">対象の面接を選ぶ</span>
+                                <select value={feedbackStage} onChange={e => setFeedbackStage(e.target.value)} aria-label="アンケートで聞く面接">
+                                    <option value="">対象の面接を選択</option>
+                                    {FEEDBACK_INTERVIEW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                                {!feedbackStage && (
+                                    <p className="prep-note">この選考はまだ面接を受けていないため、対象の面接を選んでください。</p>
+                                )}
+                            </div>
+                        </li>
+                        <li className={feedbackStage ? '' : 'is-disabled'}>
+                            <span className="prep-step-num">2</span>
+                            <div className="prep-step-body">
+                                <span className="prep-field-label">案内文をコピーして候補者に送る</span>
+                                <div className="prep-copy-buttons">
+                                    <button type="button" onClick={() => copyInvite('email')} disabled={!feedbackStage}>✉️ メール用をコピー</button>
+                                    <button type="button" onClick={() => copyInvite('line')} disabled={!feedbackStage}>💬 LINE用をコピー</button>
+                                </div>
+                                {surveyMessage && <p className="prep-status is-active">{surveyMessage}</p>}
+                                {feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
+                                    <p className="prep-note">
+                                        この選考は「{application.stage}」ですが、案内文・アンケートのどちらにも選考の結果は書かれません（アンケートには「{feedbackStage}」だけが入ります）。
+                                    </p>
+                                )}
+                            </div>
+                        </li>
+                    </ol>
+                    {surveyMemos.length > 0 && (
+                        <details className="prep-details" open>
+                            <summary>この選考の回答 <span className="prep-count">{surveyMemos.length}件</span></summary>
+                            {surveyMemos.map(m => (
+                                <div key={m.id} className="interview-prep-knowledge-item">
+                                    <div className="interview-prep-subtitle">{m.title}{m.logDate ? `（${m.logDate}）` : ''}</div>
+                                    <pre>{m.content}</pre>
+                                </div>
+                            ))}
+                        </details>
+                    )}
+                </section>
+            )}
+
+            {/* 3. ジェネレーターに記録された実績・ナレッジ、投稿 */}
+            {companyName && (
+                <section className="prep-card prep-card--insights">
+                    <header className="prep-card-header">
+                        <span className="prep-card-icon" aria-hidden="true">📊</span>
+                        <div>
+                            <h4 className="prep-card-title">{companyName}の実績・企業ナレッジ</h4>
+                            <p className="prep-card-desc">面接対策ジェネレーターに記録された情報です</p>
+                        </div>
+                    </header>
+                    {prep.loading && <p className="prep-note">面接対策ジェネレーターのデータを読み込み中...</p>}
+                    {(prep.error || prep.data?.sheetsError) && <p className="prep-note">{prep.error || prep.data?.sheetsError}</p>}
+                    {hasStats && stats && (
+                        <div className="prep-stats">
+                            <span className="prep-stats-label">{application.stage}</span>
+                            <span className="prep-stat prep-stat--pass">通過 <strong>{stats.passed}</strong>件</span>
+                            <span className="prep-stat prep-stat--fail">不採用 <strong>{stats.rejected}</strong>件</span>
+                            {stats.rate !== null && <span className="prep-stat prep-stat--rate">通過率 <strong>{Math.round(stats.rate * 100)}</strong>%</span>}
+                        </div>
                     )}
                     {knowledge.length > 0 && (
-                        <details className="interview-prep-knowledge">
-                            <summary>{application.stage}で聞かれたこと・傾向（企業ナレッジ {knowledge.length}件）</summary>
+                        <details className="prep-details">
+                            <summary>{application.stage}で聞かれたこと・傾向 <span className="prep-count">{knowledge.length}件</span></summary>
                             {knowledge.map((k, i) => (
                                 <div key={i} className="interview-prep-knowledge-item">
                                     {k.position && <div className="interview-prep-subtitle">{k.position}</div>}
@@ -8347,8 +8406,11 @@ const InterviewPrepSection: React.FC<{
                             ))}
                         </details>
                     )}
+                    {prep.data && !prep.loading && !hasStats && knowledge.length === 0 && (
+                        <p className="prep-note">この企業・フェーズの実績やナレッジはまだありません。</p>
+                    )}
                     <KnowledgeSubmitForm candidate={candidate} application={application} data={prep.data} />
-                </div>
+                </section>
             )}
         </div>
     );
