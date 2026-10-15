@@ -4213,3 +4213,44 @@ p.memo-content-text {
   display: flex;
   gap: 0.5rem;
 }
+
+/* 企業名の入力候補（CompanyNameInput） */
+.company-name-input {
+  position: relative;
+}
+.company-name-input input {
+  width: 100%;
+}
+.company-name-suggestions {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin: 2px 0 0;
+  padding: 0.25rem 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.company-name-suggestions li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.company-name-suggestions li.is-highlighted {
+  background: #eef5ff;
+}
+.company-name-source {
+  font-size: 0.72rem;
+  color: #6c757d;
+  white-space: nowrap;
+}

@@ -11,7 +11,7 @@
 // 候補者の氏名・連絡先は送らない。AI下書きでも氏名を「候補者」に置き換える。
 
 import { GoogleGenAI, Type } from '@google/genai';
-import { googleFetch, INTERVIEW_PREP_SPREADSHEET_ID, companyNamesEqual, type InterviewPrepData } from './interviewPrepData';
+import { googleFetch, INTERVIEW_PREP_SPREADSHEET_ID, companyNamesEqual, companyNamesMatch, type InterviewPrepData } from './interviewPrepData';
 
 export const SUBMISSIONS_SHEET = 'kpi_submissions';
 
@@ -37,6 +37,8 @@ export interface KnowledgeSubmission {
   candidateAttr: string;
   applicationId: string;
   submittedBy: string;
+  // 選考の企業名をマスタから選んでいれば、その企業ID（名前での照合より優先）。
+  gasCompanyId?: string;
 }
 
 const SHEETS_BASE = `https://sheets.googleapis.com/v4/spreadsheets/${INTERVIEW_PREP_SPREADSHEET_ID}`;
@@ -67,7 +69,10 @@ const newSubmissionId = () => `ks_${Date.now()}_${Math.floor(Math.random() * 100
 export const submitKnowledge = async (sub: KnowledgeSubmission, data: InterviewPrepData | null): Promise<string> => {
   await ensureSubmissionsSheet();
   let companyId = '';
-  if (data) {
+  // 企業名を後から書き換えてマスタの名前と合わなくなったIDは使わない。
+  if (data && sub.gasCompanyId && companyNamesMatch(data.companies.get(sub.gasCompanyId) || '', sub.companyName)) {
+    companyId = sub.gasCompanyId;
+  } else if (data) {
     const ids: string[] = [];
     data.companies.forEach((name, id) => { if (companyNamesEqual(name, sub.companyName)) ids.push(id); });
     if (ids.length === 1) companyId = ids[0];

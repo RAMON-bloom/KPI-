@@ -196,9 +196,21 @@ export const loadInterviewPrepData = (force = false): Promise<InterviewPrepData>
 
 // --- 集計・照合 ---
 
-// 完全一致する企業があればそれだけを使い、なければゆるい一致にする（「オリックス」に
-// 「オリックス銀行」の実績が混ざらないように）。
-const companyIdsMatching = (data: InterviewPrepData, companyName: string): Set<string> => {
+/**
+ * 選考に保存された企業ID（企業名をマスタから選んだ場合）が有効ならそれを使う。企業名を後から
+ * 書き換えてマスタの名前と合わなくなっていたら、古いIDとみなして無視する。
+ */
+const validGasCompanyId = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): string | null => {
+  if (!gasCompanyId) return null;
+  const masterName = data.companies.get(gasCompanyId);
+  return masterName && companyNamesMatch(masterName, companyName) ? gasCompanyId : null;
+};
+
+// 企業IDがあればそれだけを使う。無ければ名前で探し、完全一致する企業があればそれだけ、
+// なければゆるい一致にする（「オリックス」に「オリックス銀行」の実績が混ざらないように）。
+const companyIdsMatching = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): Set<string> => {
+  const byId = validGasCompanyId(data, companyName, gasCompanyId);
+  if (byId) return new Set([byId]);
   const exact = new Set<string>();
   const loose = new Set<string>();
   data.companies.forEach((name, id) => {
@@ -211,10 +223,10 @@ const companyIdsMatching = (data: InterviewPrepData, companyName: string): Set<s
 export interface PhaseStats { passed: number; rejected: number; other: number; rate: number | null }
 
 /** 企業×フェーズの過去実績（cases）。通過率 = (通過+内定) / (通過+内定+不採用)。 */
-export const getPhaseStats = (data: InterviewPrepData, companyName: string, stage: string): PhaseStats | null => {
+export const getPhaseStats = (data: InterviewPrepData, companyName: string, stage: string, gasCompanyId?: string): PhaseStats | null => {
   const phase = gasPhaseForStage(stage);
   if (!phase) return null;
-  const ids = companyIdsMatching(data, companyName);
+  const ids = companyIdsMatching(data, companyName, gasCompanyId);
   if (ids.size === 0) return null;
   let passed = 0, rejected = 0, other = 0;
   for (const c of data.cases) {
@@ -227,10 +239,10 @@ export const getPhaseStats = (data: InterviewPrepData, companyName: string, stag
   return { passed, rejected, other, rate: decided > 0 ? passed / decided : null };
 };
 
-export const getKnowledge = (data: InterviewPrepData, companyName: string, stage: string): PrepKnowledge[] => {
+export const getKnowledge = (data: InterviewPrepData, companyName: string, stage: string, gasCompanyId?: string): PrepKnowledge[] => {
   const phase = gasPhaseForStage(stage);
   if (!phase) return [];
-  const ids = companyIdsMatching(data, companyName);
+  const ids = companyIdsMatching(data, companyName, gasCompanyId);
   return data.knowledge
     .filter(k => ids.has(k.companyId) && k.phase === phase)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -276,7 +288,7 @@ const suggestedStageFor = (currentStage: string, result: string): string | null 
  */
 export const findResultSuggestions = (
   data: InterviewPrepData,
-  candidates: { id: string; name: string; isHidden?: boolean; applications: { id: string; companyName: string; stage: string; stageHistory?: { stage: string; date?: string }[] }[] }[],
+  candidates: { id: string; name: string; isHidden?: boolean; applications: { id: string; companyName: string; stage: string; gasCompanyId?: string; stageHistory?: { stage: string; date?: string }[] }[] }[],
 ): ResultSuggestion[] => {
   const byName = new Map<string, typeof candidates>();
   for (const c of candidates) {
@@ -297,7 +309,11 @@ export const findResultSuggestions = (
     const proposalCompany = data.companies.get(p.companyId) || p.companyHint;
     for (const c of matchedCandidates) {
       for (const app of c.applications) {
-        if (app.stage !== stage || !companyNamesMatch(app.companyName, proposalCompany)) continue;
+        if (app.stage !== stage) continue;
+        const appCompanyId = validGasCompanyId(data, app.companyName, app.gasCompanyId);
+        // 企業IDが一致すれば確実に同じ会社。IDが違っても（マスタの重複登録など）名前が合えば同じとみなす。
+        const sameCompany = (!!appCompanyId && appCompanyId === p.companyId) || companyNamesMatch(app.companyName, proposalCompany);
+        if (!sameCompany) continue;
         const enteredAt = [...(app.stageHistory || [])].reverse().find(h => h.stage === stage)?.date;
         if (enteredAt && p.createdAt && p.createdAt.slice(0, 10) < enteredAt) continue;
         const suggestedStage = suggestedStageFor(app.stage, p.result);
