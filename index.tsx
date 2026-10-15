@@ -36,6 +36,7 @@ import { saveJdToGenerator, extractDocumentText } from './services/interviewPrep
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { loadPendingGeneratedDocs, saveGeneratedDocToDrive, prepDocOpenUrl, prepDocDownloadUrl, googleDocIdFromUrl, PREP_DOCS_FOLDER_NAME, type SavedPrepDoc } from './services/generatedPrepDocs';
+import { defaultFeedbackTemplate, fillFeedbackTemplate, FEEDBACK_TEMPLATE_FIELDS, type FeedbackInviteTemplates, type FeedbackChannel, type FeedbackOutcome } from './services/interviewFeedbackForm';
 import { buildShortFeedbackUrl, buildFeedbackInviteText, loadFeedbackResponses, toIsoDate, defaultFeedbackStage, feedbackOutcomeOf, FEEDBACK_INTERVIEW_STAGES, type FeedbackResponse } from './services/interviewFeedbackForm';
 import {
   MEETING_CONFIDENCE_GRADES, MEETING_MONTH_NONE, buildMeetingRowKey, buildMeetingTargetKey, resolveMeetingRates,
@@ -1189,6 +1190,9 @@ interface UserData {
   // よいため。チーム設定（TeamsConfig）は管理者しか書けないので、レポートを作る人本人の
   // UserDataに保存する（他のリーダーの見立ては共有されない）。
   meetingForecast?: MeetingForecastSettings;
+  // 面接振り返りアンケートの案内文（メール/LINE × 選考中・お見送り・辞退）を、このユーザー用に
+  // 書き換えたもの。未設定の組み合わせは既定の文面（services/interviewFeedbackForm.ts）を使う。
+  feedbackInviteTemplates?: FeedbackInviteTemplates;
   // 共有チーム設定（kpi-manager-teams.json）の控え。管理者（TEAMS_ADMIN_EMAIL）本人の
   // UserDataにだけ、正常に読み込めた／保存できたチーム設定を新しい順に最大
   // TEAMS_CONFIG_BACKUP_LIMIT件まで自動で残す。共有ファイルが不具合や誤操作で消えた・
@@ -4426,6 +4430,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '面接振り返りアンケートの案内文を、自分用に編集できるようにした。選考情報の「面接振り返りアンケート」欄の「案内文を編集（自分用）」から、メール・LINEごと、選考の状況（選考中・お見送り・辞退）ごとに文面を書き換えて保存できます。候補者名・企業名・面接・URLは {候補者名} などの差し込み項目で自動で入ります（URLは消しても最後に自動で入ります）。「既定の文面に戻す」でいつでも元に戻せます',
       '選考情報に「ポジション」欄を追加した。面接対策ジェネレーターにその企業で登録されているポジションが候補に出ます。候補に無いポジションは「新規登録」でジェネレーターにも登録できます',
       '選考情報の「面接対策資料」欄に「生成オプション」を追加し、ジェネレーターの生成画面で行っていた設定をKPI管理くんからできるようにした。フェーズ、求人票（保存済みのものを自動で読み込み・PDF/Wordファイルから読み取り・ジェネレーターへの保存）、使う面談メモの選択、レジュメファイルの追加、汎用ナレッジの選択、追加要望、資料内の敬称を指定してから「面接対策ジェネレーターで作る」を押すと、その内容で自動作成されます',
       '「面接対策ジェネレーターで作る」で開くジェネレーターの画面を、操作を間違えないよう専用の進行画面にした。開いた画面には「準備 → 資料を作成 → KPI管理くんへ送信」の進み具合だけが表示され、ほかのボタンは押せません。完了したら「このタブを閉じる」で閉じれば大丈夫です（内容を確認・編集したい場合は「内容を確認・編集する」で通常の画面に切り替えられます）',
@@ -7784,8 +7789,10 @@ const ApplicationModal: React.FC<{
   onDeleteMemo?: (memoId: string) => void;
   // この選考の企業ナレッジ・選考結果をジェネレーターに投稿した（選考に投稿日時を記録する）
   onKnowledgeSubmitted?: (applicationId: string) => void;
+  feedbackInviteTemplates?: FeedbackInviteTemplates;
+  onSaveFeedbackInviteTemplates?: (templates: FeedbackInviteTemplates) => void;
   initialData: CompanyApplication | null; // null for new, object for edit
-}> = ({ isOpen, onClose, onSave, candidateName, candidate, onDeleteMemo, onKnowledgeSubmitted, initialData }) => {
+}> = ({ isOpen, onClose, onSave, candidateName, candidate, onDeleteMemo, onKnowledgeSubmitted, feedbackInviteTemplates, onSaveFeedbackInviteTemplates, initialData }) => {
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
@@ -8080,6 +8087,8 @@ const ApplicationModal: React.FC<{
                             onUrlChange={url => setApplication(prev => ({ ...prev, interviewPrepDocUrl: url || undefined }))}
                             onDeleteMemo={onDeleteMemo}
                             onKnowledgeSubmitted={onKnowledgeSubmitted && (() => onKnowledgeSubmitted(application.id))}
+                            feedbackInviteTemplates={feedbackInviteTemplates}
+                            onSaveFeedbackInviteTemplates={onSaveFeedbackInviteTemplates}
                         />
                     )}
                 </form>
@@ -8368,7 +8377,9 @@ const InterviewPrepSection: React.FC<{
     onUrlChange: (url: string) => void;
     onDeleteMemo?: (memoId: string) => void;
     onKnowledgeSubmitted?: () => void;
-}> = ({ candidate, application, onUrlChange, onDeleteMemo, onKnowledgeSubmitted }) => {
+    feedbackInviteTemplates?: FeedbackInviteTemplates;
+    onSaveFeedbackInviteTemplates?: (templates: FeedbackInviteTemplates) => void;
+}> = ({ candidate, application, onUrlChange, onDeleteMemo, onKnowledgeSubmitted, feedbackInviteTemplates, onSaveFeedbackInviteTemplates }) => {
     const [copyMessage, setCopyMessage] = useState('');
     const prep = useInterviewPrepData();
     const companyName = application.companyName.trim();
@@ -8455,7 +8466,7 @@ const InterviewPrepSection: React.FC<{
         const text = buildFeedbackInviteText(channel, {
             candidateName: candidate.name, companyName, interviewStage: feedbackStage,
             outcome: feedbackOutcomeOf(application.stage), url: buildShortFeedbackUrl(window.location.origin, application, feedbackStage),
-        });
+        }, feedbackInviteTemplates);
         try {
             await navigator.clipboard.writeText(text);
             setSurveyMessage(`振り返りアンケートの案内（${channel === 'email' ? 'メール' : 'LINE'}用）をコピーしました。候補者に送ってください。回答は候補者パイプラインの上部から面談ログに取り込めます。`);
@@ -8734,6 +8745,14 @@ const InterviewPrepSection: React.FC<{
                             </div>
                         </li>
                     </ol>
+                    {onSaveFeedbackInviteTemplates && (
+                        <FeedbackTemplateEditor
+                            templates={feedbackInviteTemplates || {}}
+                            onSave={onSaveFeedbackInviteTemplates}
+                            initialOutcome={feedbackOutcomeOf(application.stage)}
+                            sample={{ candidateName: candidate.name, companyName, interviewStage: feedbackStage || '一次面接', url: 'https://kpi-mgr-five.vercel.app/q/…' }}
+                        />
+                    )}
                     {surveyMemos.length > 0 && (
                         <details className="prep-details" open>
                             <summary>この選考の回答 <span className="prep-count">{surveyMemos.length}件</span></summary>
@@ -8797,6 +8816,104 @@ const InterviewPrepSection: React.FC<{
                 </section>
             )}
         </div>
+    );
+};
+
+/**
+ * 面接振り返りアンケートの案内文を、このユーザー用に編集する（メール/LINE × 選考中・お見送り・辞退）。
+ * URLはアンケートごとに変わるので {URL} で差し込む（消しても末尾に自動で入る）。保存先は UserData。
+ */
+const FEEDBACK_OUTCOME_LABELS: Record<FeedbackOutcome, string> = {
+    in_progress: '選考中', rejected: 'お見送り', withdrawn: '辞退',
+};
+const FeedbackTemplateEditor: React.FC<{
+    templates: FeedbackInviteTemplates;
+    onSave: (templates: FeedbackInviteTemplates) => void;
+    initialOutcome: FeedbackOutcome;
+    sample: { candidateName: string; companyName: string; interviewStage: string; url: string };
+}> = ({ templates, onSave, initialOutcome, sample }) => {
+    const [channel, setChannel] = useState<FeedbackChannel>('email');
+    const [outcome, setOutcome] = useState<FeedbackOutcome>(initialOutcome);
+    const key = `${channel}_${outcome}` as const;
+    const saved = templates[key] || '';
+    const [draft, setDraft] = useState<string | null>(null);   // null = 保存済み（または既定）のまま
+    const value = draft ?? (saved || defaultFeedbackTemplate(channel, outcome));
+    const [message, setMessage] = useState('');
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    useEffect(() => { setDraft(null); setMessage(''); }, [channel, outcome]);
+
+    const insertToken = (token: string) => {
+        const el = textareaRef.current;
+        const start = el?.selectionStart ?? value.length;
+        const end = el?.selectionEnd ?? value.length;
+        setDraft(value.slice(0, start) + token + value.slice(end));
+        requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(start + token.length, start + token.length); });
+    };
+    const save = () => {
+        const isDefault = value.trim() === defaultFeedbackTemplate(channel, outcome).trim();
+        const next = { ...templates };
+        if (isDefault || !value.trim()) delete next[key]; else next[key] = value;
+        onSave(next);
+        setDraft(null);
+        setMessage('保存しました。次にコピーする案内文から、この文面が使われます。');
+    };
+    const reset = () => {
+        const next = { ...templates };
+        delete next[key];
+        onSave(next);
+        setDraft(null);
+        setMessage('既定の文面に戻しました。');
+    };
+    const customizedCount = (Object.values(templates) as (string | undefined)[]).filter(v => v?.trim()).length;
+
+    return (
+        <details className="prep-details prep-template-editor">
+            <summary>
+                案内文を編集（自分用）
+                <span className="prep-count">{customizedCount > 0 ? `${customizedCount}件を編集済み` : '既定の文面を使用中'}</span>
+            </summary>
+            <div className="prep-options-body">
+                <div className="app-grid-2">
+                    <div className="prep-field">
+                        <span className="prep-field-label">送り方</span>
+                        <select value={channel} onChange={e => setChannel(e.target.value as FeedbackChannel)}>
+                            <option value="email">メール</option>
+                            <option value="line">LINE</option>
+                        </select>
+                    </div>
+                    <div className="prep-field">
+                        <span className="prep-field-label">選考の状況</span>
+                        <select value={outcome} onChange={e => setOutcome(e.target.value as FeedbackOutcome)}>
+                            {(Object.keys(FEEDBACK_OUTCOME_LABELS) as FeedbackOutcome[]).map(o => (
+                                <option key={o} value={o}>{FEEDBACK_OUTCOME_LABELS[o]}{templates[`${channel}_${o}`]?.trim() ? '（編集済み）' : ''}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+                {outcome !== 'in_progress' && (
+                    <p className="prep-note">候補者に結果をまだ伝えていない場合もあるため、文面では選考の結果（お見送り・辞退）に触れないでください。</p>
+                )}
+                <div className="prep-field">
+                    <span className="prep-field-label">差し込み項目（押すとカーソル位置に入ります）</span>
+                    <div className="prep-pill-group">
+                        {FEEDBACK_TEMPLATE_FIELDS.map(f => (
+                            <button type="button" key={f.token} className="prep-pill" title={f.label} onClick={() => insertToken(f.token)}>{f.token}</button>
+                        ))}
+                    </div>
+                </div>
+                <textarea ref={textareaRef} rows={channel === 'email' ? 12 : 6} value={value} onChange={e => setDraft(e.target.value)} />
+                {!value.includes('{URL}') && <p className="prep-note">{'{URL}'} が無いため、アンケートのURLは文面の最後に入ります。</p>}
+                <div className="prep-field">
+                    <span className="prep-field-label">プレビュー</span>
+                    <pre className="prep-template-preview">{fillFeedbackTemplate(value, sample)}</pre>
+                </div>
+                <div className="knowledge-submit-actions">
+                    <button type="button" className="interview-prep-generate-button" onClick={save} disabled={draft === null}>この文面を保存</button>
+                    <button type="button" className="interview-prep-link-button" onClick={reset} disabled={!saved && draft === null}>既定の文面に戻す</button>
+                </div>
+                {message && <p className="prep-status is-active">{message}</p>}
+            </div>
+        </details>
     );
 };
 
@@ -14975,13 +15092,16 @@ const CandidatePipelineView: React.FC<{
     onUpdateMeetingForecast: (updater: (prev: MeetingForecastSettings) => MeetingForecastSettings) => void;
     // 類似経歴リサーチの対象範囲「事業部」の判定用（メールアドレス→所属部署）。
     memberDepartments: Record<string, Department>;
+    // 面接振り返りアンケートの案内文（自分用、UserData.feedbackInviteTemplates）とその保存
+    feedbackInviteTemplates?: FeedbackInviteTemplates;
+    onSaveFeedbackInviteTemplates?: (templates: FeedbackInviteTemplates) => void;
 }> = ({
     candidates, allMedia, onSave, onToggleVisibility, onDeleteCandidate, currentUserEmail, scope, onScopeChange, teams, selectedTeamId,
     onSelectedTeamIdChange, userOptions, selectedUserEmail, onSelectedUserEmailChange, isLoadingAggregate, onRefreshAggregate,
     onForceSyncOwnData, isForcingSyncOwnData,
     isTeamsEditable, onToggleTeammateVisibility, isCurrentUserMiddle, middleManagedMemberEmails, onSaveManagedCandidate, onDeleteManagedCandidate,
     onAddManagedCandidate, defaultStageFilters, onSaveDefaultStageFilters, weekStartsOn,
-    meetingForecast, onUpdateMeetingForecast, memberDepartments,
+    meetingForecast, onUpdateMeetingForecast, memberDepartments, feedbackInviteTemplates, onSaveFeedbackInviteTemplates,
 }) => {
     const isOwn = (c: Candidate) => !c.ownerEmail || c.ownerEmail === currentUserEmail;
     const ownCandidatesForSuggestions = useMemo(() => candidates.filter(isOwn), [candidates, currentUserEmail]);
@@ -15659,6 +15779,8 @@ const CandidatePipelineView: React.FC<{
                     candidate={latestModalCandidate() || applicationModalData.candidate}
                     onDeleteMemo={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleDeleteModalMemo : undefined}
                     onKnowledgeSubmitted={(isOwn(applicationModalData.candidate) || isManagedByMiddle(applicationModalData.candidate)) ? handleKnowledgeSubmitted : undefined}
+                    feedbackInviteTemplates={feedbackInviteTemplates}
+                    onSaveFeedbackInviteTemplates={onSaveFeedbackInviteTemplates}
                     initialData={applicationModalData.application}
                 />
             )}
@@ -18582,6 +18704,11 @@ const App: React.FC = () => {
   // 保存する。上のhandleSaveAllUsersSectionDefaultsと同じ「今の状態をそのままデフォルトとして
   // 保存」パターンだが、スコープごとに見たい絞り込み条件が違うことが多いため、スコープ単位で
   // 別々に保存できるようにしている。
+  // 面接振り返りアンケートの案内文（自分用）を保存する。
+  const handleSaveFeedbackInviteTemplates = (templates: FeedbackInviteTemplates) => {
+    setCurrentUserData(prev => (prev ? { ...prev, feedbackInviteTemplates: templates } : prev));
+  };
+
   const handleSavePipelineStageFilterDefaults = (scope: 'personal' | 'all_users' | 'team' | 'user', stages: PipelineStage[]) => {
     setCurrentUserData(prev => (prev ? {
       ...prev,
@@ -18706,6 +18833,8 @@ const App: React.FC = () => {
     scoutAchievementLog: d.scoutAchievementLog,
     // 同じ理由: 会議用レポートの上書き値も許可リストに無いと再読み込みのたびに消える。
     meetingForecast: d.meetingForecast,
+    // 同じ理由: 面接振り返りアンケートの案内文（自分用）も許可リストに無いと再読み込みで消える。
+    feedbackInviteTemplates: d.feedbackInviteTemplates,
     // 同じ理由: チーム設定の控えも許可リストに無いと再読み込みのたびに消え、復元に使えない。
     teamsConfigBackups: d.teamsConfigBackups,
   }), [currentIdentity]);
@@ -22840,6 +22969,8 @@ const App: React.FC = () => {
                 weekStartsOn={weekStartsOn}
                 meetingForecast={currentUserData?.meetingForecast}
                 onUpdateMeetingForecast={handleUpdateMeetingForecast}
+                feedbackInviteTemplates={currentUserData?.feedbackInviteTemplates}
+                onSaveFeedbackInviteTemplates={handleSaveFeedbackInviteTemplates}
             />
           </>
         )}

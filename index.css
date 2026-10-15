@@ -4784,3 +4784,19 @@ p.memo-content-text {
   background: #fff;
 }
 .prep-options-body .prep-field--inline select { width: auto; }
+.prep-template-editor { margin-top: 0.85rem; }
+.prep-template-preview {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--prep-line);
+  border-radius: 6px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #343a40;
+}

@@ -62,35 +62,47 @@ export const defaultFeedbackStage = (app: {
  * 候補者に送る案内文。メールは件名付きの丁寧な文面、LINEは短め。
  * お見送りになった選考でも、選考の結果には一切触れない（ユーザー指示 2026-10-15）。結果をまだ
  * 伝えていない場合もあるため。「次の選考」のような、選考が続く前提の表現も使わない。
+ *
+ * 文面は各ユーザーが自分用に書き換えられる（UserData.feedbackInviteTemplates、2026-10-16）。
+ * 差し込み項目は FEEDBACK_TEMPLATE_FIELDS。URLは必ず入れる（テンプレートに {URL} が無ければ末尾に足す）。
  */
-export const buildFeedbackInviteText = (
-  channel: 'email' | 'line',
-  params: { candidateName: string; companyName: string; interviewStage: string; outcome: FeedbackOutcome; url: string },
-): string => {
-  const name = params.candidateName.trim() ? `${params.candidateName.trim()}様` : '';
-  const target = `${params.companyName}の${params.interviewStage}`;
+export type FeedbackChannel = 'email' | 'line';
+export type FeedbackTemplateKey = `${FeedbackChannel}_${FeedbackOutcome}`;
+export type FeedbackInviteTemplates = Partial<Record<FeedbackTemplateKey, string>>;
+
+export const FEEDBACK_TEMPLATE_FIELDS = [
+  { token: '{候補者名}', label: '候補者名（「様」付き）' },
+  { token: '{企業名}', label: '企業名' },
+  { token: '{面接}', label: '面接（例: 一次面接）' },
+  { token: '{URL}', label: 'アンケートのURL' },
+] as const;
+
+/** 既定の文面（差し込み項目入り）。編集画面の初期値と、未設定時の文面に使う。 */
+export const defaultFeedbackTemplate = (channel: FeedbackChannel, outcome: FeedbackOutcome): string => {
+  const target = '{企業名}の{面接}';
   const opening = {
     in_progress: { line: `${target}、お疲れさまでした！`, email: `先日は${target}、お疲れさまでした。` },
     rejected: { line: `${target}、お疲れさまでした！`, email: `先日は${target}、お疲れさまでした。` },
     withdrawn: { line: `${target}、ありがとうございました。`, email: `先日は${target}にご参加いただき、ありがとうございました。` },
-  }[params.outcome];
+  }[outcome];
   const purpose = {
     in_progress: { line: '今後の対策のため、', email: '今後の選考に向けた対策のため、' },
     rejected: { line: '今後のサポートに活かすため、', email: '今後のサポートに活かすため、' },
     withdrawn: { line: '今後のサポートの参考にするため、', email: '今後のサポートの参考にさせていただくため、' },
-  }[params.outcome];
+  }[outcome];
   if (channel === 'line') {
     return [
-      `${name ? `${name}\n` : ''}${opening.line}`,
+      '{候補者名}',
+      opening.line,
       `${purpose.line}面接で聞かれたことなどを5分ほどのアンケートで教えていただけますか？`,
-      params.url,
+      '{URL}',
       '覚えている範囲で大丈夫です。よろしくお願いします。',
     ].join('\n');
   }
   return [
     `件名：【bloom】${target}についてのアンケートのお願い`,
     '',
-    name,
+    '{候補者名}',
     '',
     'お世話になっております。bloomでございます。',
     opening.email,
@@ -98,10 +110,36 @@ export const buildFeedbackInviteText = (
     `${purpose.email}面接で聞かれた質問や雰囲気などを、下記のアンケートで教えていただけますでしょうか。`,
     '5分ほどで回答できます。覚えている範囲で構いません。',
     '',
-    params.url,
+    '{URL}',
     '',
     '何卒よろしくお願いいたします。',
   ].join('\n');
+};
+
+/** テンプレートに差し込み項目を入れて文面にする。 */
+export const fillFeedbackTemplate = (
+  template: string,
+  params: { candidateName: string; companyName: string; interviewStage: string; url: string },
+): string => {
+  const name = params.candidateName.trim() ? `${params.candidateName.trim()}様` : '';
+  const withUrl = template.includes('{URL}') ? template : `${template.trimEnd()}\n\n{URL}`;
+  return withUrl
+    .split('{候補者名}').join(name)
+    .split('{企業名}').join(params.companyName)
+    .split('{面接}').join(params.interviewStage)
+    .split('{URL}').join(params.url)
+    // 候補者名が無い時に残る空行を詰める
+    .replace(/^\s*\n/, '')
+    .replace(/\n{3,}/g, '\n\n');
+};
+
+export const buildFeedbackInviteText = (
+  channel: FeedbackChannel,
+  params: { candidateName: string; companyName: string; interviewStage: string; outcome: FeedbackOutcome; url: string },
+  templates?: FeedbackInviteTemplates,
+): string => {
+  const custom = templates?.[`${channel}_${params.outcome}`];
+  return fillFeedbackTemplate(custom?.trim() ? custom : defaultFeedbackTemplate(channel, params.outcome), params);
 };
 
 export interface FeedbackResponse {
