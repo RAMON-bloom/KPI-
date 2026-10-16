@@ -5024,3 +5024,32 @@ p.memo-content-text {
 .mail-result-suggestions ul.feedback-submit-notices li.is-error {
   color: #b02a37;
 }
+
+/* 「求人票まとめ」画面 — 左に検索結果、右に選んだ求人票（狭い画面では縦に並べる） */
+.jd-bundle-body { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.25rem; align-items: start; }
+@media (max-width: 860px) { .jd-bundle-body { grid-template-columns: 1fr; } }
+.jd-bundle-search-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+.jd-bundle-search-row input { flex: 1; min-width: 0; }
+.jd-bundle-results { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow-y: auto; border: 1px solid var(--border-color); border-radius: var(--border-radius); }
+.jd-bundle-results li { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-color); }
+.jd-bundle-results li:last-child { border-bottom: none; }
+.jd-bundle-results li.is-selected { background: #f0f6ff; }
+.jd-bundle-results label { display: flex; flex-direction: row; align-items: flex-start; gap: 0.6rem; font-weight: normal; cursor: pointer; flex: 1; min-width: 0; }
+.jd-bundle-results input[type="checkbox"] { margin-top: 0.2rem; flex: none; }
+.jd-bundle-name { display: flex; flex-direction: column; min-width: 0; }
+.jd-bundle-name span { font-size: 0.88rem; }
+.jd-bundle-name small { color: var(--text-muted-color); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jd-bundle-preview { font-size: 0.82rem; white-space: nowrap; }
+.jd-bundle-selected { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.75rem 1rem; position: sticky; top: 0.5rem; }
+.jd-bundle-selected h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.jd-bundle-selected-list { margin: 0 0 0.75rem; padding-left: 1.4rem; }
+.jd-bundle-selected-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--border-color); }
+.jd-bundle-selected-list li { display: list-item; }
+.jd-bundle-selected-list li > .jd-bundle-name { display: inline-flex; vertical-align: middle; max-width: calc(100% - 6.5rem); }
+.jd-bundle-order { float: right; display: inline-flex; gap: 0.25rem; }
+.jd-bundle-order button { padding: 0.1rem 0.45rem; font-size: 0.85rem; background: var(--card-bg-color); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; color: inherit; }
+.jd-bundle-order button:disabled { opacity: 0.35; cursor: default; }
+.jd-bundle-recipient { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.88rem; }
+.jd-bundle-status { flex: 1 1 260px; font-size: 0.88rem; }
+.jd-bundle-status.is-error { color: #b42318; }
+.jd-bundle-status.is-ok { color: #1e6b34; }

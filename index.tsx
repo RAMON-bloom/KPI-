@@ -34,6 +34,7 @@ import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, comput
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
 import { generateRecommendationDraft } from './services/recommendationDraft';
 import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
+import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, buildKnowledgeFromFeedback, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
@@ -4449,6 +4450,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      'ヘッダーに「求人票まとめ」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
       '「使い方」ガイドに「求人票ジェネレーターとの連携」を追加した（求人票の保存先、KPI管理くんのどこに求人票が出るか、表示されない時の確認点など）',
       '選考情報に「推薦文の下書き」を追加した。「推薦文を作る」を押すと、その選考の求人票と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。編集して「コピー」で使えます。氏名・電話番号・メールアドレスはAIに送らず、本文の候補者は「〇〇様」と書かれます',
       'ブラインドレジュメ作成の求人内容に「ドライブの求人票から選ぶ」を追加した。推薦先の企業名に合う求人票（求人票ジェネレーターで作ったもの）を一覧から選ぶと、その本文が求人内容に追記されます（複数選べます）',
@@ -8452,6 +8454,150 @@ const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick:
                     </ul>
                 )}
         </details>
+    );
+};
+
+/**
+ * 「求人票まとめ」画面。求人票ジェネレーターがドライブに保存した求人票PDFを検索して複数選び、
+ * 選んだ順に結合して1つのPDFとしてダウンロードする（候補者に複数の求人をまとめて渡す用）。
+ * ロジック本体は services/jdBundle.ts。ドライブには保存しない。
+ */
+const JdBundleView: React.FC = () => {
+    const [index, setIndex] = useState<{ data: JdIndexData | null; error: string; loading: boolean }>({ data: null, error: '', loading: true });
+    const [query, setQuery] = useState('');
+    const [selected, setSelected] = useState<JdIndexEntry[]>([]);
+    const [recipient, setRecipient] = useState('');
+    const [busy, setBusy] = useState('');
+    const [message, setMessage] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null);
+
+    const load = (force: boolean) => {
+        setIndex(prev => ({ ...prev, loading: true, error: '' }));
+        loadJdIndex(force)
+            .then(data => setIndex({ data, error: '', loading: false }))
+            .catch(err => setIndex({ data: null, loading: false, error: err instanceof InterviewPrepAccessError ? err.message : '求人票の索引を読み込めませんでした。' }));
+    };
+    useEffect(() => { load(false); }, []);
+
+    const all = index.data ? bundlableEntries(index.data) : [];
+    const results = searchJdEntries(all, query);
+    const RESULT_LIMIT = 100;
+    const isSelected = (e: JdIndexEntry) => selected.some(s => s.jdId === e.jdId);
+    const toggle = (e: JdIndexEntry) => {
+        setMessage(null);
+        setSelected(prev => prev.some(s => s.jdId === e.jdId) ? prev.filter(s => s.jdId !== e.jdId) : [...prev, e]);
+    };
+    const move = (i: number, d: -1 | 1) => setSelected(prev => {
+        const j = i + d;
+        if (j < 0 || j >= prev.length) return prev;
+        const next = [...prev];
+        [next[i], next[j]] = [next[j], next[i]];
+        return next;
+    });
+
+    const fileName = () => {
+        const d = new Date();
+        const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+        const clean = (s: string) => s.replace(/[\\/:*?"<>|\s]+/g, '');
+        const who = clean(recipient.trim());
+        const what = selected.length === 1 ? `${selected[0].company}_${selected[0].position || '企業共通'}` : `${selected.length}件`;
+        return `求人票${who ? `_${who}様` : ''}_${clean(what)}_${ymd}.pdf`;
+    };
+
+    const handleMerge = async () => {
+        if (selected.length === 0 || busy) return;
+        setMessage(null);
+        setBusy(`PDFを読み込んでいます（0 / ${selected.length}）…`);
+        try {
+            const bytes = await mergeJdPdfs(selected, (done, total) => setBusy(`PDFを読み込んでいます（${done} / ${total}）…`));
+            const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName();
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            setMessage({ kind: 'ok', text: `${selected.length}件の求人票を1つのPDFにまとめてダウンロードしました。` });
+        } catch (err) {
+            setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'PDFの結合に失敗しました。' });
+        } finally {
+            setBusy('');
+        }
+    };
+
+    return (
+        <div className="blind-resume-page jd-bundle-page">
+            <div className="blind-resume-page-header">
+                <h2 className="section-title">求人票まとめ</h2>
+                <p className="field-hint">求人票ジェネレーターでドライブに保存した求人票（PDF）を検索して選び、選んだ順に1つのPDFにまとめてダウンロードします。候補者に複数の求人をまとめて渡すときに使えます。</p>
+            </div>
+            <div className="blind-resume-page-body jd-bundle-body">
+                <section className="jd-bundle-search">
+                    <div className="jd-bundle-search-row">
+                        <input type="search" value={query} onChange={e => setQuery(e.target.value)}
+                            placeholder="企業名・ポジション・勤務地など（空白区切りで絞り込み）" aria-label="求人票を検索" />
+                        <button type="button" className="secondary-action-button" onClick={() => load(true)} disabled={index.loading}>
+                            {index.loading ? '読み込み中…' : '最新にする'}
+                        </button>
+                    </div>
+                    {index.error ? <p className="field-hint">{index.error}</p>
+                        : !index.data ? <p className="field-hint">求人票を探しています…</p>
+                        : results.length === 0 ? <p className="field-hint">{all.length === 0 ? '求人票ジェネレーターの保存先に、PDFのある求人票がまだありません。' : '条件に合う求人票がありません。'}</p>
+                        : (
+                            <>
+                                <p className="field-hint">{results.length}件{results.length > RESULT_LIMIT ? `（先頭の${RESULT_LIMIT}件を表示。キーワードで絞り込んでください）` : ''}</p>
+                                <ul className="jd-bundle-results">
+                                    {results.slice(0, RESULT_LIMIT).map(e => (
+                                        <li key={e.jdId} className={isSelected(e) ? 'is-selected' : ''}>
+                                            <label>
+                                                <input type="checkbox" checked={isSelected(e)} onChange={() => toggle(e)} disabled={!!busy} />
+                                                <span className="jd-bundle-name">
+                                                    <strong>{e.company}</strong>
+                                                    <span>{e.position || '企業共通'}</span>
+                                                    {(e.data.location || e.data.salary) && (
+                                                        <small>{[e.data.location, e.data.salary].filter(Boolean).map(s => s.split('\n')[0]).join(' ／ ')}</small>
+                                                    )}
+                                                </span>
+                                            </label>
+                                            <a href={jdPdfUrl(e)} target="_blank" rel="noopener noreferrer" className="jd-bundle-preview">PDFを見る</a>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </>
+                        )}
+                </section>
+                <section className="jd-bundle-selected">
+                    <h3>選んだ求人票（{selected.length}件）</h3>
+                    {selected.length === 0 ? <p className="field-hint">一覧でチェックした求人票が、この順番でPDFにまとまります。</p> : (
+                        <ol className="jd-bundle-selected-list">
+                            {selected.map((e, i) => (
+                                <li key={e.jdId}>
+                                    <span className="jd-bundle-name"><strong>{e.company}</strong><span>{e.position || '企業共通'}</span></span>
+                                    <span className="jd-bundle-order">
+                                        <button type="button" onClick={() => move(i, -1)} disabled={i === 0 || !!busy} aria-label="上へ" title="上へ">↑</button>
+                                        <button type="button" onClick={() => move(i, 1)} disabled={i === selected.length - 1 || !!busy} aria-label="下へ" title="下へ">↓</button>
+                                        <button type="button" onClick={() => toggle(e)} disabled={!!busy} aria-label="外す" title="外す">×</button>
+                                    </span>
+                                </li>
+                            ))}
+                        </ol>
+                    )}
+                    <label className="jd-bundle-recipient">
+                        候補者名（ファイル名に入ります・任意）
+                        <input type="text" value={recipient} onChange={e => setRecipient(e.target.value)} placeholder="例: 山田" disabled={!!busy} />
+                    </label>
+                    {selected.length > 0 && <p className="field-hint">ファイル名: {fileName()}</p>}
+                </section>
+            </div>
+            <div className="blind-resume-page-footer">
+                {busy && <span className="jd-bundle-status">{busy}</span>}
+                {!busy && message && <span className={message.kind === 'error' ? 'jd-bundle-status is-error' : 'jd-bundle-status is-ok'}>{message.text}</span>}
+                {selected.length > 0 && <button type="button" className="secondary-action-button" onClick={() => { setSelected([]); setMessage(null); }} disabled={!!busy}>選択をすべて外す</button>}
+                <button type="button" className="submit-button" onClick={handleMerge} disabled={selected.length === 0 || !!busy}>
+                    {busy ? '作成中…' : `1つのPDFにまとめてダウンロード${selected.length ? `（${selected.length}件）` : ''}`}
+                </button>
+            </div>
+        </div>
     );
 };
 
@@ -18964,7 +19110,7 @@ const App: React.FC = () => {
   const [isLoadingAllUsers, setIsLoadingAllUsers] = useState(false);
 
   // View state
-  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline' | 'blind_resume'>('personal_kpi');
+  const [view, setView] = useState<'personal_kpi' | 'all_users_kpi' | 'team_kpi' | 'pipeline' | 'blind_resume' | 'jd_bundle'>('personal_kpi');
   const [allUsersData, setAllUsersData] = useState<Record<string, UserData>>({});
 
   // BCA事業部 header switcher — 'BCA' shows F+ and AC combined (not a real assignment of its
@@ -22601,6 +22747,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
             <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'} className="view-switcher-blind-resume">ブラインドレジュメ収集</button>
+            <button onClick={() => setView('jd_bundle')} disabled={view === 'jd_bundle'} className="view-switcher-blind-resume">求人票まとめ</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
@@ -23537,6 +23684,7 @@ const App: React.FC = () => {
             />
           </div>
         )}
+        {view === 'jd_bundle' && currentIdentity && <JdBundleView />}
         {view === 'pipeline' && (
           <>
             <div className="google-tasks-sync-bar">

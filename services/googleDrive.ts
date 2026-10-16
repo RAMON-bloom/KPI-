@@ -483,3 +483,14 @@ export async function exportGoogleDocAsText(fileId: string): Promise<string> {
   if (!res.ok) throw new Error('面談ログの読み込みに失敗しました。');
   return res.text();
 }
+
+/** ファイルの中身をバイナリで読む（共有ドライブ上のファイルも可）。PDFの結合などに使う。 */
+export async function downloadFileBytes(fileId: string): Promise<ArrayBuffer> {
+  const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`);
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    console.error(`Failed to download Drive file ${fileId}: ${res.status} ${bodyText}`);
+    throw new Error(`ドライブのファイルを読み込めませんでした。(${res.status}${res.status === 403 ? ': 権限がありません' : res.status === 404 ? ': ファイルが見つかりません' : ''})`);
+  }
+  return res.arrayBuffer();
+}
