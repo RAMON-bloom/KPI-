@@ -5083,3 +5083,9 @@ p.memo-content-text {
 .jd-send-template-editor { margin-top: 0; }
 .jd-send-composer label.jd-send-check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; width: 100%; }
 .jd-send-composer .jd-send-check input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+
+.jd-bundle-generator { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; margin: 0 0 0.6rem; }
+.jd-bundle-generator .field-hint { margin: 0; flex: 1 1 240px; }
+.jd-bundle-fresh { display: inline-block; margin-left: 0.4rem; padding: 0 0.4rem; border-radius: 999px; background: #e3f4e6; color: #1e6b34; font-size: 0.72rem; font-weight: 600; vertical-align: middle; }
+.jd-bundle-generator-button { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.5rem 0.9rem; border: none; border-radius: var(--border-radius); background: #1e6b34; color: #fff; font-weight: 600; font-size: 0.9rem; cursor: pointer; }
+.jd-bundle-generator-button:hover { background: #17552a; }

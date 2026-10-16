@@ -33,7 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
 import { generateRecommendationDraft } from './services/recommendationDraft';
-import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
+import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, JD_GENERATOR_URL, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
 import { buildJdSendText, defaultJdSendTemplate, fillJdSendTemplate, splitEmailSubject, researchCompanyBrief, JD_SEND_CHANNEL_LABELS, JD_SEND_TEMPLATE_FIELDS, type JdSendChannel, type JdSendTemplates, type JdSendParams } from './services/jdSendMessage';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
@@ -4454,6 +4454,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '「求人票出力」に「求人票ジェネレーターで新規作成」を追加した。押すと求人票ジェネレーターが別ウィンドウで開き、解析・保存した求人票は自動でこの画面の一覧に「新規」として追加され、選択されます（ジェネレーターのウィンドウを閉じるまで、約20秒ごとと、この画面に戻った時に確認します）',
       '「求人票出力」に「送付メッセージ」を追加した。選んだ求人票を候補者に送るメール・メッセージ（LINE・チャット）の文面を作ってコピーできます。企業ごとに、Web検索で調べた企業概要と企業URLを任意で付けられます（内容は画面で直せます）。文面のテンプレートは「送付メッセージのテンプレートを編集」から自分用に書き換えられます',
       'ヘッダーに「求人票出力」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
       '「使い方」ガイドに「求人票ジェネレーターとの連携」を追加した（求人票の保存先、KPI管理くんのどこに求人票が出るか、表示されない時の確認点など）',
@@ -8479,15 +8480,68 @@ const JdBundleView: React.FC<{
     const [busy, setBusy] = useState('');
     const [message, setMessage] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null);
 
-    const load = (force: boolean) => {
-        setIndex(prev => ({ ...prev, loading: true, error: '' }));
-        loadJdIndex(force)
-            .then(data => setIndex({ data, error: '', loading: false }))
-            .catch(err => setIndex({ data: null, loading: false, error: err instanceof InterviewPrepAccessError ? err.message : '求人票の索引を読み込めませんでした。' }));
+    const load = (force: boolean, silent = false) => {
+        if (!silent) setIndex(prev => ({ ...prev, loading: true, error: '' }));
+        return loadJdIndex(force)
+            .then(data => { setIndex({ data, error: '', loading: false }); return data; })
+            .catch(err => {
+                // 自動の再読み込み（ジェネレーターの保存待ち）の失敗では、表示中の一覧を消さない
+                if (silent) return null;
+                setIndex({ data: null, loading: false, error: err instanceof InterviewPrepAccessError ? err.message : '求人票の索引を読み込めませんでした。' });
+                return null;
+            });
     };
     useEffect(() => { load(false); }, []);
 
-    const all = index.data ? bundlableEntries(index.data) : [];
+    // 求人票ジェネレーターを別ウィンドウで開いて新規作成する。ジェネレーターは解析が終わると求人票を
+    // ドライブに保存して索引に1行足す（または版を上げる）ので、開いている間は索引を定期的に読み直し、
+    // 開いた時点から増えた・更新された求人票を「新規」として一覧の先頭に出し、選択にも自動で加える。
+    // ジェネレーターを画面内に埋め込まないのは、GAS側で埋め込みの許可が必要なうえ、iframe内では
+    // Googleのログインが通らないことが多いため。
+    const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
+    const [watching, setWatching] = useState(false);
+    const generatorRef = useRef<Window | null>(null);
+    const baselineRef = useRef<Map<string, number> | null>(null);
+    const pickFresh = (data: JdIndexData | null) => {
+        const base = baselineRef.current;
+        if (!data || !base) return;
+        const fresh = bundlableEntries(data).filter(e => (base.get(e.jdId) ?? 0) < e.version);
+        if (fresh.length === 0) return;
+        fresh.forEach(e => base.set(e.jdId, e.version));
+        setFreshIds(prev => { const next = new Set(prev); fresh.forEach(e => next.add(e.jdId)); return next; });
+        setSelected(prev => [
+            ...prev.map(s => fresh.find(f => f.jdId === s.jdId) || s),
+            ...fresh.filter(f => !prev.some(s => s.jdId === f.jdId)),
+        ]);
+        setMessage({ kind: 'ok', text: `求人票ジェネレーターで保存された求人票を選びました：${fresh.map(e => `${e.company}・${e.position || '企業共通'}`).join('、')}` });
+    };
+    const openGenerator = () => {
+        if (index.data) baselineRef.current = new Map(bundlableEntries(index.data).map(e => [e.jdId, e.version]));
+        else baselineRef.current = baselineRef.current || new Map();
+        const w = window.open(JD_GENERATOR_URL, 'kpiJdGenerator', 'width=1200,height=900');
+        if (!w) {
+            setMessage({ kind: 'error', text: 'ポップアップがブロックされたため、求人票ジェネレーターを開けませんでした。ブラウザでこのサイトのポップアップを許可してください。' });
+            return;
+        }
+        generatorRef.current = w;
+        w.focus();
+        setWatching(true);
+    };
+    useEffect(() => {
+        if (!watching) return;
+        const tick = () => {
+            const closed = !generatorRef.current || generatorRef.current.closed;
+            load(true, true).then(pickFresh);
+            if (closed) setWatching(false); // 閉じた直後に1回読み直して見張りを終える
+        };
+        const timer = setInterval(tick, 20_000);
+        const onFocus = () => tick();
+        window.addEventListener('focus', onFocus);
+        return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
+    }, [watching]);
+
+    // 新しく作った求人票を先頭に出す
+    const all = index.data ? bundlableEntries(index.data).sort((a, b) => Number(freshIds.has(b.jdId)) - Number(freshIds.has(a.jdId))) : [];
     const results = searchJdEntries(all, query);
     const RESULT_LIMIT = 100;
     const isSelected = (e: JdIndexEntry) => selected.some(s => s.jdId === e.jdId);
@@ -8545,9 +8599,19 @@ const JdBundleView: React.FC<{
                     <div className="jd-bundle-search-row">
                         <input type="search" value={query} onChange={e => setQuery(e.target.value)}
                             placeholder="企業名・ポジション・勤務地など（空白区切りで絞り込み）" aria-label="求人票を検索" />
-                        <button type="button" className="secondary-action-button" onClick={() => load(true)} disabled={index.loading}>
+                        <button type="button" className="secondary-action-button" onClick={() => load(true).then(pickFresh)} disabled={index.loading}>
                             {index.loading ? '読み込み中…' : '最新にする'}
                         </button>
+                    </div>
+                    <div className="jd-bundle-generator">
+                        <button type="button" className="jd-bundle-generator-button" onClick={openGenerator}>
+                            求人票ジェネレーターで新規作成<PrepIcon name="external" size={14} />
+                        </button>
+                        <span className="field-hint">
+                            {watching
+                                ? 'ジェネレーターで解析・保存すると、ここに自動で追加されて選択されます（ジェネレーターのウィンドウを閉じるまで確認を続けます）。'
+                                : '別ウィンドウで求人票ジェネレーターを開きます。保存された求人票は自動でこの一覧に追加されます。'}
+                        </span>
                     </div>
                     {index.error ? <p className="field-hint">{index.error}</p>
                         : !index.data ? <p className="field-hint">求人票を探しています…</p>
@@ -8561,7 +8625,7 @@ const JdBundleView: React.FC<{
                                             <label>
                                                 <input type="checkbox" checked={isSelected(e)} onChange={() => toggle(e)} disabled={!!busy} />
                                                 <span className="jd-bundle-name">
-                                                    <strong>{e.company}</strong>
+                                                    <strong>{e.company}{freshIds.has(e.jdId) && <span className="jd-bundle-fresh">新規</span>}</strong>
                                                     <span>{e.position || '企業共通'}</span>
                                                     {(e.data.location || e.data.salary) && (
                                                         <small>{[e.data.location, e.data.salary].filter(Boolean).map(s => s.split('\n')[0]).join(' ／ ')}</small>
