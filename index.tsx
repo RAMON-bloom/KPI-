@@ -878,9 +878,10 @@ interface Candidate {
  * (recordedFunnelKpiKeys candidate-wide, recommendationRecorded if newly triggered) and
  * the raw {kpiKey: howMany} deltas to add to today's KPI actuals. Pure — callers persist both
  * pieces themselves. `prevCandidate` undefined (a brand-new candidate, or an application that
- * didn't exist before this save) means there's no "previous stage" to diff against, so nothing
- * is credited — only genuine edits to an already-existing application's stage count, never a
- * stage an application/candidate was simply created at.
+ * didn't exist before this save) means there's no "previous stage" to diff against, so no
+ * funnel KPI is credited for the stage it was created at — EXCEPT candidatesSubmitted, which
+ * is credited (once per candidate) when an application is created already at 書類選考 or later,
+ * since that still means the candidate was recommended.
  */
 function computeStageAdvanceUpdate(
   prevCandidate: Candidate | undefined,
@@ -909,7 +910,19 @@ function computeStageAdvanceUpdate(
   // only ever credits documentScreeningPassed once, not once per company.
   const updatedApplications = nextCandidate.applications.map(app => {
     const prevApp = prevAppById.get(app.id);
-    if (!prevApp || prevApp.stage === app.stage) return app;
+    if (!prevApp) {
+      // 新規登録・選考企業の追加で、最初から書類選考以降のフェーズで作られた選考も「推薦した」
+      // 事実は変わらないため、候補者推薦数だけは作成時点で計上する（打診を経ずに直接書類選考で
+      // 登録したケースが推薦数から漏れていた）。1候補者1回の重複防止はステージ前進時と同じ
+      // recommendationRecordedで行う。それ以外の通過系KPIは従来どおり作成時には計上しない。
+      if (FORWARD_PIPELINE_STAGES.indexOf(app.stage) >= FORWARD_PIPELINE_STAGES.indexOf('書類選考')
+        && !nextCandidate.recommendationRecorded && !recommendationJustRecorded) {
+        recommendationJustRecorded = true;
+        kpiDeltas.candidatesSubmitted = (kpiDeltas.candidatesSubmitted || 0) + 1;
+      }
+      return app;
+    }
+    if (prevApp.stage === app.stage) return app;
 
     // Captures which phase this application exited FROM, independent of whether this transition
     // ends up crediting a KPI actual (see Pass 2's exitRecorded dedup below) — a per-application
@@ -4431,6 +4444,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '【不具合修正】候補者を最初から「書類選考」（またはそれ以降のフェーズ）で新規登録した場合や、既存の候補者に選考企業を「書類選考」で追加した場合に、個人実績の候補者推薦数に反映されていなかった不具合を修正。打診→書類選考への変更と同じく、その日の推薦数に1回だけ加算されます（同じ候補者がすでに推薦数に計上済みなら、複数社目でも重ねて加算はしません）',
       '【不具合修正】個人実績タブの「表示する媒体」に、所属チームの「使用する媒体」で外している媒体まで表示・集計されていた不具合を修正。選択肢と既定の表示を所属チームの「使用する媒体」に合わせました（チーム未所属・未設定の場合は従来どおりすべての媒体）',
       '「使い方」ガイドを最新の機能に合わせて全面的に更新した。選考情報の3つのタブ（選考情報・面接対策資料・振り返り・ナレッジ）、面接振り返りアンケート、類似経歴リサーチ、ブラインドレジュメ収集、想定粗利・内定承諾一覧、目標設定、BP会 会議用レポートなどの説明を追加し、主な画面には画像（説明用の架空のデータ）を付けました。上部の目次から見たい項目へ移動でき、画像はクリックで拡大できます',
       'ミドル/BPがメンバーの候補者の面接対策資料を作った場合の保存先を変えた。作成を押した人のドライブ（「面接対策資料」フォルダ）にすぐ保存され、その候補者の担当者にも編集者として共有されます（通知メールは送りません）。これまでは担当者がKPI管理くんを開くまで保存されず、作った本人は資料を開けませんでした。選考への紐づけは作成者・担当者どちらの画面からでも自動で行われます',
