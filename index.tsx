@@ -4444,6 +4444,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '【不具合修正】選考情報の「面接対策資料」タブで、「生成オプション」のフェーズと「面接振り返りアンケート」の対象の面接の初期値が、選考のフェーズと合っていなかった（2次面接の選考でも「一次面接」になる、アンケートの面接が未選択になるなど）不具合を修正。選考のフェーズ（お見送り・辞退の選考なら最後に受けた面接）が初期値になり、「選考情報」タブでフェーズを変えるとそれに合わせて変わります（自分で選び直した場合はその選択のまま）',
       '選考情報の「面接対策資料」タブの「生成オプション」を見つけやすくした。「面接対策ジェネレーターで作る」ボタンの上に、色付きの帯として表示し、今の設定（フェーズ・ポジション・求人票の有無など）と「設定を開く」ボタンが見えるようにしました',
       '「面接振り返りアンケートの新しい回答」のボタン名を分かりやすくした（「面談ログに取り込む」→「候補者カードに保存」。ジェネレーターにも送る設定の時は「保存してジェネレーターに送る」。「すべて取り込む」→「すべて保存」）。保存先（候補者カードの面談ログと、選考情報の「アンケート結果」）も説明に書きました',
       '面接振り返りアンケートの回答を保存する時に、回答を要約して面接対策ジェネレーターにも企業ナレッジとして送れるようにした。候補者パイプライン上部の「面接振り返りアンケートの新しい回答」にある「保存と同時に、回答を要約して面接対策ジェネレーターにも送る」にチェックが入っていると（初期設定はオン。外すとその端末では次回からもオフ）、「保存してジェネレーターに送る」「すべて保存してジェネレーターに送る」で面談ログへの保存と同時に送信され、その選考は投稿済み（「振り返り完了」の対象）になります。要約は「AIで下書き」と同じ方法で作り、AIが使えない時は回答をそのまま送ります。候補者の氏名・連絡先と、手応え・志望度・他社状況・担当者への伝言などの任意回答は送りません。選考結果は送らないため、結果は従来どおり選考情報から投稿してください。企業がジェネレーターの企業一覧に無い場合は送らずにお知らせします',
@@ -8575,7 +8576,13 @@ const InterviewPrepSection: React.FC<{
     // ミドル/BPがメンバーの候補者を代理で見ている（作った資料は自分のドライブに保存し、担当者に共有する）
     const isTeammateCandidate = !!candidate.ownerEmail && candidate.ownerEmail.toLowerCase() !== (getCurrentSession()?.identity.email || '').toLowerCase();
     const position = (application.position || '').trim();
-    const [genPhase, setGenPhase] = useState(() => gasPhaseForStage(application.stage) || '一次面接');
+    // 生成するフェーズ。選考情報の画面は空の選考（打診）で表示されてから実際の選考が入るため、初期値を
+    // 表示時に1回だけ決めると「一次面接」のままになっていた。担当者が選ぶまでは選考のフェーズに合わせる
+    // （お見送り・辞退など面接以外のステージなら、最後に受けた面接）。
+    const stageGenPhase = gasPhaseForStage(application.stage) || gasPhaseForStage(defaultFeedbackStage(application) || '') || '一次面接';
+    const [genPhaseChoice, setGenPhaseChoice] = useState<{ appId: string; phase: string } | null>(null);
+    const genPhase = genPhaseChoice?.appId === application.id ? genPhaseChoice.phase : stageGenPhase;
+    const setGenPhase = (phase: string) => setGenPhaseChoice({ appId: application.id, phase });
     // 使う面談メモ（既定は全部）。null = まだ触っていない（全部）
     const [excludedMemoIds, setExcludedMemoIds] = useState<Set<string>>(new Set());
     const memoText = useMemo(() => buildInterviewMemoText(allMemos.filter(m => !excludedMemoIds.has(m.id))), [allMemos, excludedMemoIds]);
@@ -8634,7 +8641,10 @@ const InterviewPrepSection: React.FC<{
     const otherDocs = docs.filter(d => !savedDocs.some(s => s.fileId === d.id));
 
     // アンケートで聞く面接の段階。選考のステータス（お見送り等）ではなく、候補者が受けた面接を入れる。
-    const [feedbackStage, setFeedbackStage] = useState<string>(() => defaultFeedbackStage(application) || '');
+    // アンケートで聞く面接。生成するフェーズと同じ理由で、担当者が選ぶまでは選考に合わせる。
+    const [feedbackStageChoice, setFeedbackStageChoice] = useState<{ appId: string; stage: string } | null>(null);
+    const feedbackStage = feedbackStageChoice?.appId === application.id ? feedbackStageChoice.stage : (defaultFeedbackStage(application) || '');
+    const setFeedbackStage = (stage: string) => setFeedbackStageChoice({ appId: application.id, stage });
     const [surveyMessage, setSurveyMessage] = useState('');
     const copyInvite = async (channel: 'email' | 'line') => {
         if (!feedbackStage) return;
