@@ -4717,8 +4717,78 @@ p.memo-content-text {
 }
 
 /* 面接対策資料カードの「生成オプション」（ジェネレーターの生成画面の設定をKPI側で行う） */
-.prep-options { margin-top: 0.75rem; }
-.prep-options > summary .prep-count { font-weight: 500; }
+/* 生成オプション：見逃されないよう、「作る」ボタンの上に色付きの帯として置く */
+.prep-options {
+  margin: 0 0 0.75rem;
+  border: 1px solid #c7d3ea;
+  border-left: 4px solid #3b5bdb;
+  border-radius: 8px;
+  background: #f4f7ff;
+}
+.prep-options[open] { background: #fff; }
+.prep-details.prep-options > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem 0.8rem;
+  list-style: none;
+}
+.prep-options > summary::-webkit-details-marker { display: none; }
+.prep-options > summary:hover { background: #e9efff; border-radius: 0 7px 7px 0; }
+.prep-options-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 7px;
+  background: #3b5bdb;
+  color: #fff;
+}
+.prep-options-head {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.prep-options-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #1a1f2b;
+}
+.prep-options-hint {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #5a6172;
+}
+.prep-options-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.prep-options-chips .prep-chip { border-color: #c7d3ea; color: #2b3a67; }
+.prep-options-toggle {
+  flex-shrink: 0;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid #3b5bdb;
+  border-radius: 999px;
+  background: #fff;
+  color: #3b5bdb;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.prep-options-toggle::before { content: '設定を開く ▾'; }
+.prep-options[open] .prep-options-toggle::before { content: '閉じる ▴'; }
+.prep-options[open] > summary { border-bottom: 1px solid #dfe5f2; }
+@media (max-width: 480px) {
+  .prep-details.prep-options > summary { flex-wrap: wrap; }
+  .prep-options-toggle { margin-left: auto; }
+}
 .prep-options-body { padding: 0.25rem 0.8rem 0.9rem; }
 .prep-options-group {
   margin: 1rem 0 0.5rem;

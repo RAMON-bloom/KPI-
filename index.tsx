@@ -4444,6 +4444,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '選考情報の「面接対策資料」タブの「生成オプション」を見つけやすくした。「面接対策ジェネレーターで作る」ボタンの上に、色付きの帯として表示し、今の設定（フェーズ・ポジション・求人票の有無など）と「設定を開く」ボタンが見えるようにしました',
       '「面接振り返りアンケートの新しい回答」のボタン名を分かりやすくした（「面談ログに取り込む」→「候補者カードに保存」。ジェネレーターにも送る設定の時は「保存してジェネレーターに送る」。「すべて取り込む」→「すべて保存」）。保存先（候補者カードの面談ログと、選考情報の「アンケート結果」）も説明に書きました',
       '面接振り返りアンケートの回答を保存する時に、回答を要約して面接対策ジェネレーターにも企業ナレッジとして送れるようにした。候補者パイプライン上部の「面接振り返りアンケートの新しい回答」にある「保存と同時に、回答を要約して面接対策ジェネレーターにも送る」にチェックが入っていると（初期設定はオン。外すとその端末では次回からもオフ）、「保存してジェネレーターに送る」「すべて保存してジェネレーターに送る」で面談ログへの保存と同時に送信され、その選考は投稿済み（「振り返り完了」の対象）になります。要約は「AIで下書き」と同じ方法で作り、AIが使えない時は回答をそのまま送ります。候補者の氏名・連絡先と、手応え・志望度・他社状況・担当者への伝言などの任意回答は送りません。選考結果は送らないため、結果は従来どおり選考情報から投稿してください。企業がジェネレーターの企業一覧に無い場合は送らずにお知らせします',
       '【不具合修正】選考フェーズを進めた時（打診→書類選考など）の候補者推薦数・通過数などの自動加算が、その日の実績をすでに入力していた場合に、保存の途中で取り消されて反映されないことがあった不具合を修正',
@@ -7914,6 +7915,7 @@ const PREP_ICON_PATHS: Record<string, React.ReactNode> = {
     chat: <path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.3-4.4a8 8 0 1 1 15.2-4.1z" />,
     external: <path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10" />,
     download: <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M4.5 19.5h15" />,
+    sliders: <path d="M4 6.5h9M17 6.5h3M4 12h3M11 12h9M4 17.5h11M19 17.5h1M15 4.5v4M9 10v4M17 15.5v4" />,
 };
 const PrepIcon: React.FC<{ name: keyof typeof PREP_ICON_PATHS; size?: number }> = ({ name, size = 16 }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -8707,23 +8709,18 @@ const InterviewPrepSection: React.FC<{
                         <p className="prep-card-desc">面接対策ジェネレーターで資料を作り、この選考に紐づけます</p>
                     </div>
                 </header>
-                <div className="prep-primary-row">
-                    <button type="button" className="prep-primary-button" onClick={handleOpenGenerator} disabled={!companyName}>
-                        面接対策ジェネレーターで作る
-                    </button>
-                    {isValidUrl && (
-                        <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く<PrepIcon name="external" size={14} /></a>
-                    )}
-                    {urlDocId && (
-                        <a href={prepDocDownloadUrl(urlDocId)} className="prep-secondary-button">Word<PrepIcon name="download" size={14} /></a>
-                    )}
-                </div>
+                {/* 生成オプションは見逃されやすかったため、「作る」ボタンの上に目立つ帯として置く（作る前に確認する順番） */}
                 <details className="prep-details prep-options">
                     <summary>
-                        生成オプション
-                        <span className="prep-count">
-                            {[genPhase, position || 'ポジション指定なし', jdValue.trim() ? '求人票あり' : '求人票なし', customInstruction.trim() ? '追加要望あり' : ''].filter(Boolean).join('・')}
+                        <span className="prep-options-icon" aria-hidden="true"><PrepIcon name="sliders" size={18} /></span>
+                        <span className="prep-options-head">
+                            <span className="prep-options-title">生成オプション<span className="prep-options-hint">作る前にここで設定できます（フェーズ・求人票・面談メモ・レジュメ・汎用ナレッジ・追加要望・敬称）</span></span>
+                            <span className="prep-options-chips">
+                                {[genPhase, position || 'ポジション指定なし', jdValue.trim() ? '求人票あり' : '求人票なし', customInstruction.trim() ? '追加要望あり' : ''].filter(Boolean)
+                                    .map(t => <span key={t} className="prep-chip">{t}</span>)}
+                            </span>
                         </span>
+                        <span className="prep-options-toggle" aria-hidden="true" />
                     </summary>
                     <div className="prep-options-body">
                         <div className="prep-options-group">対象</div>
@@ -8827,6 +8824,17 @@ const InterviewPrepSection: React.FC<{
                         {optionMessage && <p className="prep-status is-active">{optionMessage}</p>}
                     </div>
                 </details>
+                <div className="prep-primary-row">
+                    <button type="button" className="prep-primary-button" onClick={handleOpenGenerator} disabled={!companyName}>
+                        面接対策ジェネレーターで作る
+                    </button>
+                    {isValidUrl && (
+                        <a href={url.trim()} target="_blank" rel="noopener noreferrer" className="prep-secondary-button">資料を開く<PrepIcon name="external" size={14} /></a>
+                    )}
+                    {urlDocId && (
+                        <a href={prepDocDownloadUrl(urlDocId)} className="prep-secondary-button">Word<PrepIcon name="download" size={14} /></a>
+                    )}
+                </div>
                 <p className={`prep-status${copyMessage ? ' is-active' : ''}`}>
                     {copyMessage || (!companyName
                         ? '先に企業名を入力してください。'
