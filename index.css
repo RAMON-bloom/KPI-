@@ -5042,6 +5042,8 @@ p.memo-content-text {
 .jd-bundle-preview { font-size: 0.82rem; white-space: nowrap; }
 /* 右列（選んだ求人票＋送付メッセージ＋テンプレート編集）は画面に追従させ、長くなったら列の中だけスクロールする */
 .jd-bundle-side { position: sticky; top: 0.5rem; max-height: calc(100vh - 1rem); overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+/* 列の高さを超えた時に各枠が縮められて中身がはみ出さないよう、縮めずに列の中をスクロールさせる */
+.jd-bundle-side > * { flex-shrink: 0; }
 @media (max-width: 860px) { .jd-bundle-side { position: static; max-height: none; overflow: visible; } }
 .jd-bundle-selected { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.75rem 1rem; }
 .jd-bundle-selected h3 { margin: 0 0 0.5rem; font-size: 1rem; }
