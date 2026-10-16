@@ -372,6 +372,33 @@ export const draftKnowledgeFromMemo = async (params: {
 };
 
 /**
+ * 取り込んだ面接振り返りアンケートの回答から、ジェネレーターに送る企業ナレッジを作る（取り込みと
+ * 同時に送る用）。「AIで下書き」と同じ要約を使い、AIが使えない時（クレジット切れ・通信エラーなど）は
+ * 任意回答を除いた回答を、氏名・連絡先を伏せてそのまま使う。選考結果は送らない（アンケートは
+ * 候補者の主観で、結果は担当者が手動で投稿する）。
+ */
+export const buildKnowledgeFromFeedback = async (params: {
+  responseText: string;
+  candidateName: string;
+  companyName: string;
+  phase: string;
+}): Promise<{ content: string; interviewer: string; candidateAttr: string; usedAi: boolean }> => {
+  try {
+    const draft = await draftKnowledgeFromMemo({ memoText: params.responseText, candidateName: params.candidateName, companyName: params.companyName, phase: params.phase });
+    if (draft.content.trim()) return { content: draft.content, interviewer: draft.interviewer, candidateAttr: draft.candidateAttr, usedAi: true };
+  } catch (err) {
+    console.warn('アンケート回答のAI要約に失敗したため、回答をそのまま送ります', err);
+  }
+  const publicPart = maskPersonalInfo(params.responseText.split(FEEDBACK_PRIVATE_SECTION_MARK)[0], params.candidateName).trim();
+  return {
+    content: publicPart ? `（候補者の面接振り返りアンケートの回答より）\n\n${publicPart}` : '',
+    interviewer: '',
+    candidateAttr: '',
+    usedAi: false,
+  };
+};
+
+/**
  * kpi-mgrの登録情報から、レジュメ代わりのプロフィール文を作る（面接対策ジェネレーターのレジュメ欄用）。
  * 氏名・電話番号・メールアドレスは入れない。登録が無い項目は省く。何も無ければ空文字。
  */

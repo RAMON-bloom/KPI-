@@ -34,7 +34,7 @@ import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, comput
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
-import { submitKnowledge, draftKnowledgeFromMemo, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
+import { submitKnowledge, draftKnowledgeFromMemo, buildKnowledgeFromFeedback, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
 import { loadLinkableGeneratedDocs } from './services/generatedPrepDocs';
 import { loadPendingGeneratedDocs, saveGeneratedDocToDrive, prepDocOpenUrl, prepDocDownloadUrl, googleDocIdFromUrl, PREP_DOCS_FOLDER_NAME, type SavedPrepDoc } from './services/generatedPrepDocs';
 import { defaultFeedbackTemplate, fillFeedbackTemplate, FEEDBACK_TEMPLATE_FIELDS, type FeedbackInviteTemplates, type FeedbackChannel, type FeedbackOutcome } from './services/interviewFeedbackForm';
@@ -4444,6 +4444,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '面接振り返りアンケートの回答を取り込む時に、回答を要約して面接対策ジェネレーターにも企業ナレッジとして送れるようにした。候補者パイプライン上部の「面接振り返りアンケートの新しい回答」にある「取り込みと同時に、回答を要約して面接対策ジェネレーターにも送る」にチェックが入っていると（初期設定はオン。外すとその端末では次回からもオフ）、「面談ログに取り込む」「すべて取り込む」と同時に送信され、その選考は投稿済み（「振り返り完了」の対象）になります。要約は「AIで下書き」と同じ方法で作り、AIが使えない時は回答をそのまま送ります。候補者の氏名・連絡先と、手応え・志望度・他社状況・担当者への伝言などの任意回答は送りません。選考結果は送らないため、結果は従来どおり選考情報から投稿してください。企業がジェネレーターの企業一覧に無い場合は送らずにお知らせします',
       '【不具合修正】選考フェーズを進めた時（打診→書類選考など）の候補者推薦数・通過数などの自動加算が、その日の実績をすでに入力していた場合に、保存の途中で取り消されて反映されないことがあった不具合を修正',
       '【不具合修正】候補者を最初から「書類選考」（またはそれ以降のフェーズ）で新規登録した場合や、既存の候補者に選考企業を「書類選考」で追加した場合に、個人実績の候補者推薦数に反映されていなかった不具合を修正。打診→書類選考への変更と同じく、その日の推薦数に1回だけ加算されます（同じ候補者がすでに推薦数に計上済みなら、複数社目でも重ねて加算はしません）',
       '【不具合修正】個人実績タブの「表示する媒体」に、所属チームの「使用する媒体」で外している媒体まで表示・集計されていた不具合を修正。選択肢と既定の表示を所属チームの「使用する媒体」に合わせました（チーム未所属・未設定の場合は従来どおりすべての媒体）',
@@ -9397,6 +9398,7 @@ const GeneratedPrepDocsCollector: React.FC<{
     );
 };
 
+const FEEDBACK_ALSO_SUBMIT_KEY = 'kpi-mgr-feedback-also-submit';
 const FeedbackResponsesPanel: React.FC<{
     candidates: Candidate[];
     onSaveCandidate: (candidate: Candidate) => void;
@@ -9446,7 +9448,67 @@ const FeedbackResponsesPanel: React.FC<{
             return [{ ...hit, response: r }];
         });
     }, [responses, candidates]);
-    if (pending.length === 0) return null;
+    const prep = useInterviewPrepData();
+    const candidatesRef = useRef(candidates);
+    candidatesRef.current = candidates;
+    // 取り込みと同時に、回答を要約して面接対策ジェネレーターにも送るか（既定オン。端末ごとに記憶）
+    const [alsoSubmit, setAlsoSubmit] = useState(() => {
+        try { return localStorage.getItem(FEEDBACK_ALSO_SUBMIT_KEY) !== '0'; } catch { return true; }
+    });
+    const changeAlsoSubmit = (on: boolean) => {
+        setAlsoSubmit(on);
+        try { localStorage.setItem(FEEDBACK_ALSO_SUBMIT_KEY, on ? '1' : '0'); } catch { /* 記憶できなくても今回は効く */ }
+    };
+    const [notices, setNotices] = useState<{ id: string; text: string; isError?: boolean }[]>([]);
+    const addNotice = (text: string, isError?: boolean) =>
+        setNotices(prev => [...prev, { id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, text, isError }]);
+    // 送信中の件数。取り込むと一覧からは消えるが、送信が終わって結果を出すまでパネルを残す
+    const [sending, setSending] = useState(0);
+    if (pending.length === 0 && notices.length === 0 && sending === 0) return null;
+
+    /**
+     * 取り込んだ回答から企業ナレッジを作ってジェネレーターに送り、選考に投稿日時を記録する。
+     * 候補者の氏名・連絡先と任意回答（手応え・志望度・他社状況・伝言）は送らない。選考結果も送らない。
+     */
+    const submitToGenerator = async (saved: Candidate, app: CompanyApplication, response: FeedbackResponse): Promise<Candidate | null> => {
+        const label = `${saved.name}さん／${app.companyName} ${response.phase || app.stage}`;
+        const companyId = prep.data ? resolveGeneratorCompanyId(prep.data, app.companyName, app.gasCompanyId) : null;
+        // 企業一覧に無い企業は取り込み先が決まらないため送らない（手動投稿の画面と同じ条件）
+        if (prep.data && !prep.data.sheetsError && prep.data.companies.size > 0 && !companyId) {
+            addNotice(`${label}：企業がジェネレーターの企業一覧に無いため、ジェネレーターには送りませんでした。選考情報の「この選考のナレッジ・結果をジェネレーターに投稿」から企業を選んで投稿してください。`, true);
+            return null;
+        }
+        const phase = gasPhaseForStage(response.phase) || gasPhaseForStage(app.stage) || response.phase || '一次面接';
+        try {
+            const knowledge = await buildKnowledgeFromFeedback({ responseText: response.content, candidateName: saved.name, companyName: app.companyName, phase });
+            if (!knowledge.content.trim()) {
+                addNotice(`${label}：送れる回答（面接の形式・聞かれた質問など）が無かったため、ジェネレーターには送りませんでした。`, true);
+                return null;
+            }
+            await submitKnowledge({
+                companyName: app.companyName, phase, position: app.position || '', result: '', reason: '',
+                interviewer: knowledge.interviewer, content: knowledge.content, candidateAttr: knowledge.candidateAttr,
+                applicationId: app.id, submittedBy: getCurrentSession()?.identity.email || '', gasCompanyId: companyId || app.gasCompanyId,
+            }, prep.data);
+            // 投稿日時を記録する（「振り返り完了」の判定用）。送信の間に候補者が更新されているかもしれない
+            // ので最新の状態に書き足す。取り込んだ面談ログがまだ一覧に反映されていなければ取り込み後の状態を使う。
+            const latest = candidatesRef.current.find(c => c.id === saved.id);
+            const upToDate = !!latest && (saved.memos || []).every(m => (latest.memos || []).some(x => x.id === m.id))
+                && saved.applications.every(a => !a.knowledgeSubmittedAt || latest.applications.some(x => x.id === a.id && x.knowledgeSubmittedAt));
+            const base = upToDate && latest ? latest : saved;
+            const marked = {
+                ...base,
+                applications: base.applications.map(a => a.id === app.id ? { ...a, knowledgeSubmittedAt: new Date().toISOString() } : a),
+            };
+            onSaveCandidate(marked);
+            addNotice(`${label}：回答を${knowledge.usedAi ? 'AIで要約して' : '（AIが使えなかったため要約せずに）'}面接対策ジェネレーターに送りました。すぐに（遅くとも1分ほどで）企業ナレッジに取り込まれます。`);
+            return marked;
+        } catch (err) {
+            console.error('アンケート回答のジェネレーターへの送信に失敗しました', err);
+            addNotice(`${label}：面談ログには取り込みましたが、ジェネレーターへの送信に失敗しました（${err instanceof InterviewPrepAccessError ? err.message : '時間をおいて、選考情報の「この選考のナレッジ・結果をジェネレーターに投稿」から送ってください'}）。`, true);
+            return null;
+        }
+    };
 
     const importItems = (items: typeof pending) => {
         const byCandidate = new Map<string, typeof pending>();
@@ -9467,7 +9529,19 @@ const FeedbackResponsesPanel: React.FC<{
                 logDate: toIsoDate(response.interviewDate) || toIsoDate(response.submittedAt) || undefined,
                 sourceFileId: response.key,
             }));
-            onSaveCandidate({ ...c, memos: [...base, ...added], interviewMemo: undefined, interviewSummary: undefined });
+            const saved: Candidate = { ...c, memos: [...base, ...added], interviewMemo: undefined, interviewSummary: undefined };
+            onSaveCandidate(saved);
+            // 同じ候補者の複数の回答は1件ずつ順に送る（投稿日時の記録が上書きし合わないように）
+            if (alsoSubmit) {
+                setSending(n => n + group.length);
+                void (async () => {
+                    let current = saved;
+                    for (const { app, response } of group) {
+                        current = (await submitToGenerator(current, app, response)) || current;
+                        setSending(n => n - 1);
+                    }
+                })();
+            }
         });
     };
 
@@ -9476,9 +9550,26 @@ const FeedbackResponsesPanel: React.FC<{
             <div className="mail-result-suggestions-header">
                 <strong>面接振り返りアンケートの新しい回答（{pending.length}件）</strong>
                 <span className="interview-prep-hint">取り込むと候補者の面談ログに追加され、企業ナレッジ投稿の「AIで下書き」にも使えます。</span>
-                <button type="button" className="interview-prep-generate-button" onClick={() => importItems(pending)}>すべて取り込む</button>
+                {pending.length > 0 && <button type="button" className="interview-prep-generate-button" onClick={() => importItems(pending)}>すべて取り込む</button>}
                 <button type="button" className="interview-prep-link-button" onClick={load} disabled={loading}>{loading ? '読み込み中...' : '再読み込み'}</button>
             </div>
+            {pending.length > 0 && (
+                <label className="feedback-also-submit">
+                    <input type="checkbox" checked={alsoSubmit} onChange={e => changeAlsoSubmit(e.target.checked)} />
+                    取り込みと同時に、回答を要約して面接対策ジェネレーターにも送る（企業ナレッジとして。候補者の氏名・連絡先と、手応え・志望度・他社状況・伝言などの任意回答は送りません）
+                </label>
+            )}
+            {sending > 0 && <p className="interview-prep-hint">面接対策ジェネレーターに送信中...（{sending}件）</p>}
+            {notices.length > 0 && (
+                <ul className="feedback-submit-notices">
+                    {notices.map(n => (
+                        <li key={n.id} className={n.isError ? 'is-error' : undefined}>
+                            <span>{n.text}</span>
+                            <button type="button" className="interview-prep-link-button" onClick={() => setNotices(prev => prev.filter(x => x.id !== n.id))}>閉じる</button>
+                        </li>
+                    ))}
+                </ul>
+            )}
             <ul>
                 {pending.map(item => (
                     <li key={item.response.key}>

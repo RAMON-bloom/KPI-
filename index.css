@@ -4915,3 +4915,22 @@ p.memo-content-text {
   padding-top: 0.75rem;
   border-top: 1px solid var(--prep-line);
 }
+.feedback-also-submit {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: #495057;
+  cursor: pointer;
+}
+.feedback-also-submit input {
+  margin-top: 0.15rem;
+}
+.mail-result-suggestions ul.feedback-submit-notices li {
+  justify-content: space-between;
+  color: #1e6b3a;
+}
+.mail-result-suggestions ul.feedback-submit-notices li.is-error {
+  color: #b02a37;
+}
