@@ -8790,7 +8790,6 @@ const JdSendComposer: React.FC<{
                     {copied && <span className="jd-bundle-status is-ok">{copied}</span>}
                 </div>
             </div>
-            <textarea className="jd-send-text" rows={channel === 'email' ? 12 : 9} value={text} onChange={e => setDraft(e.target.value)} aria-label="送付メッセージ" />
             <details className="jd-send-info">
                 <summary>企業概要・企業URLを付ける（任意）
                     <span className="field-hint">{companies.filter(c => (info(c).useOverview && info(c).overview.trim()) || (info(c).useUrl && info(c).url.trim())).length} / {companies.length}社に付けています</span>
@@ -8827,6 +8826,7 @@ const JdSendComposer: React.FC<{
                     })}
                 </ul>
             </details>
+            <textarea className="jd-send-text" rows={channel === 'email' ? 12 : 9} value={text} onChange={e => setDraft(e.target.value)} aria-label="送付メッセージ" />
         </section>
     );
 };

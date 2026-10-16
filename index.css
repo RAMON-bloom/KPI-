@@ -5069,7 +5069,7 @@ p.memo-content-text {
 .jd-send-channel button { background: var(--card-bg-color); border: none; padding: 0.4rem 0.9rem; cursor: pointer; color: inherit; font-size: 0.88rem; }
 .jd-send-channel button + button { border-left: 1px solid var(--border-color); }
 .jd-send-channel button.is-active { background: var(--primary-color); color: #fff; }
-.jd-send-info { border: 1px solid #b6d4fe; background: #f5f9ff; border-radius: var(--border-radius); padding: 0.6rem 0.9rem; margin-top: 0.5rem; }
+.jd-send-info { border: 1px solid #b6d4fe; background: #f5f9ff; border-radius: var(--border-radius); padding: 0.6rem 0.9rem; margin-bottom: 0.5rem; }
 .jd-send-info summary { cursor: pointer; font-weight: 600; color: var(--primary-color-dark); }
 .jd-send-info summary .field-hint { font-weight: normal; margin-left: 0.5rem; }
 .jd-send-info-list { list-style: none; margin: 0.75rem 0 0; padding: 0; display: grid; gap: 0.75rem; }
