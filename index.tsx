@@ -4453,7 +4453,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ブラインドレジュメ作成の求人内容に「ドライブの求人票から選ぶ」を追加した。推薦先の企業名に合う求人票（求人票ジェネレーターで作ったもの）を一覧から選ぶと、その本文が求人内容に追記されます（複数選べます）',
       '選考情報の「ポジション」の候補に、求人票ジェネレーターで作った求人票のポジション名も出るようにした。面接対策ジェネレーターに未登録のものを「新規登録」すると、その求人票の本文が求人票として登録されます',
       '面接対策資料の「生成オプション」で、ドライブの求人票（正本）をそのまま使って「面接対策ジェネレーターで作る」を押すと、その求人票が面接対策ジェネレーターにも自動で保存されるようにした（同じ内容が保存済みなら保存しません。企業がジェネレーターの企業一覧に無い場合は保存できない旨を表示します）',
-      '選考情報に「求人票」欄を追加した。企業名・ポジションが合う求人票（ドライブの正本）のリンクを表示し、候補者カードの選考バッジにも「求人票」リンク（PDF）を付けました。正本が無い場合は「求人票ジェネレーターで作る」から作るか、求人票のURLを貼っておけます',
+      '選考情報に「求人票」欄を追加した。企業名・ポジションが合う求人票（ドライブの正本）のリンクを表示し、正本が無い場合は「求人票ジェネレーターで作る」から作るか、求人票のURLを貼っておけます',
       '求人票ジェネレーターがドライブに保存した求人票（正本）を読み込むようにした。面接対策資料の「生成オプション」の求人票に、企業名・ポジションが合う正本の内容が最初から入り、PDF・Googleドキュメントへのリンクも表示されます（面接対策ジェネレーターに保存済みの求人票もある場合は正本を優先し、ボタンで切り替えられます）',
       '【不具合修正】選考情報の「面接対策資料」タブで、「生成オプション」のフェーズと「面接振り返りアンケート」の対象の面接の初期値が、選考のフェーズと合っていなかった（2次面接の選考でも「一次面接」になる、アンケートの面接が未選択になるなど）不具合を修正。選考のフェーズ（お見送り・辞退の選考なら最後に受けた面接）が初期値になり、「選考情報」タブでフェーズを変えるとそれに合わせて変わります（自分で選び直した場合はその選択のまま）',
       '選考情報の「面接対策資料」タブの「生成オプション」を見つけやすくした。「面接対策ジェネレーターで作る」ボタンの上に、色付きの帯として表示し、今の設定（フェーズ・ポジション・求人票の有無など）と「設定を開く」ボタンが見えるようにしました',
@@ -5207,7 +5207,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
         '報酬は「料率(%)」か「固定報酬（万円）」を選びます。内定以降は「オファー金額（円）」を入力でき、料率の選考では想定年収より優先して想定粗利の計算に使われます。',
         '内定確度・入社確度、意思決定時期（見込み月）も入力できます。「内定承諾」に変更して保存すると、その成約を何月扱いにするかを選ぶ確認が出ます。',
         '選考予定日はGoogleタスクに自動で登録されます（お見送り・辞退にすると自動で削除）。面接の予定には面接対策資料へのリンクも添えられます。',
-        '「求人票」欄には、求人票ジェネレーターで作った求人票（ドライブに保存された正本）のうち、企業名・ポジションが合うもののPDF・Googleドキュメント・フォルダへのリンクが出ます。候補者カードの選考バッジにも「求人票」リンクが付きます。正本が無い場合は「求人票ジェネレーターで作る」で作るか、求人票のURLを貼っておくとバッジのリンクに使われます。',
+        '「求人票」欄には、求人票ジェネレーターで作った求人票（ドライブに保存された正本）のうち、企業名・ポジションが合うもののPDF・Googleドキュメント・フォルダへのリンクが出ます。正本が無い場合は「求人票ジェネレーターで作る」で作るか、求人票のURLを貼っておけます。',
         '「推薦文の下書き」の「推薦文を作る」で、その選考の求人票（ドライブの正本、無ければ面接対策ジェネレーターの保存済み・面接対策資料タブで入力したもの）と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。氏名・連絡先はAIに送らず、本文の候補者は「〇〇様」になります。編集して「コピー」で使ってください（下書きは保存されません）。',
       ],
     },
@@ -8373,7 +8373,7 @@ const JobPostingCard: React.FC<{
                         ? '企業名を入力すると、求人票ジェネレーターで作った求人票（ドライブの正本）を探します。'
                         : index.error
                             ? index.error
-                            : !index.data ? '求人票を探しています…' : 'この企業・ポジションの求人票（ドライブの正本）はまだありません。求人票ジェネレーターで作ると、ここと候補者カードに表示されます。'}
+                            : !index.data ? '求人票を探しています…' : 'この企業・ポジションの求人票（ドライブの正本）はまだありません。求人票ジェネレーターで作ると、ここに表示されます。'}
                 </p>
             )}
             {match.others.length > 0 && (
@@ -8384,29 +8384,17 @@ const JobPostingCard: React.FC<{
             )}
             {!best && (
                 <div className="form-group jd-posting-url">
-                    <label htmlFor="jobPostingUrl">求人票のURL（任意 — ドライブの正本が無いとき、候補者カードの「求人票」リンクに使います）</label>
+                    <label htmlFor="jobPostingUrl">求人票のURL（任意 — ドライブの正本が無いときのメモ用）</label>
                     <input type="url" id="jobPostingUrl" value={url} onChange={e => onUrlChange(e.target.value)} placeholder="https://drive.google.com/..." />
+                    {/^https?:\/\//.test(url.trim()) && (
+                        <p className="jd-index-summary"><span className="jd-index-links"><a href={url.trim()} target="_blank" rel="noopener noreferrer">求人票を開く<PrepIcon name="external" size={12} /></a></span></p>
+                    )}
                 </div>
             )}
             <div className="prep-primary-row">
                 <JdGeneratorButton companyName={companyName} position={position} prominent={!best && !!companyName.trim()} />
             </div>
         </>
-    );
-};
-
-/** 候補者カードの選考バッジ内の「求人票」リンク。索引の正本（PDF）を優先し、無ければ手で貼ったURL。 */
-const JobPostingBadgeLink: React.FC<{ app: CompanyApplication }> = ({ app }) => {
-    const index = useJdIndex();
-    const best = index.data ? findMasterJds(index.data, app.companyName, app.position || '').best?.entry : null;
-    const href = (best && jdPdfUrl(best)) || (/^https?:\/\//.test((app.jobPostingUrl || '').trim()) ? app.jobPostingUrl!.trim() : '');
-    if (!href) return null;
-    return (
-        <a href={href} target="_blank" rel="noopener noreferrer" className="interview-prep-badge-link"
-            title={best ? `求人票（${best.position || '企業共通'}・第${best.version}版）を開く` : '求人票を開く'}
-            onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
-            <PrepIcon name="external" size={12} />求人票
-        </a>
     );
 };
 
@@ -13927,7 +13915,6 @@ const ApplicationStageBadge: React.FC<{
   >
     {app.companyName}: {app.stage}
     <SchedulingBallBadgeSuffix app={app} />
-    <JobPostingBadgeLink app={app} />
   </span>
 );
 
