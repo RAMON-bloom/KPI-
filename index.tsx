@@ -975,6 +975,16 @@ function computeStageAdvanceUpdate(
       base = { ...base, exitedFromStage: prevApp.stage, exitedAt: todayStr };
     }
 
+    // 内定承諾にした時点の成約月の確認ポップアップ（DecisionMonthPromptModal）は選考情報の編集
+    // モーダルからの保存でしか出ず、パイプラインのカード上でのステータス変更などでは意思決定時期が
+    // 空のまま（または内定前の見込みの日付のまま）残っていた。想定粗利は意思決定時期で集計月を
+    // 決めるため、年収・オファー金額・料率が入っていても、空ならどの期間にも出ず、古い見込みのまま
+    // なら別の月に計上されていた。ポップアップを経ずに内定承諾になった（＝この保存で意思決定時期が
+    // 変わっていない）場合は、ポップアップの既定（今月の成約）と同じく今日の日付を入れる。
+    if (app.stage === '内定承諾' && (base.expectedDecisionDate || '') === (prevApp.expectedDecisionDate || '')) {
+      base = { ...base, expectedDecisionDate: todayStr };
+    }
+
     // Records this transition on the 選考トラック (see CompanyApplication.stageHistory). An
     // application saved before this feature existed has no history yet — backfill one entry for
     // the stage it was already at (date unknown, shown as "記録開始前") before appending today's
@@ -4451,6 +4461,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-10-17',
+    items: [
+      '【不具合修正】候補者パイプラインのカード上などで選考状況を「内定承諾」に変えた場合に、年収・オファー金額・料率を入力していても想定粗利に反映されないことがある不具合を修正。成約月（意思決定時期）が空のまま残り、どの月にも集計されていなかったのが原因です。今後はどこから内定承諾にしても、意思決定時期が未変更なら今日の日付が入ります。既に成約月が空になっている内定承諾は、内定承諾にした日の月で集計されます（内定前の見込みの日付が残っている場合は、内定承諾一覧から成約月を変更してください）',
+    ],
+  },
   {
     date: '2026-10-16',
     items: [
@@ -11734,6 +11750,16 @@ function isDecisionInPeriod(
         const nowYYYYMM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
         return candidate.expectedDecisionMonth === nowYYYYMM;
     }
+    // 意思決定時期も見込み月も無い内定承諾（成約月の確認ポップアップを経ずに内定承諾にした選考）は、
+    // 選考トラックに記録された内定承諾日で集計する — 以前はここでfalseになり、年収・オファー金額・
+    // 料率が入っていても想定粗利のどの期間にも出なかった。
+    const acceptedOn = application.stage === '内定承諾' ? getAcceptedOnDate(application) : '';
+    if (acceptedOn) {
+        const t = new Date(acceptedOn + 'T00:00:00');
+        if (periodOverride) return t.getTime() >= periodOverride.start.getTime() && t.getTime() <= periodOverride.end.getTime();
+        const now = new Date();
+        return t.getMonth() === now.getMonth() && t.getFullYear() === now.getFullYear();
+    }
     return false;
 }
 
@@ -12233,7 +12259,7 @@ const GrossProfitSummary: React.FC<{
 // 内定承諾の「成約月」— 想定粗利の集計と同じ基準（選考の意思決定時期を優先し、未入力なら
 // 候補者の見込み月）で、どの月の成約として数えられているかを yyyy-mm で返す。どちらも無ければ空文字。
 const getAcceptedDealMonth = (candidate: Candidate, application: CompanyApplication): string =>
-    application.expectedDecisionDate ? application.expectedDecisionDate.slice(0, 7) : (candidate.expectedDecisionMonth || '');
+    application.expectedDecisionDate ? application.expectedDecisionDate.slice(0, 7) : (candidate.expectedDecisionMonth || getAcceptedOnDate(application).slice(0, 7));
 
 // 選考トラック上で最後に「内定承諾」になった日（記録が無ければ空文字）。
 const getAcceptedOnDate = (application: CompanyApplication): string => {
