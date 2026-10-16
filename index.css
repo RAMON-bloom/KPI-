@@ -5040,7 +5040,10 @@ p.memo-content-text {
 .jd-bundle-name span { font-size: 0.88rem; }
 .jd-bundle-name small { color: var(--text-muted-color); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jd-bundle-preview { font-size: 0.82rem; white-space: nowrap; }
-.jd-bundle-selected { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.75rem 1rem; position: sticky; top: 0.5rem; }
+/* 右列（選んだ求人票＋送付メッセージ＋テンプレート編集）は画面に追従させ、長くなったら列の中だけスクロールする */
+.jd-bundle-side { position: sticky; top: 0.5rem; max-height: calc(100vh - 1rem); overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+@media (max-width: 860px) { .jd-bundle-side { position: static; max-height: none; overflow: visible; } }
+.jd-bundle-selected { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.75rem 1rem; }
 .jd-bundle-selected h3 { margin: 0 0 0.5rem; font-size: 1rem; }
 .jd-bundle-selected-list { margin: 0 0 0.75rem; padding-left: 1.4rem; }
 .jd-bundle-selected-list li { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--border-color); }
@@ -5055,13 +5058,16 @@ p.memo-content-text {
 .jd-bundle-status.is-ok { color: #1e6b34; }
 
 /* 「求人票まとめ」の送付メッセージ */
-.jd-send-composer { border-top: 1px solid var(--border-color); margin-top: 1.25rem; padding-top: 1rem; }
+.jd-send-composer { border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.75rem 1rem; }
+.jd-send-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0.25rem 0 0.5rem; }
+.jd-send-toolbar .jd-send-channel { margin: 0; }
+.jd-send-toolbar .jd-send-actions { margin-top: 0; }
 .jd-send-composer h3 { margin: 0 0 0.25rem; font-size: 1rem; }
 .jd-send-channel { display: inline-flex; border: 1px solid var(--border-color); border-radius: var(--border-radius); overflow: hidden; margin: 0.25rem 0 0.75rem; }
 .jd-send-channel button { background: var(--card-bg-color); border: none; padding: 0.4rem 0.9rem; cursor: pointer; color: inherit; font-size: 0.88rem; }
 .jd-send-channel button + button { border-left: 1px solid var(--border-color); }
 .jd-send-channel button.is-active { background: var(--primary-color); color: #fff; }
-.jd-send-info { border: 1px solid #b6d4fe; background: #f5f9ff; border-radius: var(--border-radius); padding: 0.6rem 0.9rem; margin-bottom: 0.75rem; }
+.jd-send-info { border: 1px solid #b6d4fe; background: #f5f9ff; border-radius: var(--border-radius); padding: 0.6rem 0.9rem; margin-top: 0.5rem; }
 .jd-send-info summary { cursor: pointer; font-weight: 600; color: var(--primary-color-dark); }
 .jd-send-info summary .field-hint { font-weight: normal; margin-left: 0.5rem; }
 .jd-send-info-list { list-style: none; margin: 0.75rem 0 0; padding: 0; display: grid; gap: 0.75rem; }
@@ -5072,6 +5078,6 @@ p.memo-content-text {
 .jd-send-info-list textarea, .jd-send-info-list input[type="url"] { width: 100%; box-sizing: border-box; }
 .jd-send-text { width: 100%; box-sizing: border-box; font-family: inherit; line-height: 1.6; }
 .jd-send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.5rem; }
-.jd-send-template-editor { margin-top: 1rem; }
+.jd-send-template-editor { margin-top: 0; }
 .jd-send-composer label.jd-send-check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; width: 100%; }
 .jd-send-composer .jd-send-check input[type="checkbox"] { width: auto; margin: 0; flex: none; }

@@ -8575,33 +8575,36 @@ const JdBundleView: React.FC<{
                             </>
                         )}
                 </section>
-                <section className="jd-bundle-selected">
-                    <h3>選んだ求人票（{selected.length}件）</h3>
-                    {selected.length === 0 ? <p className="field-hint">一覧でチェックした求人票が、この順番でPDFにまとまります。</p> : (
-                        <ol className="jd-bundle-selected-list">
-                            {selected.map((e, i) => (
-                                <li key={e.jdId}>
-                                    <span className="jd-bundle-name"><strong>{e.company}</strong><span>{e.position || '企業共通'}</span></span>
-                                    <span className="jd-bundle-order">
-                                        <button type="button" onClick={() => move(i, -1)} disabled={i === 0 || !!busy} aria-label="上へ" title="上へ">↑</button>
-                                        <button type="button" onClick={() => move(i, 1)} disabled={i === selected.length - 1 || !!busy} aria-label="下へ" title="下へ">↓</button>
-                                        <button type="button" onClick={() => toggle(e)} disabled={!!busy} aria-label="外す" title="外す">×</button>
-                                    </span>
-                                </li>
-                            ))}
-                        </ol>
-                    )}
-                    <label className="jd-bundle-recipient">
-                        候補者名（ファイル名に入ります・任意）
-                        <input type="text" value={recipient} onChange={e => setRecipient(e.target.value)} placeholder="例: 山田" disabled={!!busy} />
-                    </label>
-                    {selected.length > 0 && <p className="field-hint">ファイル名: {fileName()}</p>}
-                </section>
+                <div className="jd-bundle-side">
+                    <section className="jd-bundle-selected">
+                        <h3>選んだ求人票（{selected.length}件）</h3>
+                        {selected.length === 0 ? <p className="field-hint">一覧でチェックした求人票が、この順番でPDFにまとまります。</p> : (
+                            <ol className="jd-bundle-selected-list">
+                                {selected.map((e, i) => (
+                                    <li key={e.jdId}>
+                                        <span className="jd-bundle-name"><strong>{e.company}</strong><span>{e.position || '企業共通'}</span></span>
+                                        <span className="jd-bundle-order">
+                                            <button type="button" onClick={() => move(i, -1)} disabled={i === 0 || !!busy} aria-label="上へ" title="上へ">↑</button>
+                                            <button type="button" onClick={() => move(i, 1)} disabled={i === selected.length - 1 || !!busy} aria-label="下へ" title="下へ">↓</button>
+                                            <button type="button" onClick={() => toggle(e)} disabled={!!busy} aria-label="外す" title="外す">×</button>
+                                        </span>
+                                    </li>
+                                ))}
+                            </ol>
+                        )}
+                        <label className="jd-bundle-recipient">
+                            候補者名（ファイル名に入ります・任意）
+                            <input type="text" value={recipient} onChange={e => setRecipient(e.target.value)} placeholder="例: 山田" disabled={!!busy} />
+                        </label>
+                        {selected.length > 0 && <p className="field-hint">ファイル名: {fileName()}</p>}
+                    </section>
+                    {/* 送付メッセージは選んだ求人票のすぐ下に置き、スクロールせずに作ってコピーできるようにする */}
+                    <JdSendComposer jobs={selected} candidateName={recipient} senderName={senderName}
+                        templates={sendTemplates} onSaveTemplates={onSaveSendTemplates} />
+                    <JdSendTemplateEditor templates={sendTemplates} onSave={onSaveSendTemplates}
+                        sample={{ candidateName: recipient.trim() || '山田', senderName, jobs: selected.length ? selected : [{ company: '株式会社サンプル', position: '法人営業' }], companyInfos: [] }} />
+                </div>
             </div>
-            <JdSendComposer jobs={selected} candidateName={recipient} senderName={senderName}
-                templates={sendTemplates} onSaveTemplates={onSaveSendTemplates} />
-            <JdSendTemplateEditor templates={sendTemplates} onSave={onSaveSendTemplates}
-                sample={{ candidateName: recipient.trim() || '山田', senderName, jobs: selected.length ? selected : [{ company: '株式会社サンプル', position: '法人営業' }], companyInfos: [] }} />
             <div className="blind-resume-page-footer">
                 {busy && <span className="jd-bundle-status">{busy}</span>}
                 {!busy && message && <span className={message.kind === 'error' ? 'jd-bundle-status is-error' : 'jd-bundle-status is-ok'}>{message.text}</span>}
@@ -8677,12 +8680,21 @@ const JdSendComposer: React.FC<{
     return (
         <section className="jd-send-composer">
             <h3>送付メッセージ</h3>
-            <p className="field-hint">候補者に求人票を送るときの文面を作ります。コピーしてメール・LINEなどに貼り付けてください（このアプリからは送信しません）。</p>
-            <div className="jd-send-channel" role="group" aria-label="送り方">
-                {(Object.keys(JD_SEND_CHANNEL_LABELS) as JdSendChannel[]).map(ch => (
-                    <button key={ch} type="button" className={channel === ch ? 'is-active' : ''} onClick={() => setChannel(ch)}>{JD_SEND_CHANNEL_LABELS[ch]}</button>
-                ))}
+            <p className="field-hint">候補者に求人票を送る文面です。コピーしてメール・LINEなどに貼り付けてください（このアプリからは送信しません）。</p>
+            <div className="jd-send-toolbar">
+                <div className="jd-send-channel" role="group" aria-label="送り方">
+                    {(Object.keys(JD_SEND_CHANNEL_LABELS) as JdSendChannel[]).map(ch => (
+                        <button key={ch} type="button" className={channel === ch ? 'is-active' : ''} onClick={() => setChannel(ch)}>{JD_SEND_CHANNEL_LABELS[ch]}</button>
+                    ))}
+                </div>
+                <div className="jd-send-actions">
+                    {channel === 'email' && subject && <button type="button" className="secondary-action-button" onClick={() => copy('件名をコピーしました', subject)}>件名をコピー</button>}
+                    <button type="button" className="secondary-action-button" onClick={() => copy(channel === 'email' && subject ? '本文をコピーしました' : 'コピーしました', body)}>{channel === 'email' && subject ? '本文をコピー' : 'コピー'}</button>
+                    {draft !== null && <button type="button" className="blind-resume-link-button" onClick={() => setDraft(null)}>テンプレートから作り直す</button>}
+                    {copied && <span className="jd-bundle-status is-ok">{copied}</span>}
+                </div>
             </div>
+            <textarea className="jd-send-text" rows={channel === 'email' ? 12 : 9} value={text} onChange={e => setDraft(e.target.value)} aria-label="送付メッセージ" />
             <details className="jd-send-info">
                 <summary>企業概要・企業URLを付ける（任意）
                     <span className="field-hint">{companies.filter(c => (info(c).useOverview && info(c).overview.trim()) || (info(c).useUrl && info(c).url.trim())).length} / {companies.length}社に付けています</span>
@@ -8719,13 +8731,6 @@ const JdSendComposer: React.FC<{
                     })}
                 </ul>
             </details>
-            <textarea className="jd-send-text" rows={channel === 'email' ? 16 : 10} value={text} onChange={e => setDraft(e.target.value)} aria-label="送付メッセージ" />
-            <div className="jd-send-actions">
-                {channel === 'email' && subject && <button type="button" className="secondary-action-button" onClick={() => copy('件名をコピーしました', subject)}>件名をコピー</button>}
-                <button type="button" className="secondary-action-button" onClick={() => copy(channel === 'email' && subject ? '本文をコピーしました' : 'コピーしました', body)}>{channel === 'email' && subject ? '本文をコピー' : 'コピー'}</button>
-                {draft !== null && <button type="button" className="blind-resume-link-button" onClick={() => setDraft(null)}>テンプレートから作り直す</button>}
-                {copied && <span className="jd-bundle-status is-ok">{copied}</span>}
-            </div>
         </section>
     );
 };
