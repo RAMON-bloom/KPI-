@@ -95,7 +95,7 @@ export async function googleFetch(url: string, init: RequestInit = {}): Promise<
 type Row = Record<string, string>;
 
 /** 見出し行の名前で列を引いて、行をオブジェクトにする。 */
-const toRows = (values: string[][] | undefined, columns: string[]): Row[] => {
+export const toRows = (values: string[][] | undefined, columns: string[]): Row[] => {
   if (!values || values.length === 0) return [];
   const header = values[0];
   const idx = columns.map(c => header.indexOf(c));

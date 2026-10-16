@@ -32,6 +32,7 @@ import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQ
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
+import { loadJdIndex, findMasterJds, buildJdText, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, buildKnowledgeFromFeedback, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
@@ -8086,6 +8087,7 @@ const ApplicationModal: React.FC<{
                             value={application.position || ''}
                             onChange={position => setApplication(prev => ({ ...prev, position: position || undefined }))}
                         />
+                        <MasterJdSummary companyName={application.companyName} position={application.position || ''} />
                     </div>
                     <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
@@ -8294,6 +8296,56 @@ const useInterviewPrepData = () => {
     useEffect(() => { load(false); }, [load]);
     return { ...state, reload: () => load(true) };
 };
+
+/** 求人票ジェネレーターの索引（ドライブに保存した求人票の一覧）を読む。10分キャッシュ。読めなければ何も出さない。 */
+const useJdIndex = () => {
+    const [state, setState] = useState<{ data: JdIndexData | null; error: string }>({ data: null, error: '' });
+    useEffect(() => {
+        let alive = true;
+        loadJdIndex()
+            .then(data => { if (alive) setState({ data, error: '' }); })
+            .catch(err => {
+                console.warn('求人票の索引を読み込めませんでした', err);
+                if (alive) setState({ data: null, error: err instanceof InterviewPrepAccessError ? err.message : '求人票の索引を読み込めませんでした。' });
+            });
+        return () => { alive = false; };
+    }, []);
+    return state;
+};
+
+/** 索引の正本1件へのリンク（PDF・Googleドキュメント・フォルダ）。 */
+const MasterJdLinks: React.FC<{ entry: JdIndexEntry; label?: string }> = ({ entry, label }) => (
+    <span className="jd-index-links">
+        {label && <span className="jd-index-label">{label}</span>}
+        {jdPdfUrl(entry) && <a href={jdPdfUrl(entry)} target="_blank" rel="noopener noreferrer">PDF<PrepIcon name="external" size={12} /></a>}
+        {jdDocUrl(entry) && <a href={jdDocUrl(entry)} target="_blank" rel="noopener noreferrer">ドキュメント<PrepIcon name="external" size={12} /></a>}
+        {jdFolderUrl(entry) && <a href={jdFolderUrl(entry)} target="_blank" rel="noopener noreferrer">フォルダ<PrepIcon name="external" size={12} /></a>}
+        <span className="jd-index-meta">第{entry.version}版{entry.updatedAt ? `・${entry.updatedAt.slice(0, 10)}更新` : ''}</span>
+    </span>
+);
+
+/** 選考情報の「ポジション」欄の下に出す、ドライブに保存された求人票（正本）のリンク。 */
+const MasterJdSummary: React.FC<{ companyName: string; position: string }> = ({ companyName, position }) => {
+    const index = useJdIndex();
+    if (!index.data || !companyName.trim()) return null;
+    const { best, others } = findMasterJds(index.data, companyName, position);
+    if (!best && others.length === 0) return null;
+    return (
+        <div className="jd-index-summary">
+            {best && <MasterJdLinks entry={best.entry} label={`求人票: ${best.entry.position || '企業共通'}`} />}
+            {others.length > 0 && (
+                <details className="jd-index-others">
+                    <summary>{best ? `この企業のほかの求人票（${others.length}件）` : `この企業の求人票（${others.length}件）`}</summary>
+                    {others.map(e => <div key={e.jdId}><MasterJdLinks entry={e} label={e.position || '企業共通'} /></div>)}
+                </details>
+            )}
+        </div>
+    );
+};
+
+// 求人票の初期値に、ドライブの正本（求人票ジェネレーターの索引）と面接対策ジェネレーターの jds の
+// 両方があるとき、どちらを先に使うか。担当者は画面で切り替えられる。
+const PREFER_DRIVE_MASTER_JD = true;
 
 // ジェネレーターの生成画面の「選考フェーズ」の基本の選択肢（ナレッジ未登録でも選べるもの）
 const GENERATOR_GEN_PHASES = ['書類選考', 'カジュアル面談', '一次面接', '二次面接', '三次面接', '最終面接', '適性検査', 'ケース面接', 'リファレンス', 'オファー面談'];
@@ -8588,11 +8640,24 @@ const InterviewPrepSection: React.FC<{
     const memoText = useMemo(() => buildInterviewMemoText(allMemos.filter(m => !excludedMemoIds.has(m.id))), [allMemos, excludedMemoIds]);
     // 求人票。企業×ポジションで保存済みのものを初期値にし、担当者が書き換えたらそれを使う
     const savedJd = prep.data && companyName ? getSavedJd(prep.data, companyName, position, application.gasCompanyId) : null;
-    const [jdText, setJdText] = useState<string | null>(null);   // null = 保存済みのまま
-    const jdValue = jdText ?? (savedJd?.content || '');
+    const savedJdContent = savedJd?.content?.trim() ? savedJd.content : '';
+    // ドライブに保存された正本（求人票ジェネレーターの索引）。ポジションが一致するもの（またはその企業に1つだけ）を初期値に使える
+    const jdIndex = useJdIndex();
+    const masterMatch = jdIndex.data && companyName ? findMasterJds(jdIndex.data, companyName, position) : { best: null, others: [] };
+    const masterJd = masterMatch.best?.entry || null;
+    const masterJdContent = masterJd ? buildJdText(masterJd.data) : '';
+    const [jdSourceChoice, setJdSourceChoice] = useState<'master' | 'saved' | null>(null);
+    const jdSource: 'master' | 'saved' | '' = masterJdContent && savedJdContent
+        ? (jdSourceChoice ?? (PREFER_DRIVE_MASTER_JD ? 'master' : 'saved'))
+        : masterJdContent ? 'master' : savedJdContent ? 'saved' : '';
+    const baseJdContent = jdSource === 'master' ? masterJdContent : jdSource === 'saved' ? savedJdContent : '';
+    const [jdText, setJdText] = useState<string | null>(null);   // null = 初期値（正本または保存済み）のまま
+    const jdValue = jdText ?? baseJdContent;
     const [saveJd, setSaveJd] = useState(true);
-    const jdChanged = jdText !== null && jdText.trim() !== (savedJd?.content || '').trim();
-    useEffect(() => { setJdText(null); }, [companyName, position]);
+    const jdChanged = jdText !== null && jdText.trim() !== baseJdContent.trim();
+    // ジェネレーターに渡す求人票。jds の保存済みをそのまま使うときはジェネレーターが自分で読むので送らない
+    const jdContentForHandoff = jdChanged || jdSource === 'master' ? jdValue : '';
+    useEffect(() => { setJdText(null); setJdSourceChoice(null); }, [companyName, position]);
     // レジュメ：KPIの登録情報（プロフィール）＋添付ファイルから書き起こした本文
     const [useProfile, setUseProfile] = useState(true);
     const [resumeExtra, setResumeExtra] = useState('');
@@ -8618,7 +8683,7 @@ const InterviewPrepSection: React.FC<{
             }
             const joined = texts.filter(Boolean).join('\n\n');
             if (!joined) return;
-            if (kind === 'jd') setJdText(prev => [((prev ?? savedJd?.content) || '').trim(), joined].filter(Boolean).join('\n\n'));
+            if (kind === 'jd') setJdText(prev => [(prev ?? baseJdContent).trim(), joined].filter(Boolean).join('\n\n'));
             else setResumeExtra(prev => [prev.trim(), joined].filter(Boolean).join('\n\n'));
             setOptionMessage(`${files.length}件のファイルを読み取りました。内容を確認してください。`);
         } catch (err) {
@@ -8686,7 +8751,7 @@ const InterviewPrepSection: React.FC<{
                 applicationId: application.id, gasCompanyId: companyId || application.gasCompanyId,
                 companyName: application.companyName, phase: genPhase, memoText,
                 resumeText: [useProfile ? buildCandidateProfileText(candidate) : '', resumeExtra.trim()].filter(Boolean).join('\n\n'),
-                position, jdContent: jdChanged ? jdValue : '',
+                position, jdContent: jdContentForHandoff,
                 generalKeys: generalKeys, customInstruction, honorific,
                 // メンバーの候補者（ミドル/BPの代理）なら、作った資料をその担当者にも共有する
                 ownerEmail: candidate.ownerEmail && candidate.ownerEmail.toLowerCase() !== createdBy.toLowerCase() ? candidate.ownerEmail : '',
@@ -8758,8 +8823,24 @@ const InterviewPrepSection: React.FC<{
                         <textarea rows={6} value={jdValue} onChange={e => setJdText(e.target.value)}
                             placeholder="募集要項・職務内容・必須スキルなどを貼り付け（空欄でも生成できます）" />
                         <p className="prep-note">
-                            {savedJd ? `ジェネレーターに保存済みの求人票（${companyName}${position ? `・${position}` : '・企業共通'}）を読み込んでいます。` : 'この企業・ポジションの求人票はまだ保存されていません。'}
+                            {jdSource === 'master' && masterJd
+                                ? `ドライブに保存された求人票の正本（${masterJd.company}・${masterJd.position || '企業共通'}、第${masterJd.version}版）を読み込んでいます。`
+                                : jdSource === 'saved'
+                                    ? `ジェネレーターに保存済みの求人票（${companyName}${position ? `・${position}` : '・企業共通'}）を読み込んでいます。`
+                                    : 'この企業・ポジションの求人票はまだ保存されていません。'}
+                            {masterJdContent && savedJdContent && (
+                                <button type="button" className="interview-prep-link-button"
+                                    onClick={() => { setJdSourceChoice(jdSource === 'master' ? 'saved' : 'master'); setJdText(null); }}>
+                                    {jdSource === 'master' ? 'ジェネレーターの保存済みに切り替える' : 'ドライブの正本に切り替える'}
+                                </button>
+                            )}
                         </p>
+                        {masterJd && <p className="prep-note"><MasterJdLinks entry={masterJd} label="正本を開く:" /></p>}
+                        {!masterJd && masterMatch.others.length > 0 && (
+                            <p className="prep-note">
+                                ポジションが一致する正本はありません。この企業の求人票: {masterMatch.others.map(e => <MasterJdLinks key={e.jdId} entry={e} label={e.position || '企業共通'} />)}
+                            </p>
+                        )}
                         {jdChanged && (
                             <label className="prep-check">
                                 <input type="checkbox" checked={saveJd && !!companyId} disabled={!companyId} onChange={e => setSaveJd(e.target.checked)} />

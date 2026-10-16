@@ -4890,6 +4890,16 @@ p.memo-content-text {
 .prep-field--inline .prep-field-label { margin: 0; }
 .prep-field--inline select { width: auto; min-width: 6rem; }
 .position-input input { width: 100%; }
+/* ドライブに保存された求人票（求人票ジェネレーターの正本）へのリンク */
+.jd-index-summary { margin-top: 0.4rem; font-size: 0.78rem; color: #6c757d; }
+.jd-index-links { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.6rem; margin-right: 0.6rem; }
+.jd-index-label { font-weight: 600; color: #495057; }
+.jd-index-links a { display: inline-flex; align-items: center; gap: 0.15rem; color: #1a73e8; text-decoration: none; }
+.jd-index-links a:hover { text-decoration: underline; }
+.jd-index-meta { color: #8a929b; }
+.jd-index-others { margin-top: 0.25rem; }
+.jd-index-others summary { cursor: pointer; }
+.jd-index-others > div { margin: 0.2rem 0 0 0.8rem; }
 .prep-options-body select {
   width: 100%;
   padding: 0.5rem;
