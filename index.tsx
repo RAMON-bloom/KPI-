@@ -4431,6 +4431,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '【不具合修正】個人実績タブの「表示する媒体」に、所属チームの「使用する媒体」で外している媒体まで表示・集計されていた不具合を修正。選択肢と既定の表示を所属チームの「使用する媒体」に合わせました（チーム未所属・未設定の場合は従来どおりすべての媒体）',
       '「使い方」ガイドを最新の機能に合わせて全面的に更新した。選考情報の3つのタブ（選考情報・面接対策資料・振り返り・ナレッジ）、面接振り返りアンケート、類似経歴リサーチ、ブラインドレジュメ収集、想定粗利・内定承諾一覧、目標設定、BP会 会議用レポートなどの説明を追加し、主な画面には画像（説明用の架空のデータ）を付けました。上部の目次から見たい項目へ移動でき、画像はクリックで拡大できます',
       'ミドル/BPがメンバーの候補者の面接対策資料を作った場合の保存先を変えた。作成を押した人のドライブ（「面接対策資料」フォルダ）にすぐ保存され、その候補者の担当者にも編集者として共有されます（通知メールは送りません）。これまでは担当者がKPI管理くんを開くまで保存されず、作った本人は資料を開けませんでした。選考への紐づけは作成者・担当者どちらの画面からでも自動で行われます',
       '選考情報の編集画面を、縦に長くならないようタブで切り替える形にした。「選考情報」（企業・次アクション・進捗状況・報酬・確度・メモ）「面接対策資料」「振り返り・ナレッジ」（面接振り返りアンケート・アンケート結果・企業ナレッジ）の3つのタブに分かれています。タブを切り替えても入力中の内容は消えず、最後の「保存」でまとめて保存されます',
@@ -19467,18 +19468,27 @@ const App: React.FC = () => {
   const isMediaEditable = currentIdentity?.email === MEDIA_ADMIN_EMAIL;
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
   const defaultKpiTargets = useMemo(() => buildDefaultKpiTargets(allMedia), [allMedia]);
-  // 個人実績タブで目標入力・進捗確認に使う媒体 — 本人が「表示する媒体」で選んだものだけ
-  // （UserData.personalMediaIds）。未設定なら従来通りactiveMediaすべて。チームの「使用する媒体」
-  // とは独立した設定で、全ユーザー/チーム別タブや実績入力画面には影響しない。
+  // 個人実績タブの「表示する媒体」の選択肢 — 本人が所属するチームの「使用する媒体」
+  // （Team.mediaIds）。実績入力画面（entryActiveMedia）と同じく先頭のチームを採用し、未所属・
+  // 絞り込み未設定ならactiveMediaすべて。チームで使わない媒体が個人実績タブに出ないようにする。
+  const personalMediaOptions = useMemo(() => {
+    const email = currentIdentity?.email;
+    const myTeam = email ? teams.find(t => t.memberEmails.includes(email)) : undefined;
+    if (!myTeam?.mediaIds) return activeMedia;
+    return activeMedia.filter(m => myTeam.mediaIds!.includes(m.id));
+  }, [activeMedia, teams, currentIdentity]);
+  // 個人実績タブで目標入力・進捗確認に使う媒体 — 上の選択肢のうち、本人が「表示する媒体」で
+  // 選んだものだけ（UserData.personalMediaIds）。未設定なら選択肢すべて。全ユーザー/チーム別タブや
+  // 実績入力画面には影響しない。
   const personalMedia = useMemo(() => {
     const ids = currentUserData?.personalMediaIds;
-    if (!ids) return activeMedia;
-    return activeMedia.filter(m => ids.includes(m.id));
-  }, [activeMedia, currentUserData?.personalMediaIds]);
+    if (!ids) return personalMediaOptions;
+    return personalMediaOptions.filter(m => ids.includes(m.id));
+  }, [personalMediaOptions, currentUserData?.personalMediaIds]);
   const handleTogglePersonalMedia = (mediaId: string) => {
     setCurrentUserData(prev => {
       if (!prev) return prev;
-      const current = prev.personalMediaIds ?? activeMedia.map(m => m.id);
+      const current = prev.personalMediaIds ?? personalMediaOptions.map(m => m.id);
       const next = current.includes(mediaId) ? current.filter(id => id !== mediaId) : [...current, mediaId];
       return { ...prev, personalMediaIds: next };
     });
@@ -22569,7 +22579,7 @@ const App: React.FC = () => {
                     {/* ① 表示する媒体 — 個人実績タブの媒体別の表示と、下の目標入力欄の対象を決める */}
                     <h3 className="sub-section-title">表示する媒体</h3>
                     <div className="pipeline-sort-controls">
-                      {activeMedia.map(m => (
+                      {personalMediaOptions.map(m => (
                         <button
                           key={m.id}
                           type="button"
@@ -22585,7 +22595,7 @@ const App: React.FC = () => {
                       )}
                     </div>
                     <p className="gross-profit-note">
-                      選んだ媒体だけが進捗表示と目標入力に出ます（あなただけの設定。外しても入力済みの実績・目標は消えません）。
+                      選んだ媒体だけが進捗表示と目標入力に出ます（あなただけの設定。外しても入力済みの実績・目標は消えません）。選択肢は所属チームの「使用する媒体」です。
                     </p>
 
                     {/* ② 期間ごとの目標 — タブで1つずつ表示 */}
