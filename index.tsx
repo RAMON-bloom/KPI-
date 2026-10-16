@@ -33,7 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
 import { generateRecommendationDraft } from './services/recommendationDraft';
-import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, JD_GENERATOR_URL, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
+import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, JD_GENERATOR_URL, deleteJdEntry, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
 import { buildJdSendText, defaultJdSendTemplate, fillJdSendTemplate, splitEmailSubject, researchCompanyBrief, JD_SEND_CHANNEL_LABELS, JD_SEND_TEMPLATE_FIELDS, type JdSendChannel, type JdSendTemplates, type JdSendParams } from './services/jdSendMessage';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
@@ -4454,6 +4454,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '「求人票出力」の一覧から求人票を削除できるようにした（同じ求人をジェネレーターで重複して作ってしまった時など）。ドライブのPDF・Googleドキュメントはゴミ箱に移り（30日以内なら共有ドライブのゴミ箱から復元できます）、全員の一覧・選考情報から表示されなくなります',
       '「求人票出力」に「求人票ジェネレーターで新規作成」を追加した。押すと求人票ジェネレーターが別ウィンドウで開き、解析・保存した求人票は自動でこの画面の一覧に「新規」として追加され、選択されます（ジェネレーターのウィンドウを閉じるまで、約20秒ごとと、この画面に戻った時に確認します）',
       '「求人票出力」に「送付メッセージ」を追加した。選んだ求人票を候補者に送るメール・メッセージ（LINE・チャット）の文面を作ってコピーできます。企業ごとに、Web検索で調べた企業概要と企業URLを任意で付けられます（内容は画面で直せます）。文面のテンプレートは「送付メッセージのテンプレートを編集」から自分用に書き換えられます',
       'ヘッダーに「求人票出力」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
@@ -8469,10 +8470,11 @@ const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick:
  * ロジック本体は services/jdBundle.ts。ドライブには保存しない。
  */
 const JdBundleView: React.FC<{
+    userEmail: string;
     senderName: string;
     sendTemplates: JdSendTemplates;
     onSaveSendTemplates: (templates: JdSendTemplates) => void;
-}> = ({ senderName, sendTemplates, onSaveSendTemplates }) => {
+}> = ({ userEmail, senderName, sendTemplates, onSaveSendTemplates }) => {
     const [index, setIndex] = useState<{ data: JdIndexData | null; error: string; loading: boolean }>({ data: null, error: '', loading: true });
     const [query, setQuery] = useState('');
     const [selected, setSelected] = useState<JdIndexEntry[]>([]);
@@ -8539,6 +8541,30 @@ const JdBundleView: React.FC<{
         window.addEventListener('focus', onFocus);
         return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
     }, [watching]);
+
+    // 重複して作った求人票などを削除する（ドライブはゴミ箱へ、索引は status=deleted。services/jdIndex.ts deleteJdEntry）
+    const [deletingId, setDeletingId] = useState('');
+    const handleDelete = async (e: JdIndexEntry) => {
+        const label = `${e.company}・${e.position || '企業共通'}`;
+        if (!window.confirm(`「${label}」の求人票を削除しますか？
+
+・ドライブのPDF・Googleドキュメント（以前の版を含む）はゴミ箱に移ります（30日以内なら共有ドライブのゴミ箱から復元できます）。
+・全員の一覧・選考情報から表示されなくなります。`)) return;
+        setDeletingId(e.jdId);
+        setMessage(null);
+        try {
+            await deleteJdEntry(e, userEmail);
+            setSelected(prev => prev.filter(s => s.jdId !== e.jdId));
+            setFreshIds(prev => { const next = new Set(prev); next.delete(e.jdId); return next; });
+            await load(true, true);
+            setMessage({ kind: 'ok', text: `「${label}」の求人票を削除しました。` });
+        } catch (err) {
+            setMessage({ kind: 'error', text: err instanceof Error ? err.message : '削除に失敗しました。' });
+            load(true, true);
+        } finally {
+            setDeletingId('');
+        }
+    };
 
     // 新しく作った求人票を先頭に出す
     const all = index.data ? bundlableEntries(index.data).sort((a, b) => Number(freshIds.has(b.jdId)) - Number(freshIds.has(a.jdId))) : [];
@@ -8632,7 +8658,13 @@ const JdBundleView: React.FC<{
                                                     )}
                                                 </span>
                                             </label>
-                                            <a href={jdPdfUrl(e)} target="_blank" rel="noopener noreferrer" className="jd-bundle-preview">PDFを見る</a>
+                                            <span className="jd-bundle-row-actions">
+                                                <a href={jdPdfUrl(e)} target="_blank" rel="noopener noreferrer" className="jd-bundle-preview">PDFを見る</a>
+                                                <button type="button" className="jd-bundle-delete" onClick={() => handleDelete(e)} disabled={!!busy || !!deletingId}
+                                                    title="重複して作った求人票などを削除します（ドライブのファイルはゴミ箱へ）">
+                                                    {deletingId === e.jdId ? '削除中…' : '削除'}
+                                                </button>
+                                            </span>
                                         </li>
                                     ))}
                                 </ul>
@@ -23967,7 +23999,7 @@ const App: React.FC = () => {
           </div>
         )}
         {view === 'jd_bundle' && currentIdentity && (
-          <JdBundleView senderName={currentUserData?.displayName || currentIdentity.name || ''}
+          <JdBundleView userEmail={currentIdentity.email} senderName={currentUserData?.displayName || currentIdentity.name || ''}
             sendTemplates={currentUserData?.jdSendTemplates || {}} onSaveSendTemplates={handleSaveJdSendTemplates} />
         )}
         {view === 'pipeline' && (

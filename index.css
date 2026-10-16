@@ -5089,3 +5089,6 @@ p.memo-content-text {
 .jd-bundle-fresh { display: inline-block; margin-left: 0.4rem; padding: 0 0.4rem; border-radius: 999px; background: #e3f4e6; color: #1e6b34; font-size: 0.72rem; font-weight: 600; vertical-align: middle; }
 .jd-bundle-generator-button { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.5rem 0.9rem; border: none; border-radius: var(--border-radius); background: #1e6b34; color: #fff; font-weight: 600; font-size: 0.9rem; cursor: pointer; }
 .jd-bundle-generator-button:hover { background: #17552a; }
+.jd-bundle-row-actions { display: inline-flex; align-items: center; gap: 0.6rem; flex: none; }
+.jd-bundle-delete { background: none; border: none; padding: 0; color: #b42318; font-size: 0.82rem; cursor: pointer; text-decoration: underline; }
+.jd-bundle-delete:disabled { color: var(--text-muted-color); cursor: default; }

@@ -4,7 +4,7 @@
 // 1_メインフォルダ/3_企業側/zzz_求人票ジェネレータストレージ/<企業>/<ポジション>/ に
 // PDFとGoogleドキュメントで保存し、同じフォルダ直下の「求人票_索引」（シート jobs）に1行記録する。
 // KPI管理くんはドライブのファイル名を探しに行かず、この索引だけを読む（2026-10-16 合意の設計）。
-// 書き込みは一切しない。列は見出し名で引くので、列の追加・並び替えには耐える。
+// 書き込みは「求人票出力」からの削除（deleteJdEntry、末尾）だけ。列は見出し名で引くので、列の追加・並び替えには耐える。
 //
 // 索引の position は求人票の解析結果（求人タイトル）なので、KPIの「選考ポジション」
 // （面接対策ジェネレーターの企業ナレッジ・jds の名前）とは一致しないことがある。突き合わせはゆるめにする。
@@ -181,3 +181,68 @@ export const buildJdText = (data: JdData): string =>
       .map(([label, v]) => (v.includes('\n') ? `${label}:\n${v}` : `${label}: ${v}`));
     return lines.length ? `【${sec.title}】\n${lines.join('\n')}` : '';
   }).filter(Boolean).join('\n\n');
+
+// --- 削除（求人票出力の一覧から） ---
+//
+// 索引は「読むだけ」が原則だが、同じ求人をジェネレーターで重複して作ってしまった時に片付けられるよう、
+// 削除だけはKPI管理くんから行う（2026-10-16 ユーザー依頼）。完全には消さない:
+// ・ドライブ: その求人票のポジションフォルダ（PDF・ドキュメント・履歴が入っている）をゴミ箱へ移す。
+//   共有ドライブのゴミ箱から30日以内なら復元できる。ジェネレーターは企業フォルダ直下のフォルダを名前で
+//   探して再利用するため、ゴミ箱のフォルダが再利用されないよう、名前の後ろに「（削除 日時）」を付けてから移す。
+// ・索引: 行は残して status を deleted にする（KPI管理くんは status=active だけを使う）。
+// ジェネレーターは folder_id で正本の行を探すので、同じ求人を作り直すと新しいフォルダ・新しい行になる。
+
+const columnLetter = (i: number): string => {
+  let s = '';
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
+};
+
+const driveFile = (id: string) => `https://www.googleapis.com/drive/v3/files/${id}?supportsAllDrives=true`;
+
+/** 求人票を削除する（ドライブはゴミ箱へ、索引は status=deleted）。 */
+export const deleteJdEntry = async (entry: JdIndexEntry, userEmail: string): Promise<void> => {
+  const stamp = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).replace(/[-:]/g, '').replace(' ', '_').slice(0, 13);
+  const permission = (err: unknown) => err instanceof InterviewPrepAccessError
+    ? new Error('求人票の保存先（共有ドライブ）を編集する権限がないため、削除できませんでした。')
+    : err;
+  try {
+    if (entry.folderId) {
+      const folder = await googleFetch(`${driveFile(entry.folderId)}&fields=name,trashed`);
+      if (!folder.trashed) {
+        await googleFetch(driveFile(entry.folderId), {
+          method: 'PATCH',
+          body: JSON.stringify({ name: `${folder.name}（削除 ${stamp}）`, trashed: true }),
+        });
+      }
+    } else {
+      for (const id of [entry.pdfFileId, entry.docFileId].filter(Boolean)) {
+        await googleFetch(driveFile(id), { method: 'PATCH', body: JSON.stringify({ trashed: true }) });
+      }
+    }
+  } catch (err) {
+    throw permission(err);
+  }
+
+  // 索引の行を探して status を deleted に（行番号は削除の直前に読み直して決める）
+  try {
+    const json = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${JD_INDEX_SPREADSHEET_ID}/values/${encodeURIComponent(`${JD_INDEX_SHEET}!A:Z`)}`);
+    const values: string[][] = json.values || [];
+    const header = values[0] || [];
+    const idCol = header.indexOf('jd_id');
+    const rowIndex = values.findIndex((r, i) => i > 0 && r[idCol] === entry.jdId);
+    if (idCol < 0 || rowIndex < 0) throw new Error('求人票の索引に、この求人票の行が見つかりませんでした。');
+    const updates = ([['status', 'deleted'], ['updated_at', new Date().toISOString()], ['updated_by', userEmail]] as const)
+      .map(([col, value]) => ({ col: header.indexOf(col), value }))
+      .filter(u => u.col >= 0)
+      .map(u => ({ range: `${JD_INDEX_SHEET}!${columnLetter(u.col)}${rowIndex + 1}`, values: [[u.value]] }));
+    await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${JD_INDEX_SPREADSHEET_ID}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'RAW', data: updates }),
+    });
+  } catch (err) {
+    if (err instanceof InterviewPrepAccessError) throw new Error('ドライブのファイルはゴミ箱に移しましたが、求人票の索引を書き換える権限がなかったため、一覧には残ります。');
+    throw err;
+  }
+  cache = null;
+};
