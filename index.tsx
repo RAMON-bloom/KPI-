@@ -35,6 +35,7 @@ import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './se
 import { generateRecommendationDraft } from './services/recommendationDraft';
 import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
+import { buildJdSendText, defaultJdSendTemplate, fillJdSendTemplate, splitEmailSubject, researchCompanyBrief, JD_SEND_CHANNEL_LABELS, JD_SEND_TEMPLATE_FIELDS, type JdSendChannel, type JdSendTemplates, type JdSendParams } from './services/jdSendMessage';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, buildKnowledgeFromFeedback, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
@@ -1213,6 +1214,9 @@ interface UserData {
   // 面接振り返りアンケートの案内文（メール/LINE × 選考中・お見送り・辞退）を、このユーザー用に
   // 書き換えたもの。未設定の組み合わせは既定の文面（services/interviewFeedbackForm.ts）を使う。
   feedbackInviteTemplates?: FeedbackInviteTemplates;
+  // 「求人票まとめ」の送付メッセージ（メール/メッセージ）を、このユーザー用に書き換えたもの。
+  // 未設定の送り方は既定の文面（services/jdSendMessage.ts）を使う。
+  jdSendTemplates?: JdSendTemplates;
   // 共有チーム設定（kpi-manager-teams.json）の控え。管理者（TEAMS_ADMIN_EMAIL）本人の
   // UserDataにだけ、正常に読み込めた／保存できたチーム設定を新しい順に最大
   // TEAMS_CONFIG_BACKUP_LIMIT件まで自動で残す。共有ファイルが不具合や誤操作で消えた・
@@ -4450,6 +4454,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '「求人票まとめ」に「送付メッセージ」を追加した。選んだ求人票を候補者に送るメール・メッセージ（LINE・チャット）の文面を作ってコピーできます。企業ごとに、Web検索で調べた企業概要と企業URLを任意で付けられます（内容は画面で直せます）。文面のテンプレートは「送付メッセージのテンプレートを編集」から自分用に書き換えられます',
       'ヘッダーに「求人票まとめ」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
       '「使い方」ガイドに「求人票ジェネレーターとの連携」を追加した（求人票の保存先、KPI管理くんのどこに求人票が出るか、表示されない時の確認点など）',
       '選考情報に「推薦文の下書き」を追加した。「推薦文を作る」を押すと、その選考の求人票と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。編集して「コピー」で使えます。氏名・電話番号・メールアドレスはAIに送らず、本文の候補者は「〇〇様」と書かれます',
@@ -8462,7 +8467,11 @@ const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick:
  * 選んだ順に結合して1つのPDFとしてダウンロードする（候補者に複数の求人をまとめて渡す用）。
  * ロジック本体は services/jdBundle.ts。ドライブには保存しない。
  */
-const JdBundleView: React.FC = () => {
+const JdBundleView: React.FC<{
+    senderName: string;
+    sendTemplates: JdSendTemplates;
+    onSaveSendTemplates: (templates: JdSendTemplates) => void;
+}> = ({ senderName, sendTemplates, onSaveSendTemplates }) => {
     const [index, setIndex] = useState<{ data: JdIndexData | null; error: string; loading: boolean }>({ data: null, error: '', loading: true });
     const [query, setQuery] = useState('');
     const [selected, setSelected] = useState<JdIndexEntry[]>([]);
@@ -8589,6 +8598,10 @@ const JdBundleView: React.FC = () => {
                     {selected.length > 0 && <p className="field-hint">ファイル名: {fileName()}</p>}
                 </section>
             </div>
+            <JdSendComposer jobs={selected} candidateName={recipient} senderName={senderName}
+                templates={sendTemplates} onSaveTemplates={onSaveSendTemplates} />
+            <JdSendTemplateEditor templates={sendTemplates} onSave={onSaveSendTemplates}
+                sample={{ candidateName: recipient.trim() || '山田', senderName, jobs: selected.length ? selected : [{ company: '株式会社サンプル', position: '法人営業' }], companyInfos: [] }} />
             <div className="blind-resume-page-footer">
                 {busy && <span className="jd-bundle-status">{busy}</span>}
                 {!busy && message && <span className={message.kind === 'error' ? 'jd-bundle-status is-error' : 'jd-bundle-status is-ok'}>{message.text}</span>}
@@ -8598,6 +8611,201 @@ const JdBundleView: React.FC = () => {
                 </button>
             </div>
         </div>
+    );
+};
+
+/**
+ * 「求人票まとめ」の送付メッセージ。選んだ求人票を候補者に送るメール／メッセージの文面を、自分用の
+ * テンプレート（UserData.jdSendTemplates）から作ってコピーできるようにする。企業ごとに、Web検索で
+ * 調べた企業概要・企業URLを任意で付けられる（検索結果は画面で直せる）。文面は送らずコピーするだけ。
+ */
+interface JdSendInfoState { overview: string; url: string; useOverview: boolean; useUrl: boolean; loading: boolean; error: string; searched: boolean }
+const emptyJdSendInfo = (): JdSendInfoState => ({ overview: '', url: '', useOverview: false, useUrl: false, loading: false, error: '', searched: false });
+
+const JdSendComposer: React.FC<{
+    jobs: JdIndexEntry[];
+    candidateName: string;
+    senderName: string;
+    templates: JdSendTemplates;
+    onSaveTemplates: (templates: JdSendTemplates) => void;
+}> = ({ jobs, candidateName, senderName, templates }) => {
+    const [channel, setChannel] = useState<JdSendChannel>('email');
+    const [infos, setInfos] = useState<Record<string, JdSendInfoState>>({});
+    const [draft, setDraft] = useState<string | null>(null);
+    const [copied, setCopied] = useState('');
+
+    const companies: string[] = Array.from(new Set<string>(jobs.map(j => j.company)));
+    const info = (c: string) => infos[c] || emptyJdSendInfo();
+    const patch = (c: string, p: Partial<JdSendInfoState>) => setInfos(prev => ({ ...prev, [c]: { ...(prev[c] || emptyJdSendInfo()), ...p } }));
+
+    const search = async (company: string) => {
+        const job = jobs.find(j => j.company === company);
+        const hint = job ? [['事業内容', job.data.biz], ['本社所在地', job.data.hq], ['会社概要', job.data.company_overview]]
+            .filter(([, v]) => v?.trim()).map(([k, v]) => `${k}: ${v!.trim().slice(0, 200)}`).join('\n') : '';
+        patch(company, { loading: true, error: '' });
+        try {
+            const r = await researchCompanyBrief(company, hint);
+            patch(company, { loading: false, searched: true, overview: r.overview, url: r.url, useOverview: !!r.overview, useUrl: !!r.url });
+        } catch (err) {
+            patch(company, { loading: false, error: err instanceof Error ? err.message : 'Web検索に失敗しました。' });
+        }
+    };
+    const searchAll = () => companies.filter(c => !info(c).loading).forEach(c => { void search(c); });
+    const anyLoading = companies.some(c => info(c).loading);
+
+    const computed = buildJdSendText(channel, {
+        candidateName, senderName,
+        jobs: jobs.map(j => ({ company: j.company, position: j.position })),
+        companyInfos: companies.map(c => ({ company: c, overview: info(c).useOverview ? info(c).overview : '', url: info(c).useUrl ? info(c).url : '' })),
+    }, templates);
+    // 条件（求人・候補者名・企業情報・テンプレート）が変わったら、手で直した文面は作り直す
+    useEffect(() => { setDraft(null); }, [computed]);
+    const text = draft ?? computed;
+    const { subject, body } = channel === 'email' ? splitEmailSubject(text) : { subject: '', body: text };
+
+    const copy = async (label: string, value: string) => {
+        try {
+            await navigator.clipboard.writeText(value);
+            setCopied(label);
+            setTimeout(() => setCopied(prev => (prev === label ? '' : prev)), 2000);
+        } catch {
+            setCopied('コピーできませんでした。文面を選択してコピーしてください。');
+        }
+    };
+
+    if (jobs.length === 0) return null;
+    return (
+        <section className="jd-send-composer">
+            <h3>送付メッセージ</h3>
+            <p className="field-hint">候補者に求人票を送るときの文面を作ります。コピーしてメール・LINEなどに貼り付けてください（このアプリからは送信しません）。</p>
+            <div className="jd-send-channel" role="group" aria-label="送り方">
+                {(Object.keys(JD_SEND_CHANNEL_LABELS) as JdSendChannel[]).map(ch => (
+                    <button key={ch} type="button" className={channel === ch ? 'is-active' : ''} onClick={() => setChannel(ch)}>{JD_SEND_CHANNEL_LABELS[ch]}</button>
+                ))}
+            </div>
+            <details className="jd-send-info">
+                <summary>企業概要・企業URLを付ける（任意）
+                    <span className="field-hint">{companies.filter(c => (info(c).useOverview && info(c).overview.trim()) || (info(c).useUrl && info(c).url.trim())).length} / {companies.length}社に付けています</span>
+                </summary>
+                <p className="field-hint">「Web検索」で企業概要と公式サイトのURLを調べます。AIが調べた内容なので、間違いが無いか確認し、必要なら直してから付けてください。</p>
+                {companies.length > 1 && (
+                    <button type="button" className="secondary-action-button" onClick={searchAll} disabled={anyLoading}>{anyLoading ? '検索中…' : `${companies.length}社をまとめてWeb検索`}</button>
+                )}
+                <ul className="jd-send-info-list">
+                    {companies.map(c => {
+                        const s = info(c);
+                        return (
+                            <li key={c}>
+                                <div className="jd-send-info-head">
+                                    <strong>{c}</strong>
+                                    <button type="button" className="secondary-action-button" onClick={() => search(c)} disabled={s.loading}>
+                                        {s.loading ? '検索中…' : s.searched ? 'もう一度Web検索' : 'Web検索'}
+                                    </button>
+                                </div>
+                                {s.error && <p className="jd-bundle-status is-error">{s.error}</p>}
+                                <label className="jd-send-check">
+                                    <input type="checkbox" checked={s.useOverview} onChange={e => patch(c, { useOverview: e.target.checked })} />企業概要を付ける
+                                </label>
+                                <textarea rows={3} value={s.overview} placeholder="Web検索するか、直接入力してください"
+                                    onChange={e => patch(c, { overview: e.target.value, useOverview: e.target.value.trim() ? (s.overview.trim() ? s.useOverview : true) : s.useOverview })} />
+                                <label className="jd-send-check">
+                                    <input type="checkbox" checked={s.useUrl} onChange={e => patch(c, { useUrl: e.target.checked })} />企業URLを付ける
+                                    {s.url.trim() && /^https?:\/\//.test(s.url.trim()) && <a href={s.url.trim()} target="_blank" rel="noopener noreferrer">開いて確認</a>}
+                                </label>
+                                <input type="url" value={s.url} placeholder="https://"
+                                    onChange={e => patch(c, { url: e.target.value, useUrl: e.target.value.trim() ? (s.url.trim() ? s.useUrl : true) : s.useUrl })} />
+                            </li>
+                        );
+                    })}
+                </ul>
+            </details>
+            <textarea className="jd-send-text" rows={channel === 'email' ? 16 : 10} value={text} onChange={e => setDraft(e.target.value)} aria-label="送付メッセージ" />
+            <div className="jd-send-actions">
+                {channel === 'email' && subject && <button type="button" className="secondary-action-button" onClick={() => copy('件名をコピーしました', subject)}>件名をコピー</button>}
+                <button type="button" className="secondary-action-button" onClick={() => copy(channel === 'email' && subject ? '本文をコピーしました' : 'コピーしました', body)}>{channel === 'email' && subject ? '本文をコピー' : 'コピー'}</button>
+                {draft !== null && <button type="button" className="blind-resume-link-button" onClick={() => setDraft(null)}>テンプレートから作り直す</button>}
+                {copied && <span className="jd-bundle-status is-ok">{copied}</span>}
+            </div>
+        </section>
+    );
+};
+
+/** 送付メッセージのテンプレート編集（自分用、UserData.jdSendTemplates）。FeedbackTemplateEditor と同じ作り。 */
+const JdSendTemplateEditor: React.FC<{
+    templates: JdSendTemplates;
+    onSave: (templates: JdSendTemplates) => void;
+    sample: JdSendParams;
+}> = ({ templates, onSave, sample }) => {
+    const [channel, setChannel] = useState<JdSendChannel>('email');
+    const saved = templates[channel] || '';
+    const [draft, setDraft] = useState<string | null>(null);
+    const value = draft ?? (saved || defaultJdSendTemplate(channel));
+    const [message, setMessage] = useState('');
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    useEffect(() => { setDraft(null); setMessage(''); }, [channel]);
+
+    const insertToken = (token: string) => {
+        const el = textareaRef.current;
+        const start = el?.selectionStart ?? value.length;
+        const end = el?.selectionEnd ?? value.length;
+        setDraft(value.slice(0, start) + token + value.slice(end));
+        requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(start + token.length, start + token.length); });
+    };
+    const save = () => {
+        const isDefault = value.trim() === defaultJdSendTemplate(channel).trim();
+        const next = { ...templates };
+        if (isDefault || !value.trim()) delete next[channel]; else next[channel] = value;
+        onSave(next);
+        setDraft(null);
+        setMessage('保存しました。送付メッセージにこの文面が使われます。');
+    };
+    const reset = () => {
+        const next = { ...templates };
+        delete next[channel];
+        onSave(next);
+        setDraft(null);
+        setMessage('既定の文面に戻しました。');
+    };
+    const customizedCount = (Object.values(templates) as (string | undefined)[]).filter(v => v?.trim()).length;
+    const sampleWithInfo: JdSendParams = { ...sample, companyInfos: [{ company: sample.jobs[0]?.company || '株式会社サンプル', overview: '（Web検索で付けた企業概要がここに入ります）', url: 'https://example.com' }] };
+
+    return (
+        <details className="prep-details prep-template-editor jd-send-template-editor">
+            <summary>
+                送付メッセージのテンプレートを編集（自分用）
+                <span className="prep-count">{customizedCount > 0 ? `${customizedCount}件を編集済み` : '既定の文面を使用中'}</span>
+            </summary>
+            <div className="prep-options-body">
+                <div className="prep-field">
+                    <span className="prep-field-label">送り方</span>
+                    <select value={channel} onChange={e => setChannel(e.target.value as JdSendChannel)}>
+                        {(Object.keys(JD_SEND_CHANNEL_LABELS) as JdSendChannel[]).map(ch => (
+                            <option key={ch} value={ch}>{JD_SEND_CHANNEL_LABELS[ch]}{templates[ch]?.trim() ? '（編集済み）' : ''}</option>
+                        ))}
+                    </select>
+                </div>
+                <div className="prep-field">
+                    <span className="prep-field-label">差し込み項目（押すとカーソル位置に入ります）</span>
+                    <div className="prep-pill-group">
+                        {JD_SEND_TEMPLATE_FIELDS.map(f => (
+                            <button type="button" key={f.token} className="prep-pill" title={f.label} onClick={() => insertToken(f.token)}>{f.token}</button>
+                        ))}
+                    </div>
+                </div>
+                <textarea ref={textareaRef} rows={channel === 'email' ? 14 : 9} value={value} onChange={e => setDraft(e.target.value)} />
+                {channel === 'email' && <p className="prep-note">1行目を「件名：〜」にすると、件名と本文を別々にコピーできます。</p>}
+                {!value.includes('{企業情報}') && <p className="prep-note">{'{企業情報}'} が無いため、企業概要・URLを付けた時は求人一覧の後ろに入ります。</p>}
+                <div className="prep-field">
+                    <span className="prep-field-label">プレビュー（企業情報を1社付けた例）</span>
+                    <pre className="prep-template-preview">{fillJdSendTemplate(channel, value, sampleWithInfo)}</pre>
+                </div>
+                <div className="knowledge-submit-actions">
+                    <button type="button" className="interview-prep-generate-button" onClick={save} disabled={draft === null}>この文面を保存</button>
+                    <button type="button" className="interview-prep-link-button" onClick={reset} disabled={!saved && draft === null}>既定の文面に戻す</button>
+                </div>
+                {message && <p className="prep-status is-active">{message}</p>}
+            </div>
+        </details>
     );
 };
 
@@ -19464,6 +19672,9 @@ const App: React.FC = () => {
   // 保存」パターンだが、スコープごとに見たい絞り込み条件が違うことが多いため、スコープ単位で
   // 別々に保存できるようにしている。
   // 面接振り返りアンケートの案内文（自分用）を保存する。
+  const handleSaveJdSendTemplates = (templates: JdSendTemplates) => {
+    setCurrentUserData(prev => (prev ? { ...prev, jdSendTemplates: templates } : prev));
+  };
   const handleSaveFeedbackInviteTemplates = (templates: FeedbackInviteTemplates) => {
     setCurrentUserData(prev => (prev ? { ...prev, feedbackInviteTemplates: templates } : prev));
   };
@@ -19594,6 +19805,8 @@ const App: React.FC = () => {
     meetingForecast: d.meetingForecast,
     // 同じ理由: 面接振り返りアンケートの案内文（自分用）も許可リストに無いと再読み込みで消える。
     feedbackInviteTemplates: d.feedbackInviteTemplates,
+    // 同じ理由: 求人票の送付メッセージのテンプレート（自分用）も許可リストに無いと再読み込みで消える。
+    jdSendTemplates: d.jdSendTemplates,
     // 同じ理由: チーム設定の控えも許可リストに無いと再読み込みのたびに消え、復元に使えない。
     teamsConfigBackups: d.teamsConfigBackups,
   }), [currentIdentity]);
@@ -23684,7 +23897,10 @@ const App: React.FC = () => {
             />
           </div>
         )}
-        {view === 'jd_bundle' && currentIdentity && <JdBundleView />}
+        {view === 'jd_bundle' && currentIdentity && (
+          <JdBundleView senderName={currentUserData?.displayName || currentIdentity.name || ''}
+            sendTemplates={currentUserData?.jdSendTemplates || {}} onSaveSendTemplates={handleSaveJdSendTemplates} />
+        )}
         {view === 'pipeline' && (
           <>
             <div className="google-tasks-sync-bar">

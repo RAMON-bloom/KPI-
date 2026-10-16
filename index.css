@@ -5053,3 +5053,25 @@ p.memo-content-text {
 .jd-bundle-status { flex: 1 1 260px; font-size: 0.88rem; }
 .jd-bundle-status.is-error { color: #b42318; }
 .jd-bundle-status.is-ok { color: #1e6b34; }
+
+/* 「求人票まとめ」の送付メッセージ */
+.jd-send-composer { border-top: 1px solid var(--border-color); margin-top: 1.25rem; padding-top: 1rem; }
+.jd-send-composer h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+.jd-send-channel { display: inline-flex; border: 1px solid var(--border-color); border-radius: var(--border-radius); overflow: hidden; margin: 0.25rem 0 0.75rem; }
+.jd-send-channel button { background: var(--card-bg-color); border: none; padding: 0.4rem 0.9rem; cursor: pointer; color: inherit; font-size: 0.88rem; }
+.jd-send-channel button + button { border-left: 1px solid var(--border-color); }
+.jd-send-channel button.is-active { background: var(--primary-color); color: #fff; }
+.jd-send-info { border: 1px solid #b6d4fe; background: #f5f9ff; border-radius: var(--border-radius); padding: 0.6rem 0.9rem; margin-bottom: 0.75rem; }
+.jd-send-info summary { cursor: pointer; font-weight: 600; color: var(--primary-color-dark); }
+.jd-send-info summary .field-hint { font-weight: normal; margin-left: 0.5rem; }
+.jd-send-info-list { list-style: none; margin: 0.75rem 0 0; padding: 0; display: grid; gap: 0.75rem; }
+.jd-send-info-list li { background: var(--card-bg-color); border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 0.6rem 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.jd-send-info-head { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.jd-send-check { display: flex; flex-direction: row; align-items: center; gap: 0.4rem; font-weight: normal; font-size: 0.88rem; }
+.jd-send-check a { margin-left: auto; font-size: 0.82rem; }
+.jd-send-info-list textarea, .jd-send-info-list input[type="url"] { width: 100%; box-sizing: border-box; }
+.jd-send-text { width: 100%; box-sizing: border-box; font-family: inherit; line-height: 1.6; }
+.jd-send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.5rem; }
+.jd-send-template-editor { margin-top: 1rem; }
+.jd-send-composer label.jd-send-check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; width: 100%; }
+.jd-send-composer .jd-send-check input[type="checkbox"] { width: auto; margin: 0; flex: none; }
