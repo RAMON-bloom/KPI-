@@ -4900,6 +4900,16 @@ p.memo-content-text {
 .jd-index-others { margin-top: 0.25rem; }
 .jd-index-others summary { cursor: pointer; }
 .jd-index-others > div { margin: 0.2rem 0 0 0.8rem; }
+.jd-generator-button { text-decoration: none; display: inline-flex; align-items: center; gap: 0.3rem; }
+.jd-posting-url { margin-top: 0.6rem; }
+.jd-posting-url input { width: 100%; }
+/* ブラインドレジュメ作成の「ドライブの求人票から選ぶ」 */
+.drive-jd-picker { margin-top: 0.5rem; font-size: 0.85rem; }
+.drive-jd-picker summary { cursor: pointer; color: #1a73e8; }
+.drive-jd-picker-list { list-style: none; margin: 0.4rem 0 0; padding: 0; display: grid; gap: 0.35rem; }
+.drive-jd-picker-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+/* 選考情報の「推薦文の下書き」 */
+.recommendation-draft { width: 100%; margin-top: 0.6rem; font-size: 0.85rem; line-height: 1.6; }
 .prep-options-body select {
   width: 100%;
   padding: 0.5rem;

@@ -99,6 +99,32 @@ export const loadJdIndex = (force = false): Promise<JdIndexData> => {
 const normalizePosition = (s: string): string =>
   (s || '').normalize('NFKC').replace(/[\s・･\/／\-‐－_＿()（）【】\[\]「」]/g, '').toLowerCase();
 
+/** 企業名（表記ゆれを吸収）に合う正本（kind=master, status=active）。新しい順。完全一致が無ければゆるい一致。 */
+export const listCompanyMasters = (data: JdIndexData, companyName: string): JdIndexEntry[] => {
+  const name = companyName.trim();
+  if (!name) return [];
+  const masters = data.entries.filter(e => e.kind === 'master' && e.status === 'active');
+  const exact = masters.filter(e => companyNamesEqual(e.company, name));
+  return (exact.length > 0 ? exact : masters.filter(e => companyNamesMatch(e.company, name)))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+};
+
+/** 索引の正本のポジション名と同じか（空白・記号・全角半角の違いは無視）。 */
+export const samePosition = (a: string, b: string): boolean => {
+  const x = normalizePosition(a);
+  return !!x && x === normalizePosition(b);
+};
+
+/** 求人票ジェネレーター（本番）。company / position のURLパラメータはジェネレーター側が今後対応する（今は無視される）。 */
+export const JD_GENERATOR_URL = 'https://script.google.com/a/macros/bloom-firm.com/s/AKfycbzZ_D7gFoUTNZVASr30pCxoi_yFWxPSh8rUBUwsH5i6SehkLXF9hSxePuV6J_ELqbI4fw/exec';
+export const buildJdGeneratorUrl = (companyName: string, position: string): string => {
+  const params = new URLSearchParams();
+  if (companyName.trim()) params.set('company', companyName.trim());
+  if (position.trim()) params.set('position', position.trim());
+  const qs = params.toString();
+  return qs ? `${JD_GENERATOR_URL}?${qs}` : JD_GENERATOR_URL;
+};
+
 export interface MasterJdMatch {
   entry: JdIndexEntry;
   /** position: ポジションが一致 / only: その企業の正本が1つだけ（ポジション未指定または不一致）/ none: 一致なし（同じ企業の正本の一覧として出す） */
@@ -113,12 +139,7 @@ export interface MasterJdMatch {
 export const findMasterJds = (
   data: JdIndexData, companyName: string, position: string,
 ): { best: MasterJdMatch | null; others: JdIndexEntry[] } => {
-  const name = companyName.trim();
-  if (!name) return { best: null, others: [] };
-  const masters = data.entries.filter(e => e.kind === 'master' && e.status === 'active');
-  const exact = masters.filter(e => companyNamesEqual(e.company, name));
-  const sameCompany = (exact.length > 0 ? exact : masters.filter(e => companyNamesMatch(e.company, name)))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const sameCompany = listCompanyMasters(data, companyName);
   if (sameCompany.length === 0) return { best: null, others: [] };
 
   const pos = normalizePosition(position);

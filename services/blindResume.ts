@@ -126,7 +126,7 @@ export const redactPersonalInfo = (text: string, c: Pick<BlindSourceCandidate, '
 
 const truncate = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}…` : s);
 
-const collectNotes = (c: BlindSourceCandidate): string => {
+export const collectNotes = (c: BlindSourceCandidate): string => {
   const parts: string[] = [];
   (c.memos || []).forEach(m => {
     const content = (m.content || '').trim();
@@ -137,7 +137,7 @@ const collectNotes = (c: BlindSourceCandidate): string => {
   return parts.join('\n');
 };
 
-const basicFacts = (c: BlindSourceCandidate): string[] => [
+export const basicFacts = (c: BlindSourceCandidate): string[] => [
   c.age ? `年齢: ${c.age}歳` : '',
   c.jobType ? `職種: ${c.jobType}` : '',
   c.currentCompany ? `現職: ${c.currentCompany}` : '',

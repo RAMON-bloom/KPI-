@@ -32,7 +32,8 @@ import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQ
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
-import { loadJdIndex, findMasterJds, buildJdText, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
+import { generateRecommendationDraft } from './services/recommendationDraft';
+import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
 import { loadInterviewPrepData, InterviewPrepAccessError, getPhaseStats, getKnowledge, findDocsForApplication, findResultSuggestions, gasPhaseForStage, invalidateInterviewPrepData, type InterviewPrepData, type ResultSuggestion } from './services/interviewPrepData';
 import { submitKnowledge, draftKnowledgeFromMemo, buildKnowledgeFromFeedback, registerCompany, cleanCompanyName, createHandoff, newHandoffToken, buildCandidateProfileText, GENERATOR_PHASES, GENERATOR_RESULTS } from './services/interviewPrepSubmit';
@@ -704,6 +705,9 @@ interface CompanyApplication {
   // ジェネレーターのデータとの突き合わせに名前より優先して使う。企業名を後から書き換えて
   // マスタの名前と合わなくなった場合は無視される（services/interviewPrepData.ts）。
   gasCompanyId?: string;
+  // 求人票のURL（手で貼る）。求人票ジェネレーターの索引に正本が無い求人票のため。索引に企業×
+  // ポジションの正本があればそちらを優先して使う（services/jdIndex.ts）。
+  jobPostingUrl?: string;
 }
 
 // A single titled free-text note on a candidate (see Candidate.memos) — several can coexist per
@@ -4445,6 +4449,12 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '選考情報に「推薦文の下書き」を追加した。「推薦文を作る」を押すと、その選考の求人票と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。編集して「コピー」で使えます。氏名・電話番号・メールアドレスはAIに送らず、本文の候補者は「〇〇様」と書かれます',
+      'ブラインドレジュメ作成の求人内容に「ドライブの求人票から選ぶ」を追加した。推薦先の企業名に合う求人票（求人票ジェネレーターで作ったもの）を一覧から選ぶと、その本文が求人内容に追記されます（複数選べます）',
+      '選考情報の「ポジション」の候補に、求人票ジェネレーターで作った求人票のポジション名も出るようにした。面接対策ジェネレーターに未登録のものを「新規登録」すると、その求人票の本文が求人票として登録されます',
+      '面接対策資料の「生成オプション」で、ドライブの求人票（正本）をそのまま使って「面接対策ジェネレーターで作る」を押すと、その求人票が面接対策ジェネレーターにも自動で保存されるようにした（同じ内容が保存済みなら保存しません。企業がジェネレーターの企業一覧に無い場合は保存できない旨を表示します）',
+      '選考情報に「求人票」欄を追加した。企業名・ポジションが合う求人票（ドライブの正本）のリンクを表示し、候補者カードの選考バッジにも「求人票」リンク（PDF）を付けました。正本が無い場合は「求人票ジェネレーターで作る」から作るか、求人票のURLを貼っておけます',
+      '求人票ジェネレーターがドライブに保存した求人票（正本）を読み込むようにした。面接対策資料の「生成オプション」の求人票に、企業名・ポジションが合う正本の内容が最初から入り、PDF・Googleドキュメントへのリンクも表示されます（面接対策ジェネレーターに保存済みの求人票もある場合は正本を優先し、ボタンで切り替えられます）',
       '【不具合修正】選考情報の「面接対策資料」タブで、「生成オプション」のフェーズと「面接振り返りアンケート」の対象の面接の初期値が、選考のフェーズと合っていなかった（2次面接の選考でも「一次面接」になる、アンケートの面接が未選択になるなど）不具合を修正。選考のフェーズ（お見送り・辞退の選考なら最後に受けた面接）が初期値になり、「選考情報」タブでフェーズを変えるとそれに合わせて変わります（自分で選び直した場合はその選択のまま）',
       '選考情報の「面接対策資料」タブの「生成オプション」を見つけやすくした。「面接対策ジェネレーターで作る」ボタンの上に、色付きの帯として表示し、今の設定（フェーズ・ポジション・求人票の有無など）と「設定を開く」ボタンが見えるようにしました',
       '「面接振り返りアンケートの新しい回答」のボタン名を分かりやすくした（「面談ログに取り込む」→「候補者カードに保存」。ジェネレーターにも送る設定の時は「保存してジェネレーターに送る」。「すべて取り込む」→「すべて保存」）。保存先（候補者カードの面談ログと、選考情報の「アンケート結果」）も説明に書きました',
@@ -5197,6 +5207,8 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
         '報酬は「料率(%)」か「固定報酬（万円）」を選びます。内定以降は「オファー金額（円）」を入力でき、料率の選考では想定年収より優先して想定粗利の計算に使われます。',
         '内定確度・入社確度、意思決定時期（見込み月）も入力できます。「内定承諾」に変更して保存すると、その成約を何月扱いにするかを選ぶ確認が出ます。',
         '選考予定日はGoogleタスクに自動で登録されます（お見送り・辞退にすると自動で削除）。面接の予定には面接対策資料へのリンクも添えられます。',
+        '「求人票」欄には、求人票ジェネレーターで作った求人票（ドライブに保存された正本）のうち、企業名・ポジションが合うもののPDF・Googleドキュメント・フォルダへのリンクが出ます。候補者カードの選考バッジにも「求人票」リンクが付きます。正本が無い場合は「求人票ジェネレーターで作る」で作るか、求人票のURLを貼っておくとバッジのリンクに使われます。',
+        '「推薦文の下書き」の「推薦文を作る」で、その選考の求人票（ドライブの正本、無ければ面接対策ジェネレーターの保存済み・面接対策資料タブで入力したもの）と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。氏名・連絡先はAIに送らず、本文の候補者は「〇〇様」になります。編集して「コピー」で使ってください（下書きは保存されません）。',
       ],
     },
     {
@@ -5205,6 +5217,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
       items: [
         '「面接対策ジェネレーターで作る」を押すと、ジェネレーターが開いて、この候補者の面談メモ（氏名・連絡先は伏せた状態）を使って資料が自動で作られます。開いた画面は操作不要で、完了したら「このタブを閉じる」で閉じてください。',
         '「生成オプション」で、フェーズ・求人票（保存済みの読み込み／PDF・Wordから読み取り）・使う面談メモ・レジュメ・汎用ナレッジ・追加要望・敬称を事前に指定できます。',
+        '求人票は、ドライブに保存された求人票の正本があればそれが最初から入ります（面接対策ジェネレーターの保存済みの求人票との切り替えも可）。正本を書き換えずに「作る」を押すと、その内容が面接対策ジェネレーターの求人票にも自動で保存されます。',
         'できた資料は自分のGoogleドライブの「面接対策資料」フォルダに保存され、この選考に自動で紐づきます。このタブからいつでも開いたり、Wordでダウンロードしたりできます。',
         'BP/ミドルがメンバーの候補者の資料を作った場合は、作成者のドライブに保存され、担当者にも編集者として共有されます。',
         '同じ企業でジェネレーターが作った資料がドライブにあれば一覧に表示され、「この選考に紐づける」で1クリックで登録できます。',
@@ -5260,6 +5273,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
         '求人内容が空欄でも、企業名（とポジション名）からWeb検索で採用ニーズを調べて提案します。対象範囲（自分／チーム／事業部／全ユーザー）と対象フェーズ（選考中・見送り・辞退・掘り起し・非表示など）で絞り込めます。',
         '選んだ候補者ごとに、氏名・連絡先を伏せた匿名レジュメ（推薦ポイント・推奨ポジション・職務要約・職務経歴・スキル）が作られます。内容を確認・修正して、表紙付きの1つのPDFとして保存します。',
         '処理中は推定の残り時間が表示されます。「最初からやり直す」でいつでも入力をクリアして始め直せます。1名分だけ作る場合は、候補者カードの「ブラインドレジュメ」ボタンが便利です。',
+        '求人内容の下の「ドライブの求人票から選ぶ」には、推薦先の企業名に合う求人票（求人票ジェネレーターで作ったもの）が一覧で出ます。「求人内容に追加」で本文が求人内容に追記されます（複数選べます）。',
       ],
     },
     {
@@ -8087,7 +8101,6 @@ const ApplicationModal: React.FC<{
                             value={application.position || ''}
                             onChange={position => setApplication(prev => ({ ...prev, position: position || undefined }))}
                         />
-                        <MasterJdSummary companyName={application.companyName} position={application.position || ''} />
                     </div>
                     <div className="form-group">
                         <label htmlFor="nextAction">次アクション</label>
@@ -8233,6 +8246,21 @@ const ApplicationModal: React.FC<{
                     </div>
                     </div>
                     </section>
+                    <section className="prep-card app-card--jd" hidden={activeTab !== 'info'}>
+                        <header className="prep-card-header">
+                            <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="note" /></span>
+                            <div>
+                                <h4 className="prep-card-title">求人票</h4>
+                                <p className="prep-card-desc">求人票ジェネレーターで作った求人票（ドライブの正本）をこの選考に紐づけます</p>
+                            </div>
+                        </header>
+                        <JobPostingCard
+                            companyName={application.companyName}
+                            position={application.position || ''}
+                            url={application.jobPostingUrl || ''}
+                            onUrlChange={url => setApplication(prev => ({ ...prev, jobPostingUrl: url || undefined }))}
+                        />
+                    </section>
                     <section className="prep-card app-card--memo" hidden={activeTab !== 'info'}>
                         <header className="prep-card-header">
                             <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="note" /></span>
@@ -8298,6 +8326,7 @@ const useInterviewPrepData = () => {
 };
 
 /** 求人票ジェネレーターの索引（ドライブに保存した求人票の一覧）を読む。10分キャッシュ。読めなければ何も出さない。 */
+let jdIndexWarned = false; // 候補者カードのバッジごとに呼ばれるので、読めない時の警告は1回だけ出す
 const useJdIndex = () => {
     const [state, setState] = useState<{ data: JdIndexData | null; error: string }>({ data: null, error: '' });
     useEffect(() => {
@@ -8305,12 +8334,80 @@ const useJdIndex = () => {
         loadJdIndex()
             .then(data => { if (alive) setState({ data, error: '' }); })
             .catch(err => {
-                console.warn('求人票の索引を読み込めませんでした', err);
+                if (!jdIndexWarned) { jdIndexWarned = true; console.warn('求人票の索引を読み込めませんでした', err); }
                 if (alive) setState({ data: null, error: err instanceof InterviewPrepAccessError ? err.message : '求人票の索引を読み込めませんでした。' });
             });
         return () => { alive = false; };
     }, []);
     return state;
+};
+
+/** 求人票ジェネレーターを新しいタブで開くボタン（企業名・ポジションをURLパラメータで渡す。ジェネレーター側は今後対応）。 */
+const JdGeneratorButton: React.FC<{ companyName: string; position: string; prominent?: boolean }> = ({ companyName, position, prominent }) => (
+    <a href={buildJdGeneratorUrl(companyName, position)} target="_blank" rel="noopener noreferrer"
+        className={prominent ? 'prep-primary-button jd-generator-button' : 'prep-secondary-button jd-generator-button'}>
+        求人票ジェネレーターで作る<PrepIcon name="external" size={14} />
+    </a>
+);
+
+/**
+ * 選考情報タブの「求人票」欄。索引に企業×ポジションの正本があればそのリンク、無ければ手で貼るURLと
+ * 求人票ジェネレーターへの導線を目立たせて出す。
+ */
+const JobPostingCard: React.FC<{
+    companyName: string;
+    position: string;
+    url: string;
+    onUrlChange: (url: string) => void;
+}> = ({ companyName, position, url, onUrlChange }) => {
+    const index = useJdIndex();
+    const match = index.data && companyName.trim() ? findMasterJds(index.data, companyName, position) : { best: null, others: [] };
+    const best = match.best?.entry || null;
+    return (
+        <>
+            {best ? (
+                <p className="jd-index-summary"><MasterJdLinks entry={best} label={`ドライブの正本: ${best.position || '企業共通'}`} /></p>
+            ) : (
+                <p className="prep-note">
+                    {!companyName.trim()
+                        ? '企業名を入力すると、求人票ジェネレーターで作った求人票（ドライブの正本）を探します。'
+                        : index.error
+                            ? index.error
+                            : !index.data ? '求人票を探しています…' : 'この企業・ポジションの求人票（ドライブの正本）はまだありません。求人票ジェネレーターで作ると、ここと候補者カードに表示されます。'}
+                </p>
+            )}
+            {match.others.length > 0 && (
+                <details className="jd-index-others">
+                    <summary>{best ? `この企業のほかの求人票（${match.others.length}件）` : `この企業の求人票（${match.others.length}件。ポジションが一致しないもの）`}</summary>
+                    {match.others.map(e => <div key={e.jdId}><MasterJdLinks entry={e} label={e.position || '企業共通'} /></div>)}
+                </details>
+            )}
+            {!best && (
+                <div className="form-group jd-posting-url">
+                    <label htmlFor="jobPostingUrl">求人票のURL（任意 — ドライブの正本が無いとき、候補者カードの「求人票」リンクに使います）</label>
+                    <input type="url" id="jobPostingUrl" value={url} onChange={e => onUrlChange(e.target.value)} placeholder="https://drive.google.com/..." />
+                </div>
+            )}
+            <div className="prep-primary-row">
+                <JdGeneratorButton companyName={companyName} position={position} prominent={!best && !!companyName.trim()} />
+            </div>
+        </>
+    );
+};
+
+/** 候補者カードの選考バッジ内の「求人票」リンク。索引の正本（PDF）を優先し、無ければ手で貼ったURL。 */
+const JobPostingBadgeLink: React.FC<{ app: CompanyApplication }> = ({ app }) => {
+    const index = useJdIndex();
+    const best = index.data ? findMasterJds(index.data, app.companyName, app.position || '').best?.entry : null;
+    const href = (best && jdPdfUrl(best)) || (/^https?:\/\//.test((app.jobPostingUrl || '').trim()) ? app.jobPostingUrl!.trim() : '');
+    if (!href) return null;
+    return (
+        <a href={href} target="_blank" rel="noopener noreferrer" className="interview-prep-badge-link"
+            title={best ? `求人票（${best.position || '企業共通'}・第${best.version}版）を開く` : '求人票を開く'}
+            onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+            <PrepIcon name="external" size={12} />求人票
+        </a>
+    );
 };
 
 /** 索引の正本1件へのリンク（PDF・Googleドキュメント・フォルダ）。 */
@@ -8324,22 +8421,36 @@ const MasterJdLinks: React.FC<{ entry: JdIndexEntry; label?: string }> = ({ entr
     </span>
 );
 
-/** 選考情報の「ポジション」欄の下に出す、ドライブに保存された求人票（正本）のリンク。 */
-const MasterJdSummary: React.FC<{ companyName: string; position: string }> = ({ companyName, position }) => {
+/**
+ * ブラインドレジュメ作成の「ドライブの求人票から選ぶ」。推薦先の企業名に合う索引の正本を一覧にし、
+ * 選ぶと data_json から組み立てた本文を求人内容に追記する（複数選べる）。
+ */
+const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick: (text: string, entry: JdIndexEntry) => void }> = ({ companyName, disabled, onPick }) => {
     const index = useJdIndex();
-    if (!index.data || !companyName.trim()) return null;
-    const { best, others } = findMasterJds(index.data, companyName, position);
-    if (!best && others.length === 0) return null;
+    const [added, setAdded] = useState<Set<string>>(new Set());
+    useEffect(() => { setAdded(new Set()); }, [companyName]);
+    if (!companyName.trim()) return null;
+    const masters = index.data ? listCompanyMasters(index.data, companyName) : [];
     return (
-        <div className="jd-index-summary">
-            {best && <MasterJdLinks entry={best.entry} label={`求人票: ${best.entry.position || '企業共通'}`} />}
-            {others.length > 0 && (
-                <details className="jd-index-others">
-                    <summary>{best ? `この企業のほかの求人票（${others.length}件）` : `この企業の求人票（${others.length}件）`}</summary>
-                    {others.map(e => <div key={e.jdId}><MasterJdLinks entry={e} label={e.position || '企業共通'} /></div>)}
-                </details>
-            )}
-        </div>
+        <details className="drive-jd-picker">
+            <summary>ドライブの求人票から選ぶ{index.data ? `（${masters.length}件）` : ''}</summary>
+            {index.error ? <p className="field-hint">{index.error}</p>
+                : !index.data ? <p className="field-hint">求人票を探しています…</p>
+                : masters.length === 0 ? <p className="field-hint">「{companyName.trim()}」の求人票は、求人票ジェネレーターの保存先にまだありません。</p>
+                : (
+                    <ul className="drive-jd-picker-list">
+                        {masters.map(m => (
+                            <li key={m.jdId}>
+                                <button type="button" className="secondary-action-button" disabled={disabled || added.has(m.jdId)}
+                                    onClick={() => { onPick(buildJdText(m.data), m); setAdded(prev => new Set(prev).add(m.jdId)); }}>
+                                    {added.has(m.jdId) ? '追加済み' : '求人内容に追加'}
+                                </button>
+                                <MasterJdLinks entry={m} label={`${m.company}・${m.position || '企業共通'}`} />
+                            </li>
+                        ))}
+                    </ul>
+                )}
+        </details>
     );
 };
 
@@ -8368,18 +8479,26 @@ const PositionInput: React.FC<{
     const name = companyName.trim();
     const companyId = prep.data && name ? resolveGeneratorCompanyId(prep.data, name, gasCompanyId) : null;
     const positions = prep.data && name ? getCompanyPositions(prep.data, name, gasCompanyId) : [];
+    // 求人票ジェネレーターの索引にある、この企業の正本のポジション名も候補に出す（ジェネレーター登録済みと重複するものは除く）
+    const jdIndex = useJdIndex();
+    const masters = jdIndex.data && name ? listCompanyMasters(jdIndex.data, name) : [];
+    const masterPositions = Array.from(new Set(masters.map(m => m.position.trim()).filter(Boolean)))
+        .filter(p => !positions.some(g => samePosition(g, p)));
+    const options = [...positions, ...masterPositions];
     const trimmed = value.trim();
     const isNew = !!trimmed && !positions.includes(trimmed);
+    // 索引の正本から選んだポジションなら、ジェネレーターへの登録時に正本の本文を求人票として入れる
+    const masterForValue = trimmed ? masters.find(m => samePosition(m.position, trimmed)) : undefined;
 
     const handleRegister = async () => {
         if (!companyId || !trimmed) return;
         setBusy(true);
         setMessage('');
         try {
-            await saveJdToGenerator(companyId, trimmed, '');
+            await saveJdToGenerator(companyId, trimmed, masterForValue ? buildJdText(masterForValue.data) : '');
             invalidateInterviewPrepData();
             prep.reload();
-            setMessage(`「${trimmed}」を面接対策ジェネレーターに登録しました。`);
+            setMessage(`「${trimmed}」を面接対策ジェネレーターに登録しました${masterForValue ? '（求人票はドライブの正本の内容で登録）' : ''}。`);
         } catch (err) {
             setMessage(err instanceof Error ? err.message : 'ポジションの登録に失敗しました。');
         } finally {
@@ -8396,10 +8515,11 @@ const PositionInput: React.FC<{
                 value={value}
                 onChange={e => { onChange(e.target.value); setMessage(''); }}
                 onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
-                placeholder={positions.length ? '候補から選ぶか入力（例: アクイジション、AM）' : '例: アクイジション、AM、PM'}
+                placeholder={options.length ? '候補から選ぶか入力（例: アクイジション、AM）' : '例: アクイジション、AM、PM'}
             />
             <datalist id={`${id}-list`}>
                 {positions.map(p => <option key={p} value={p} />)}
+                {masterPositions.map(p => <option key={`jd:${p}`} value={p} label={`${p}（ドライブの求人票）`} />)}
             </datalist>
             {name && prep.data && !companyId && (
                 <p className="interview-prep-hint">企業を面接対策ジェネレーターの企業一覧から選ぶと、登録済みのポジションが候補に出ます。</p>
@@ -8407,9 +8527,12 @@ const PositionInput: React.FC<{
             {companyId && positions.length > 0 && !trimmed && (
                 <p className="interview-prep-hint">ジェネレーターに登録済み: {positions.join('、')}</p>
             )}
+            {masterPositions.length > 0 && !trimmed && (
+                <p className="interview-prep-hint">ドライブの求人票: {masterPositions.join('、')}</p>
+            )}
             {companyId && isNew && (
                 <p className="interview-prep-hint company-name-unregistered">
-                    「{trimmed}」はジェネレーターに未登録のポジションです。
+                    「{trimmed}」はジェネレーターに未登録のポジションです{masterForValue ? '（登録するとドライブの求人票の内容が求人票として入ります）' : ''}。
                     <button type="button" className="interview-prep-link-button" onClick={handleRegister} disabled={busy}>
                         {busy ? '登録中...' : '新規登録'}
                     </button>
@@ -8657,6 +8780,8 @@ const InterviewPrepSection: React.FC<{
     const jdChanged = jdText !== null && jdText.trim() !== baseJdContent.trim();
     // ジェネレーターに渡す求人票。jds の保存済みをそのまま使うときはジェネレーターが自分で読むので送らない
     const jdContentForHandoff = jdChanged || jdSource === 'master' ? jdValue : '';
+    // ドライブの正本をそのまま使う（書き換えていない）なら、「作る」時に jds にも自動で保存する（同じ内容なら保存しない）
+    const masterNeedsJdsSave = jdSource === 'master' && !jdChanged && masterJdContent.trim() !== savedJdContent.trim();
     useEffect(() => { setJdText(null); setJdSourceChoice(null); }, [companyName, position]);
     // レジュメ：KPIの登録情報（プロフィール）＋添付ファイルから書き起こした本文
     const [useProfile, setUseProfile] = useState(true);
@@ -8738,6 +8863,7 @@ const InterviewPrepSection: React.FC<{
         if (win) win.opener = null;
         // 3) 面談メモを kpi_handoffs に置き、受け渡し番号付きのURLで開く（自動生成用）。
         let handoff: string | undefined;
+        let jdSaveNote = '';
         const createdBy = getCurrentSession()?.identity.email || '';
         try {
             const token = newHandoffToken();
@@ -8745,6 +8871,13 @@ const InterviewPrepSection: React.FC<{
             if (saveJd && jdChanged && companyId) {
                 try { await saveJdToGenerator(companyId, position, jdValue); invalidateInterviewPrepData(); }
                 catch (err) { console.warn('求人票の保存に失敗しました（生成には使います）', err); }
+            }
+            if (masterNeedsJdsSave) {
+                if (!companyId) jdSaveNote = '（企業が面接対策ジェネレーターの企業一覧に無いため、求人票はジェネレーターに保存していません。生成には使います）';
+                else {
+                    try { await saveJdToGenerator(companyId, position, masterJdContent); invalidateInterviewPrepData(); }
+                    catch (err) { console.warn('求人票（ドライブの正本）の保存に失敗しました（生成には使います）', err); jdSaveNote = '（求人票のジェネレーターへの保存に失敗しました。生成には使います）'; }
+                }
             }
             await createHandoff({
                 token, createdBy, candidateId: candidate.id, candidateName: candidate.name,
@@ -8765,11 +8898,13 @@ const InterviewPrepSection: React.FC<{
         else window.open(url, '_blank', 'noopener');
         setCopyMessage(
             !handoff ? `面接対策ジェネレーターを開きました。受け渡しに失敗したため自動では作成されません。開いた画面で「資料を生成」を押してください${copied ? '（面談メモはコピー済みなので「面談メモ」欄に貼り付けてください）' : ''}。`
-            : `面接対策ジェネレーターで資料を自動作成しています。開いた画面は操作不要です。完了するとあなたのドライブに保存され、ここに紐づきます${isTeammateCandidate ? '（担当者にも共有されます）' : ''}${memoText ? '' : '（面談メモが無いため、メモなしで作成します）'}。`,
+            : `面接対策ジェネレーターで資料を自動作成しています。開いた画面は操作不要です。完了するとあなたのドライブに保存され、ここに紐づきます${isTeammateCandidate ? '（担当者にも共有されます）' : ''}${memoText ? '' : '（面談メモが無いため、メモなしで作成します）'}。`
+            + jdSaveNote,
         );
     };
 
     return (
+        <>
         <div className="interview-prep-section" hidden={activeTab === 'info'}>
             {!companyName && activeTab === 'review' && (
                 <p className="prep-empty-tab">「選考情報」タブで企業名を入力すると使えます。</p>
@@ -8836,6 +8971,18 @@ const InterviewPrepSection: React.FC<{
                             )}
                         </p>
                         {masterJd && <p className="prep-note"><MasterJdLinks entry={masterJd} label="正本を開く:" /></p>}
+                        {masterNeedsJdsSave && (
+                            <p className="prep-note">
+                                {companyId
+                                    ? `「面接対策ジェネレーターで作る」を押すと、この正本の内容を面接対策ジェネレーターの求人票（${position || '企業共通'}）にも保存します。`
+                                    : 'この企業は面接対策ジェネレーターの企業一覧に無いため、求人票をジェネレーターに保存できません（生成には使います）。'}
+                            </p>
+                        )}
+                        {!masterJd && (
+                            <div className="prep-primary-row">
+                                <JdGeneratorButton companyName={companyName} position={position} prominent={!jdValue.trim()} />
+                            </div>
+                        )}
                         {!masterJd && masterMatch.others.length > 0 && (
                             <p className="prep-note">
                                 ポジションが一致する正本はありません。この企業の求人票: {masterMatch.others.map(e => <MasterJdLinks key={e.jdId} entry={e} label={e.position || '企業共通'} />)}
@@ -9103,6 +9250,76 @@ const InterviewPrepSection: React.FC<{
                 </section>
             )}
         </div>
+        {/* 推薦文の下書きは「選考情報」タブに出す（求人票は上の生成オプションと同じもの＝正本 → jds → 手入力） */}
+        <RecommendationDraftCard
+            key={application.id}
+            hidden={activeTab !== 'info'}
+            candidate={candidate}
+            companyName={companyName}
+            position={position}
+            jdText={jdValue}
+            jdSourceLabel={jdChanged ? '面接対策資料タブで編集した求人票' : jdSource === 'master' ? 'ドライブの求人票（正本）' : jdSource === 'saved' ? '面接対策ジェネレーターに保存済みの求人票' : ''}
+        />
+        </>
+    );
+};
+
+/**
+ * 選考情報の「推薦文の下書き」。その選考の求人票と候補者の経歴・面談メモから、応募先企業に送る
+ * 推薦文の下書きをAI（Gemini）で作り、編集・コピーできる。氏名・連絡先はAIに送らない
+ * （services/recommendationDraft.ts）。下書きは保存しない（コピーして使う）。
+ */
+const RecommendationDraftCard: React.FC<{
+    hidden: boolean;
+    candidate: Candidate;
+    companyName: string;
+    position: string;
+    jdText: string;
+    jdSourceLabel: string;
+}> = ({ hidden, candidate, companyName, position, jdText, jdSourceLabel }) => {
+    const [draft, setDraft] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState('');
+    const generate = async () => {
+        if (draft.trim() && !window.confirm('いまの下書きを作り直しますか？（編集した内容は消えます）')) return;
+        setBusy(true);
+        setMessage('');
+        try {
+            setDraft(await generateRecommendationDraft({ candidate, companyName, position, jdText }));
+            setMessage('下書きを作りました。内容を確認・修正してから使ってください（「〇〇様」には氏名を入れてください）。');
+        } catch (err) {
+            console.error('推薦文の作成に失敗しました', err);
+            setMessage(err instanceof Error && err.message.startsWith('推薦文') ? err.message : '推薦文の作成に失敗しました。時間をおいて再度お試しください。');
+        } finally {
+            setBusy(false);
+        }
+    };
+    const copy = async () => {
+        try { await navigator.clipboard.writeText(draft); setMessage('推薦文をコピーしました。'); }
+        catch { setMessage('コピーに失敗しました。'); }
+    };
+    return (
+        <section className="prep-card app-card--recommend" hidden={hidden}>
+            <header className="prep-card-header">
+                <span className="prep-card-icon" aria-hidden="true"><PrepIcon name="pen" /></span>
+                <div>
+                    <h4 className="prep-card-title">推薦文の下書き</h4>
+                    <p className="prep-card-desc">求人票と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIで作ります（氏名・連絡先はAIに送りません）</p>
+                </div>
+            </header>
+            <p className="prep-note">
+                使う求人票: {jdText.trim() ? jdSourceLabel || '面接対策資料タブの求人票' : 'なし（企業名・ポジションから書きます。面接対策資料タブの「生成オプション」で求人票を入れられます）'}
+            </p>
+            <div className="prep-primary-row">
+                <button type="button" className="prep-secondary-button" onClick={generate} disabled={busy || !companyName}>
+                    {busy ? '作成中…' : draft.trim() ? '作り直す' : '推薦文を作る'}
+                </button>
+                {draft.trim() && <button type="button" className="prep-secondary-button" onClick={copy}>コピー</button>}
+            </div>
+            {!companyName && <p className="prep-note">先に企業名を入力してください。</p>}
+            {draft && <textarea className="recommendation-draft" rows={12} value={draft} onChange={e => setDraft(e.target.value)} />}
+            {message && <p className="prep-status is-active">{message}</p>}
+        </section>
     );
 };
 
@@ -10187,6 +10404,8 @@ const SingleBlindResumeModal: React.FC<{
             <label>求人内容（任意 — 貼り付けると推薦ポイントを求人要件に合わせて書きます）
               <textarea rows={content ? 2 : 5} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件 など" disabled={isBusy} />
             </label>
+            <DriveJdPicker companyName={companyName} disabled={isBusy}
+              onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
             <fieldset className="blind-resume-options">
               <legend>PDFに載せる項目（年齢・学歴・現職・職歴は常に記載。氏名・連絡先は載りません）</legend>
               <label><input type="checkbox" checked={displayOptions.showCurrentSalary} onChange={e => setDisplayOptions(o => ({ ...o, showCurrentSalary: e.target.checked }))} /> 現年収</label>
@@ -10642,6 +10861,8 @@ const BlindResumeView: React.FC<{
                 <label><span>求人内容（任意 — 求人票のテキストを貼り付け、またはファイルをドラッグ＆ドロップ／選択）</span>
                   <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など。空欄の場合は、企業名（とポジション名）からWeb検索で企業情報を調べ、一般的にマッチしそうな候補者と推奨ポジションを提案します" disabled={isBusy} />
                 </label>
+                <DriveJdPicker companyName={companyName} disabled={isBusy}
+                  onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
                 <div
                   className="drop-zone blind-resume-drop-zone"
                   role="button"
@@ -13706,6 +13927,7 @@ const ApplicationStageBadge: React.FC<{
   >
     {app.companyName}: {app.stage}
     <SchedulingBallBadgeSuffix app={app} />
+    <JobPostingBadgeLink app={app} />
   </span>
 );
 
