@@ -4444,6 +4444,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
+      '【不具合修正】選考フェーズを進めた時（打診→書類選考など）の候補者推薦数・通過数などの自動加算が、その日の実績をすでに入力していた場合に、保存の途中で取り消されて反映されないことがあった不具合を修正',
       '【不具合修正】候補者を最初から「書類選考」（またはそれ以降のフェーズ）で新規登録した場合や、既存の候補者に選考企業を「書類選考」で追加した場合に、個人実績の候補者推薦数に反映されていなかった不具合を修正。打診→書類選考への変更と同じく、その日の推薦数に1回だけ加算されます（同じ候補者がすでに推薦数に計上済みなら、複数社目でも重ねて加算はしません）',
       '【不具合修正】個人実績タブの「表示する媒体」に、所属チームの「使用する媒体」で外している媒体まで表示・集計されていた不具合を修正。選択肢と既定の表示を所属チームの「使用する媒体」に合わせました（チーム未所属・未設定の場合は従来どおりすべての媒体）',
       '「使い方」ガイドを最新の機能に合わせて全面的に更新した。選考情報の3つのタブ（選考情報・面接対策資料・振り返り・ナレッジ）、面接振り返りアンケート、類似経歴リサーチ、ブラインドレジュメ収集、想定粗利・内定承諾一覧、目標設定、BP会 会議用レポートなどの説明を追加し、主な画面には画像（説明用の架空のデータ）を付けました。上部の目次から見たい項目へ移動でき、画像はクリックで拡大できます',
@@ -20625,7 +20626,7 @@ const App: React.FC = () => {
         const existingEntry = entriesByDateMap.get(todayStr);
         const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
         Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
-        entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+        entriesByDateMap.set(todayStr, { id: Math.max(Date.now(), (existingEntry?.id ?? 0) + 1), date: todayStr, values });
         updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
       }
       return { ...prev, [targetEmail]: { ...target, candidates: updatedCandidates, entries: updatedEntries } };
@@ -20730,7 +20731,7 @@ const App: React.FC = () => {
         const existingEntry = entriesByDateMap.get(todayStr);
         const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
         Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
-        entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+        entriesByDateMap.set(todayStr, { id: Math.max(Date.now(), (existingEntry?.id ?? 0) + 1), date: todayStr, values });
         updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
       }
       return { ...prev, [targetEmail]: { ...target, candidates: updatedCandidates, entries: updatedEntries } };
@@ -21229,7 +21230,10 @@ const App: React.FC = () => {
           const existingEntry = entriesByDateMap.get(todayStr);
           const values: KpiTotals = existingEntry ? { ...existingEntry.values } : ({} as KpiTotals);
           Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key as KpiKey] = (values[key as KpiKey] || 0) + delta; });
-          entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+          // idは「その日の実績の最終更新時刻」を兼ねる（dataSync.tsのmergeEntriesByLatestId）。
+          // 既存のidを使い回すと、Drive保存時のマージで同じidを持つDrive側の古い実績が勝ち、
+          // この加算が消える（その日の実績を既に入力済みだと推薦数等が反映されなかった原因）。
+          entriesByDateMap.set(todayStr, { id: Math.max(Date.now(), (existingEntry?.id ?? 0) + 1), date: todayStr, values });
           updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
         }
         return { ...prevData, candidates: updatedCandidates, entries: updatedEntries };

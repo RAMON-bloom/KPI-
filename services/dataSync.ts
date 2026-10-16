@@ -647,7 +647,7 @@ export async function overwriteTeammateCandidatePatch<T extends { candidates: an
     const existingEntry = entriesByDateMap.get(todayStr);
     const values: Record<string, number> = existingEntry ? { ...existingEntry.values } : {};
     Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key] = (values[key] || 0) + delta; });
-    entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+    entriesByDateMap.set(todayStr, { id: Math.max(Date.now(), (existingEntry?.id ?? 0) + 1), date: todayStr, values });
     updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
   }
   const updated = { ...latest, candidates: updatedCandidates, entries: updatedEntries };
@@ -680,7 +680,7 @@ export async function addTeammateCandidate<T extends { candidates: any[]; entrie
     const existingEntry = entriesByDateMap.get(todayStr);
     const values: Record<string, number> = existingEntry ? { ...existingEntry.values } : {};
     Object.entries(kpiDeltas).forEach(([key, delta]) => { values[key] = (values[key] || 0) + delta; });
-    entriesByDateMap.set(todayStr, { id: existingEntry?.id ?? Date.now(), date: todayStr, values });
+    entriesByDateMap.set(todayStr, { id: Math.max(Date.now(), (existingEntry?.id ?? 0) + 1), date: todayStr, values });
     updatedEntries = Array.from(entriesByDateMap.values()).sort((a: any, b: any) => a.date.localeCompare(b.date));
   }
   const updated = { ...latest, candidates: updatedCandidates, entries: updatedEntries };
