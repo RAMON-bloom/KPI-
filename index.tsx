@@ -1214,7 +1214,7 @@ interface UserData {
   // 面接振り返りアンケートの案内文（メール/LINE × 選考中・お見送り・辞退）を、このユーザー用に
   // 書き換えたもの。未設定の組み合わせは既定の文面（services/interviewFeedbackForm.ts）を使う。
   feedbackInviteTemplates?: FeedbackInviteTemplates;
-  // 「求人票まとめ」の送付メッセージ（メール/メッセージ）を、このユーザー用に書き換えたもの。
+  // 「求人票出力」の送付メッセージ（メール/メッセージ）を、このユーザー用に書き換えたもの。
   // 未設定の送り方は既定の文面（services/jdSendMessage.ts）を使う。
   jdSendTemplates?: JdSendTemplates;
   // 共有チーム設定（kpi-manager-teams.json）の控え。管理者（TEAMS_ADMIN_EMAIL）本人の
@@ -4454,8 +4454,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-16',
     items: [
-      '「求人票まとめ」に「送付メッセージ」を追加した。選んだ求人票を候補者に送るメール・メッセージ（LINE・チャット）の文面を作ってコピーできます。企業ごとに、Web検索で調べた企業概要と企業URLを任意で付けられます（内容は画面で直せます）。文面のテンプレートは「送付メッセージのテンプレートを編集」から自分用に書き換えられます',
-      'ヘッダーに「求人票まとめ」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
+      '「求人票出力」に「送付メッセージ」を追加した。選んだ求人票を候補者に送るメール・メッセージ（LINE・チャット）の文面を作ってコピーできます。企業ごとに、Web検索で調べた企業概要と企業URLを任意で付けられます（内容は画面で直せます）。文面のテンプレートは「送付メッセージのテンプレートを編集」から自分用に書き換えられます',
+      'ヘッダーに「求人票出力」を追加した。求人票ジェネレーターでドライブに保存した求人票を、企業名・ポジション・勤務地などで検索して複数選ぶと、選んだ順に1つのPDFにまとめてダウンロードできます（候補者に複数の求人をまとめて渡す用。並び順は↑↓で変えられます）',
       '「使い方」ガイドに「求人票ジェネレーターとの連携」を追加した（求人票の保存先、KPI管理くんのどこに求人票が出るか、表示されない時の確認点など）',
       '選考情報に「推薦文の下書き」を追加した。「推薦文を作る」を押すと、その選考の求人票と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。編集して「コピー」で使えます。氏名・電話番号・メールアドレスはAIに送らず、本文の候補者は「〇〇様」と書かれます',
       'ブラインドレジュメ作成の求人内容に「ドライブの求人票から選ぶ」を追加した。推薦先の企業名に合う求人票（求人票ジェネレーターで作ったもの）を一覧から選ぶと、その本文が求人内容に追記されます（複数選べます）',
@@ -8463,7 +8463,7 @@ const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick:
 };
 
 /**
- * 「求人票まとめ」画面。求人票ジェネレーターがドライブに保存した求人票PDFを検索して複数選び、
+ * 「求人票出力」画面。求人票ジェネレーターがドライブに保存した求人票PDFを検索して複数選び、
  * 選んだ順に結合して1つのPDFとしてダウンロードする（候補者に複数の求人をまとめて渡す用）。
  * ロジック本体は services/jdBundle.ts。ドライブには保存しない。
  */
@@ -8537,7 +8537,7 @@ const JdBundleView: React.FC<{
     return (
         <div className="blind-resume-page jd-bundle-page">
             <div className="blind-resume-page-header">
-                <h2 className="section-title">求人票まとめ</h2>
+                <h2 className="section-title">求人票出力</h2>
                 <p className="field-hint">求人票ジェネレーターでドライブに保存した求人票（PDF）を検索して選び、選んだ順に1つのPDFにまとめてダウンロードします。候補者に複数の求人をまとめて渡すときに使えます。</p>
             </div>
             <div className="blind-resume-page-body jd-bundle-body">
@@ -8615,7 +8615,7 @@ const JdBundleView: React.FC<{
 };
 
 /**
- * 「求人票まとめ」の送付メッセージ。選んだ求人票を候補者に送るメール／メッセージの文面を、自分用の
+ * 「求人票出力」の送付メッセージ。選んだ求人票を候補者に送るメール／メッセージの文面を、自分用の
  * テンプレート（UserData.jdSendTemplates）から作ってコピーできるようにする。企業ごとに、Web検索で
  * 調べた企業概要・企業URLを任意で付けられる（検索結果は画面で直せる）。文面は送らずコピーするだけ。
  */
@@ -22960,7 +22960,7 @@ const App: React.FC = () => {
             <button onClick={() => setView('team_kpi')} disabled={view === 'team_kpi'}>チーム別</button>
             <button onClick={() => setView('pipeline')} disabled={view === 'pipeline'} className="view-switcher-primary">候補者パイプライン</button>
             <button onClick={() => setView('blind_resume')} disabled={view === 'blind_resume'} className="view-switcher-blind-resume">ブラインドレジュメ収集</button>
-            <button onClick={() => setView('jd_bundle')} disabled={view === 'jd_bundle'} className="view-switcher-blind-resume">求人票まとめ</button>
+            <button onClick={() => setView('jd_bundle')} disabled={view === 'jd_bundle'} className="view-switcher-blind-resume">求人票出力</button>
           </div>
           <div className="user-controls">
             {currentIdentity && (
