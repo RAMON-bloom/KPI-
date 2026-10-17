@@ -5273,3 +5273,8 @@ p.memo-content-text {
 .card-period-badge.is-own { color: #b5651d; background: #fdf3ea; border-color: #f0cfae; font-weight: 600; }
 .card-period-link { background: transparent; border: 0; color: var(--primary-color); padding: 0.2rem 0.4rem; font-size: 0.82rem; }
 .card-period-link:hover { background: #eaf2fd; }
+/* 候補者カードからの面接振り返りアンケート案内のコピー */
+.modal-content.feedback-invite-modal { max-width: 520px; --prep-accent: #1f2a44; --prep-tint: #eef0f4; }
+.feedback-invite-modal .modal-body { display: flex; flex-direction: column; gap: 0.75rem; }
+.feedback-invite-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; font-weight: 600; }
+.feedback-invite-field select { padding: 0.45rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; font-size: 0.9rem; }
