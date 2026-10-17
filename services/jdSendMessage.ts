@@ -105,12 +105,27 @@ const companyOverviewBlock = (infos: CleanInfo[]): string => {
   return withOverview.map(c => `【${c.company}】\n${c.overview}`).join('\n\n');
 };
 
-const companyInfoBlock = (channel: JdSendChannel, infos: CleanInfo[]): string => {
+/**
+ * {企業情報}: 企業ごとに「【企業名】→URL：〜→概要」の順（2026-10-17、ユーザー指定でURLを概要の前に）。
+ * テンプレート側で直前の行に「■ご紹介企業」などの見出しを書いている時は、見出しが二重にならないよう
+ * 「■企業情報」を付けない。
+ */
+const companyInfoBlock = (channel: JdSendChannel, infos: CleanInfo[], withHeading: boolean): string => {
   const blocks = infos
     .filter(c => c.overview || c.url)
-    .map(c => [`【${c.company}】`, c.overview, c.url ? (channel === 'email' ? `URL：${c.url}` : c.url) : ''].filter(Boolean).join('\n'));
+    .map(c => [`【${c.company}】`, c.url ? `URL：${c.url}` : '', c.overview].filter(Boolean).join('\n'));
   if (blocks.length === 0) return '';
-  return [channel === 'email' ? '■企業情報' : '▼企業情報', blocks.join('\n\n')].join('\n');
+  const body = blocks.join('\n\n');
+  return withHeading ? [channel === 'email' ? '■企業情報' : '▼企業情報', body].join('\n') : body;
+};
+
+/** テンプレートで {企業情報} の直前の行が見出し（■・▼・【 で始まる）なら true。 */
+const hasHeadingBeforeInfo = (template: string): boolean => {
+  const before = template.split('{企業情報}')[0];
+  const lines = before.split('\n');
+  if (lines[lines.length - 1].trim()) return false; // 同じ行に文字がある（「企業情報：{企業情報}」など）
+  const prev = lines[lines.length - 2]?.trim() || '';
+  return /^[■▼【◆●]/.test(prev);
 };
 
 /**
@@ -126,7 +141,7 @@ export const fillJdSendTemplate = (channel: JdSendChannel, template: string, par
     company: c.company,
     overview: hasOverviewToken ? '' : c.overview,
     url: hasUrlToken ? '' : c.url,
-  })));
+  })), !(template.includes('{企業情報}') && hasHeadingBeforeInfo(template)));
   let t = template;
   if (info && !t.includes('{企業情報}')) {
     t = t.includes('{求人一覧}') ? t.replace('{求人一覧}', '{求人一覧}\n\n{企業情報}') : `${t.trimEnd()}\n\n{企業情報}`;
