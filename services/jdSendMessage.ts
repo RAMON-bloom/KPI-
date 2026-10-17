@@ -88,7 +88,8 @@ const jobList = (channel: JdSendChannel, jobs: JdSendJob[]): string =>
 
 type CleanInfo = { company: string; overview: string; url: string };
 const cleanInfos = (infos: JdSendCompanyInfo[]): CleanInfo[] =>
-  infos.map(c => ({ company: c.company, overview: c.overview.trim(), url: c.url.trim() })).filter(c => c.overview || c.url);
+  // URLの途中に改行・空白（全角・ゼロ幅を含む）が混ざると貼り付け先でリンクが切れるため取り除く
+  infos.map(c => ({ company: c.company, overview: c.overview.trim(), url: c.url.replace(/[\s\u200B-\u200D\uFEFF]+/g, '') })).filter(c => c.overview || c.url);
 
 /** {企業URL}: 1社ならURLだけ、複数社なら「企業名：URL」を1行ずつ（見出しはテンプレート側で書く）。 */
 const companyUrlBlock = (infos: CleanInfo[]): string => {
@@ -105,14 +106,15 @@ const companyOverviewBlock = (infos: CleanInfo[]): string => {
 };
 
 /**
- * {企業情報}: 企業ごとに「【企業名】→URL：〜→概要」の順（2026-10-17、ユーザー指定でURLを概要の前に）。
+ * {企業情報}: 企業ごとに「【企業名】→URL→概要」の順（2026-10-17、ユーザー指定でURLを概要の前に。
+ * 文面が長くなるので「URL：」は付けない）。
  * テンプレート側で直前の行に「■ご紹介企業」などの見出しを書いている時は、見出しが二重にならないよう
  * 「■企業情報」を付けない。
  */
 const companyInfoBlock = (channel: JdSendChannel, infos: CleanInfo[], withHeading: boolean): string => {
   const blocks = infos
     .filter(c => c.overview || c.url)
-    .map(c => [`【${c.company}】`, c.url ? `URL：${c.url}` : '', c.overview].filter(Boolean).join('\n'));
+    .map(c => [`【${c.company}】`, c.url, c.overview].filter(Boolean).join('\n'));
   if (blocks.length === 0) return '';
   const body = blocks.join('\n\n');
   return withHeading ? [channel === 'email' ? '■企業情報' : '▼企業情報', body].join('\n') : body;
@@ -196,7 +198,8 @@ export const researchCompanyBrief = async (company: string, hint: string): Promi
   });
   const text = (response.text || '').trim();
   if (!text) throw new Error('Web検索の結果が空でした。');
-  const url = (text.match(/URL\s*[:：]\s*(https?:\/\/\S+)/i)?.[1] || '').replace(/[)）。、]+$/, '');
+  // [https://…](https://…) のようなマークダウンや括弧・句読点が付いて返ることがあるので、URLに使えない文字の手前で切る
+  const url = (text.match(/URL\s*[:：]\s*\[?\s*(https?:\/\/[^\s\]\[()<>"'「」（）、。]+)/i)?.[1] || '').replace(/[.,;:]+$/, '');
   const overview = (text.match(/概要\s*[:：]\s*([\s\S]+)/)?.[1] || '').replace(/\*\*/g, '').trim();
   if (!overview && !url) throw new Error('企業情報を読み取れませんでした。');
   return { overview, url };
