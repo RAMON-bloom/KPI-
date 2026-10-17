@@ -1271,6 +1271,10 @@ interface UserData {
   //   「まだこの機能で一度も確定判定を行っていない」——初回のみ過去全期間をさかのぼって
   //   種をまく。
   scoutAchievementLog?: { weekly: string[]; monthly: string[]; lastEvaluatedWeekKey?: string; lastEvaluatedMonthKey?: string };
+  // 月ごとの月次目標の記録（キーは "YYYY-MM"、値は0以外の目標だけ）。その月の間は目標を変えるたびに
+  // 今月分を書き直し、月が終わった後は書き換えない。過去の月を表示する時は、この記録があれば
+  // 当時の目標で達成率を出す（記録が無い月＝この機能より前の月は、現在の目標で代用する）。
+  monthlyTargetHistory?: Record<string, Partial<Record<KpiKey, number>>>;
   // 候補者パイプライン「チーム」タブの「BP会 会議用レポート」で使う、会議用の決定見込み時期・
   // 確度の上書き値と歩留まり設定（services/meetingForecast.ts参照）。メンバー本人が自分の
   // パイプラインに入力している意思決定時期・確度とは別物で、候補者データ（Candidate/
@@ -1666,6 +1670,27 @@ const countRangeMonths = (p: PeriodRange): number =>
   (p.end.getFullYear() - p.start.getFullYear()) * 12 + p.end.getMonth() - p.start.getMonth() + 1;
 const isCurrentMonthRange = (p: PeriodRange, now: Date = new Date()): boolean =>
   isWholeMonthRange(p) && countRangeMonths(p) === 1 && isSameCalendarMonth(p.start, now);
+/** 期間がちょうど1か月分ならその月の初日、それ以外は null。 */
+const singleMonthOfRange = (p: PeriodRange | null): Date | null =>
+  p && isWholeMonthRange(p) && countRangeMonths(p) === 1 ? p.start : null;
+
+const monthKeyOfDate = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+/** 今月の月次目標を、月ごとの目標の記録（UserData.monthlyTargetHistory）に入れる形にする（0の項目は省く）。 */
+const toMonthlyTargetSnapshot = (targets: Record<string, number>): Record<string, number> =>
+  Object.fromEntries(Object.entries(targets).filter(([, v]) => typeof v === 'number' && v !== 0).sort(([a], [b]) => a.localeCompare(b)));
+/**
+ * 指定した月の月次目標。今月なら現在の目標、過去の月で記録があれば当時の目標、記録が無ければ
+ * 現在の目標で代用する（fromHistory=false）。
+ */
+const resolveMonthlyTargetsFor = (
+  history: UserData['monthlyTargetHistory'],
+  month: Date,
+  current: Record<KpiKey, number>,
+): { targets: Record<KpiKey, number>; fromHistory: boolean } => {
+  if (isSameCalendarMonth(month, new Date())) return { targets: current, fromHistory: true };
+  const recorded = history?.[monthKeyOfDate(month)];
+  return recorded ? { targets: recorded as Record<KpiKey, number>, fromHistory: true } : { targets: current, fromHistory: false };
+};
 // 今月ちょうどの範囲はnull（今月扱い）に寄せる。カード個別の期間など、nullを別の意味で使う箇所から
 // 集計側へ渡すときに使う。
 const toMonthOverride = (p: PeriodRange | null): PeriodRange | null => (p && isCurrentMonthRange(p) ? null : p);
@@ -4849,6 +4874,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '面談ログ（議事録・ファイル・音声）を取り込んだときに自動で入る項目を増やした。これまでの年齢・希望年収・電話番号・メールアドレスに加えて、現職・職種・現年収・入社希望時期・他社の選考状況・他エージェントの利用も読み取ります。空欄の項目はそのまま入り、すでに入力済みで内容が違う項目は「上書きしますか？」と一覧で確認します（キャンセルすると登録済みの内容を残します）',
       '候補者パイプラインの上部に「まだ取り込んでいない面談ログ」を追加した。直近14日に更新されたGoogleドキュメント（Meetの議事録など）のうち、自分の候補者の名前が入っていて、まだ面談ログに取り込んでいないものを自動で探して一覧にします。「取り込む」でAIが要約して面談ログに追加し、「対象外」にした文書は次から出しません。面接対策資料・求人票・応募書類など、名前に「面接対策」「求人票」「履歴書」などが入った文書は対象にしません。画面を開いた時と、10分以上たってからタブに戻った時に探し直します',
       '全ユーザータブの「全ユーザーの進捗」に「メンバー別／チーム別」の切り替えを追加した。チーム別にすると、選択中のメンバーをチームごとに合計した行（チーム未所属の人がいればその行も）と、全体の合計行を表示します。返信率などの率はチームの合計から計算し、返信数・有効面談数には1人あたりの数も添えます',
+      '月次目標を月ごとに記録するようにした。今月の目標は変えるたびに記録を更新し、月が終わるとその月の目標として残ります。個人実績の「媒体別 月次進捗」で過去の月を表示すると当時の目標で達成率を出し、全ユーザー/チーム別の「全ユーザーの進捗」も、期間をちょうど1か月にした時はその月の目標・達成率を表示するようになりました（これまでは今月以外は目標を出していませんでした）。記録はこの更新以降の月から残るため、それより前の月は現在の目標で代用します',
     ],
   },
   {
@@ -19368,6 +19394,9 @@ const AllUsersDashboard: React.FC<{
   const labelOfOverride = (p: PeriodRange | null) => (p ? formatPeriodRangeLabel(p) : '今月');
   const periodLabel = labelOfOverride(funnelPeriodOverride);
   const progressPeriodLabel = labelOfOverride(progressPeriodOverride);
+  // 進捗カードの期間がちょうど1か月（今月以外）なら、目標・達成率もその月の目標で出す
+  const progressSingleMonth = singleMonthOfRange(progressPeriodOverride);
+  const showProgressTargets = !progressPeriodOverride || !!progressSingleMonth;
   const grossProfitPeriodLabel = labelOfOverride(grossProfitPeriodOverride);
   const dowPeriodLabel = labelOfOverride(dowPeriodOverride);
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
@@ -19445,7 +19474,11 @@ const AllUsersDashboard: React.FC<{
     const totals = progressPeriodOverride
       ? calculateTotalsForRange(userData.entries || [], allMedia, progressPeriodOverride.start, progressPeriodOverride.end)
       : calculateMonthlyTotals(userData.entries || [], allMedia);
-    const kpiTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
+    const currentTargets = { ...buildDefaultKpiTargets(allMedia), ...(userData.kpiTargets || {}) };
+    // ちょうど1か月の期間なら、その月の目標の記録（無ければ現在の目標）で達成率を出す
+    const kpiTargets = progressSingleMonth
+      ? resolveMonthlyTargetsFor(userData.monthlyTargetHistory, progressSingleMonth, currentTargets).targets
+      : currentTargets;
 
     const sent = getTotalFromLump(totals, '_scoutsSent', allMedia);
     const replies = getTotalFromLump(totals, '_scoutReplies', allMedia);
@@ -19477,7 +19510,7 @@ const AllUsersDashboard: React.FC<{
       initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
       generalKpis,
     };
-  }), [users, allUsersData, allMedia, activeMedia, progressPeriodOverride]);
+  }), [users, allUsersData, allMedia, activeMedia, progressPeriodOverride, progressSingleMonth]);
 
   // 「全ユーザーの進捗」のチーム別表示。表示中のユーザーをチームごとに合計し、率は合計から計算し直す
   // （メンバーの率の平均ではない）。複数チームに所属する人はそれぞれのチームに数える。最後に全体の合計行。
@@ -19563,24 +19596,24 @@ const AllUsersDashboard: React.FC<{
           <small>({effectiveReplies}/{replies})</small>
         </td>
         <td className="progress-cell">
-            <span>{documentsCollected}{!progressPeriodOverride && ` / ${documentsCollectedTarget}`}</span>
-            {!progressPeriodOverride && (
+            <span>{documentsCollected}{showProgressTargets && ` / ${documentsCollectedTarget}`}</span>
+            {showProgressTargets && (
               <div className="mini-progress-bar">
                   <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
               </div>
             )}
         </td>
          <td className="progress-cell">
-            <span>{effectiveDocumentsCollected}{!progressPeriodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
-            {!progressPeriodOverride && (
+            <span>{effectiveDocumentsCollected}{showProgressTargets && ` / ${effectiveDocumentsCollectedTarget}`}</span>
+            {showProgressTargets && (
               <div className="mini-progress-bar">
                   <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
               </div>
             )}
         </td>
         <td className="progress-cell">
-            <span>{initialInterviews}{!progressPeriodOverride && ` / ${initialInterviewsTarget}`}</span>
-            {!progressPeriodOverride && (
+            <span>{initialInterviews}{showProgressTargets && ` / ${initialInterviewsTarget}`}</span>
+            {showProgressTargets && (
               <div className="mini-progress-bar">
                   <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
               </div>
@@ -19598,8 +19631,8 @@ const AllUsersDashboard: React.FC<{
             const progress = target > 0 ? Math.min((value / target) * 100, 100) : 0;
             return (
                 <td key={key} className="progress-cell">
-                    <span>{value}{!progressPeriodOverride && ` / ${target}`}</span>
-                    {!progressPeriodOverride && (
+                    <span>{value}{showProgressTargets && ` / ${target}`}</span>
+                    {showProgressTargets && (
                       <div className="mini-progress-bar">
                           <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
                       </div>
@@ -19695,8 +19728,11 @@ const AllUsersDashboard: React.FC<{
               {showTeamProgress && <span className="interview-prep-hint">選択中のメンバーをチームごとに合計しています（率は合計から計算。複数チームに所属する人はそれぞれに数えます）。「1人」は1人あたりの数です。</span>}
             </div>
           )}
-          {progressPeriodOverride && (
+          {progressPeriodOverride && !progressSingleMonth && (
             <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
+          )}
+          {progressSingleMonth && (
+            <p className="gmail-scout-message">各メンバーがその月に設定していた月次目標で表示しています（目標の記録が無いメンバー・月は、現在の目標で代用しています）。</p>
           )}
           <div className="all-users-table-container">
             <table className="all-users-table">
@@ -20798,6 +20834,7 @@ const App: React.FC = () => {
     // 同じ理由: スカウト達成の累計ログも許可リストに無いと、記録した直後は効いていても
     // 再読み込みのたびに消えてしまい「目標を変えても累計は変わらない」が実現できない。
     scoutAchievementLog: d.scoutAchievementLog,
+    monthlyTargetHistory: d.monthlyTargetHistory,
     // 同じ理由: 会議用レポートの上書き値も許可リストに無いと再読み込みのたびに消える。
     meetingForecast: d.meetingForecast,
     // 同じ理由: 面接振り返りアンケートの案内文（自分用）も許可リストに無いと再読み込みで消える。
@@ -20984,6 +21021,7 @@ const App: React.FC = () => {
           displayName: data.displayName,
           feedbackPosts: data.feedbackPosts || [],
           scoutAchievementLog: data.scoutAchievementLog,
+          monthlyTargetHistory: data.monthlyTargetHistory,
         };
         fileIds[email] = teammateFileId;
       });
@@ -23302,6 +23340,11 @@ const App: React.FC = () => {
   const [monthlyProgressViewDate, setMonthlyProgressViewDate] = useState(new Date());
   const isCurrentRealMonth = monthlyProgressViewDate.getFullYear() === new Date().getFullYear()
     && monthlyProgressViewDate.getMonth() === new Date().getMonth();
+  // 媒体別 月次進捗で使う目標。過去の月はその月の記録（monthlyTargetHistory）があれば当時の目標。
+  const viewedMonthTargets = useMemo(
+    () => resolveMonthlyTargetsFor(currentUserData?.monthlyTargetHistory, monthlyProgressViewDate, kpiTargets),
+    [currentUserData?.monthlyTargetHistory, monthlyProgressViewDate, kpiTargets],
+  );
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
     const year = monthlyProgressViewDate.getFullYear();
@@ -23684,6 +23727,16 @@ const App: React.FC = () => {
       });
     }
   }, [currentUserData, currentIdentity, entries, allMedia, selfScoutAwardMediaIds, weeklyKpiTargets, kpiTargets, weekStartsOn]);
+
+  // 今月の月次目標を、月ごとの目標の記録（monthlyTargetHistory）に残す。目標を変えるたびに今月分だけ
+  // 書き直し、過去の月の記録は書き換えない。保存は既存の自動保存に乗る。
+  useEffect(() => {
+    if (!currentUserData || !currentIdentity) return;
+    const key = monthKeyOfDate(new Date());
+    const snapshot = toMonthlyTargetSnapshot(kpiTargets);
+    if (JSON.stringify(currentUserData.monthlyTargetHistory?.[key] || null) === JSON.stringify(snapshot)) return;
+    setCurrentUserData(prev => prev ? { ...prev, monthlyTargetHistory: { ...(prev.monthlyTargetHistory || {}), [key]: snapshot } } : null);
+  }, [currentUserData, currentIdentity, kpiTargets]);
 
   // 個人実績タブ上部のScoutProgressLeaderboard用——自分を含む全ユーザーのうち、まだ達成して
   // いない人を対象に「達成に最も近い」TOP3を週次・月次それぞれ独立に出す（達成済みの期間は
@@ -24286,7 +24339,9 @@ const App: React.FC = () => {
                   </div>
                   {!isCurrentRealMonth && (
                     <p className="gmail-scout-message">
-                      目標は現在設定されている月次目標です（表示中の月の当時の目標とは異なる場合があります）。
+                      {viewedMonthTargets.fromHistory
+                        ? 'この月に設定されていた月次目標で表示しています。'
+                        : 'この月の目標の記録がないため、現在設定されている月次目標で表示しています（当時の目標とは異なる場合があります）。'}
                     </p>
                   )}
                   <div className="media-dashboard kpi-dashboard">
@@ -24295,7 +24350,7 @@ const App: React.FC = () => {
                               key={source.id}
                               source={source}
                               monthlyTotals={monthlyTotals}
-                              kpiTargets={kpiTargets}
+                              kpiTargets={viewedMonthTargets.targets}
                           />
                       ))}
                   </div>
