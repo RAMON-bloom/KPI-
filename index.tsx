@@ -1646,6 +1646,329 @@ const getMonthRangeOverride = (offsetMonths: number): { start: Date; end: Date }
   return { start, end };
 };
 
+// ---- 期間ピッカー（アプリ共通の期間切り替え部品） ----
+// 月送り・期間指定・よく使う期間を1つの部品にまとめたもの。「‹ 2026年10月 ›」のピルで前後に送り、
+// 真ん中を押すと、よく使う期間・年度（3月〜翌2月）の月グリッド・日付指定のメニューが開く。選んだ時点で
+// 反映する（「この期間で絞り込む」のような有効化ボタンは置かない）。
+// 値はnull＝既定（nullMeansで「今月」か「全期間」かを決める）、それ以外は{start, end}（endはその日の
+// 23:59:59.999）。nullMeans='currentMonth'のときは、今月ちょうどの範囲を選んだらnullで返す——今月扱い
+// （目標・達成率の表示など）の分岐をそのまま活かすため、getMonthRangeOverride(0)がnullを返すのと同じ。
+type PeriodRange = { start: Date; end: Date };
+const periodMonthStart = (y: number, m: number): Date => new Date(y, m, 1);
+const periodMonthEnd = (y: number, m: number): Date => new Date(y, m + 1, 0, 23, 59, 59, 999);
+const monthRangeOf = (d: Date): PeriodRange => ({ start: periodMonthStart(d.getFullYear(), d.getMonth()), end: periodMonthEnd(d.getFullYear(), d.getMonth()) });
+const isSameCalendarMonth = (a: Date, b: Date): boolean => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+const isWholeMonthRange = (p: PeriodRange): boolean =>
+  p.start.getDate() === 1 && new Date(p.end.getFullYear(), p.end.getMonth(), p.end.getDate() + 1).getDate() === 1;
+const countRangeMonths = (p: PeriodRange): number =>
+  (p.end.getFullYear() - p.start.getFullYear()) * 12 + p.end.getMonth() - p.start.getMonth() + 1;
+const isCurrentMonthRange = (p: PeriodRange, now: Date = new Date()): boolean =>
+  isWholeMonthRange(p) && countRangeMonths(p) === 1 && isSameCalendarMonth(p.start, now);
+// 今月ちょうどの範囲はnull（今月扱い）に寄せる。カード個別の期間など、nullを別の意味で使う箇所から
+// 集計側へ渡すときに使う。
+const toMonthOverride = (p: PeriodRange | null): PeriodRange | null => (p && isCurrentMonthRange(p) ? null : p);
+const fiscalYearOf = (d: Date): number => (d.getMonth() >= 2 ? d.getFullYear() : d.getFullYear() - 1);
+const isSamePeriodRange = (a: PeriodRange, b: PeriodRange): boolean =>
+  a.start.toDateString() === b.start.toDateString() && a.end.toDateString() === b.end.toDateString();
+// 前後への送り — 月単位の範囲はその月数ぶん（四半期なら前後の四半期、今期なら前後の期）、日付指定の
+// 範囲はその日数ぶんずらす。
+const shiftPeriodRange = (p: PeriodRange, dir: number): PeriodRange => {
+  if (isWholeMonthRange(p)) {
+    const n = countRangeMonths(p) * dir;
+    return { start: periodMonthStart(p.start.getFullYear(), p.start.getMonth() + n), end: periodMonthEnd(p.end.getFullYear(), p.end.getMonth() + n) };
+  }
+  const startDay = new Date(p.start.getFullYear(), p.start.getMonth(), p.start.getDate());
+  const endDay = new Date(p.end.getFullYear(), p.end.getMonth(), p.end.getDate());
+  const days = (Math.round((endDay.getTime() - startDay.getTime()) / 86400000) + 1) * dir;
+  return {
+    start: new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + days),
+    end: new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate() + days, 23, 59, 59, 999),
+  };
+};
+const formatPeriodRangeLabel = (p: PeriodRange): string => {
+  const ys = p.start.getFullYear();
+  const ye = p.end.getFullYear();
+  if (isWholeMonthRange(p)) {
+    if (countRangeMonths(p) === 1) return `${ys}年${p.start.getMonth() + 1}月`;
+    return ys === ye ? `${ys}年${p.start.getMonth() + 1}月〜${p.end.getMonth() + 1}月` : `${ys}年${p.start.getMonth() + 1}月〜${ye}年${p.end.getMonth() + 1}月`;
+  }
+  const full = (d: Date) => `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  return ys === ye ? `${full(p.start)}〜${p.end.getMonth() + 1}/${p.end.getDate()}` : `${full(p.start)}〜${full(p.end)}`;
+};
+const formatPeriodRangeShort = (p: PeriodRange): string => {
+  const ym = (d: Date) => `${String(d.getFullYear()).slice(2)}/${d.getMonth() + 1}`;
+  return countRangeMonths(p) === 1 ? `${p.start.getMonth() + 1}月` : `${ym(p.start)}〜${ym(p.end)}`;
+};
+const toDateInputValue = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// よく使う期間。会社の期は3月始まり（3月〜翌2月）、四半期も期に合わせて3〜5月/6〜8月/9〜11月/12〜翌2月。
+// 賞与の査定期間: 6月賞与 = 前年12月〜5月、12月賞与 = 6月〜11月。12月に入ったら6月賞与は次回分
+// （今年12月〜翌5月）に切り替える（その月から次の査定期間が始まるため）。
+type PeriodPreset = { group: string; label: string; range: PeriodRange };
+const buildPeriodPickerPresets = (now: Date = new Date()): PeriodPreset[] => {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const fy = fiscalYearOf(now);
+  const quarterStart = periodMonthStart(fy, 2 + Math.floor(((m - 2 + 12) % 12) / 3) * 3);
+  const juneBonusEndYear = m === 11 ? y + 1 : y;
+  const months = (s: Date, count: number): PeriodRange => ({ start: s, end: periodMonthEnd(s.getFullYear(), s.getMonth() + count - 1) });
+  return [
+    { group: '月', label: '今月', range: monthRangeOf(now) },
+    { group: '月', label: '先月', range: monthRangeOf(periodMonthStart(y, m - 1)) },
+    { group: '月', label: '来月', range: monthRangeOf(periodMonthStart(y, m + 1)) },
+    { group: '期・四半期', label: '今四半期', range: months(quarterStart, 3) },
+    { group: '期・四半期', label: '今期', range: months(periodMonthStart(fy, 2), 12) },
+    { group: '期・四半期', label: '前期', range: months(periodMonthStart(fy - 1, 2), 12) },
+    { group: '賞与', label: '6月賞与対象', range: months(periodMonthStart(juneBonusEndYear - 1, 11), 6) },
+    { group: '賞与', label: '12月賞与対象', range: months(periodMonthStart(y, 5), 6) },
+  ];
+};
+
+const PeriodPicker: React.FC<{
+  value: PeriodRange | null;
+  onChange: (next: PeriodRange | null) => void;
+  // 'month'＝単月だけを選ぶ（メニューは月グリッドのみ）。'range'＝よく使う期間・複数月・日付指定も選べる。
+  mode?: 'range' | 'month';
+  nullMeans?: 'currentMonth' | 'all';
+  ariaLabel?: string;
+  size?: 'md' | 'lg';
+}> = ({ value, onChange, mode = 'range', nullMeans = 'currentMonth', ariaLabel = '表示期間', size = 'md' }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [pendingStart, setPendingStart] = useState<Date | null>(null);
+  const [viewFiscalYear, setViewFiscalYear] = useState(() => fiscalYearOf(value?.start ?? new Date()));
+  const [startInput, setStartInput] = useState('');
+  const [endInput, setEndInput] = useState('');
+  const [dateError, setDateError] = useState('');
+  const rootRef = useRef<HTMLDivElement>(null);
+  const now = new Date();
+  const resolved: PeriodRange | null = value ?? (nullMeans === 'currentMonth' ? monthRangeOf(now) : null);
+  const isDefault = value === null || (nullMeans === 'currentMonth' && isCurrentMonthRange(value, now));
+  const presets = useMemo(() => buildPeriodPickerPresets(new Date()), []);
+
+  const close = () => { setIsOpen(false); setPendingStart(null); setDateError(''); };
+  useEffect(() => {
+    if (!isOpen) return;
+    const onPointer = (e: MouseEvent) => { if (rootRef.current && !rootRef.current.contains(e.target as Node)) close(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onPointer); document.removeEventListener('keydown', onKey); };
+  }, [isOpen]);
+
+  const normalize = (next: PeriodRange | null): PeriodRange | null =>
+    (next && nullMeans === 'currentMonth' && isCurrentMonthRange(next) ? null : next);
+  const apply = (next: PeriodRange | null) => { onChange(normalize(next)); close(); };
+  const shift = (dir: number) => {
+    const base = resolved ?? monthRangeOf(new Date());
+    onChange(normalize(shiftPeriodRange(mode === 'month' ? monthRangeOf(base.start) : base, dir)));
+  };
+  const toggleMenu = () => {
+    if (isOpen) { close(); return; }
+    const base = resolved ?? monthRangeOf(new Date());
+    setViewFiscalYear(fiscalYearOf(base.start));
+    setStartInput(resolved ? toDateInputValue(resolved.start) : '');
+    setEndInput(resolved ? toDateInputValue(resolved.end) : '');
+    setIsOpen(true);
+  };
+  const handleMonthClick = (d: Date) => {
+    if (mode === 'month') { apply(monthRangeOf(d)); return; }
+    if (!pendingStart) {
+      // 1回目: その月だけをすぐ反映し、メニューは開いたまま終わりの月を待つ。
+      setPendingStart(d);
+      onChange(normalize(monthRangeOf(d)));
+      return;
+    }
+    const [a, b] = pendingStart.getTime() <= d.getTime() ? [pendingStart, d] : [d, pendingStart];
+    apply({ start: periodMonthStart(a.getFullYear(), a.getMonth()), end: periodMonthEnd(b.getFullYear(), b.getMonth()) });
+  };
+  const handleApplyDates = () => {
+    if (!startInput || !endInput) { setDateError('開始日と終了日を入力してください。'); return; }
+    if (startInput > endInput) { setDateError('終了日は開始日以降の日付にしてください。'); return; }
+    apply({ start: new Date(startInput + 'T00:00:00'), end: new Date(endInput + 'T23:59:59.999') });
+  };
+
+  const matchedPreset = resolved ? presets.find(p => isSamePeriodRange(p.range, resolved)) : undefined;
+  const kind = !resolved
+    ? null
+    : isCurrentMonthRange(resolved, now)
+      ? '今月'
+      : matchedPreset && matchedPreset.group !== '月'
+        ? matchedPreset.label
+        : !isWholeMonthRange(resolved)
+          ? '日付指定'
+          : countRangeMonths(resolved) > 1 ? `${countRangeMonths(resolved)}か月` : null;
+  const highlight = pendingStart ? monthRangeOf(pendingStart) : resolved;
+  const unit = mode === 'month' ? '月' : '期間';
+
+  return (
+    <div className={`period-picker period-picker-${size}`} ref={rootRef}>
+      <div
+        className="period-picker-pill"
+        role="group"
+        aria-label={`${ariaLabel}（左右キーで前後の${unit}へ）`}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowLeft') { e.preventDefault(); shift(-1); }
+          if (e.key === 'ArrowRight') { e.preventDefault(); shift(1); }
+        }}
+      >
+        <button type="button" className="period-picker-step" onClick={() => shift(-1)} aria-label={`前の${unit}へ`}>‹</button>
+        <button type="button" className="period-picker-main" onClick={toggleMenu} aria-expanded={isOpen} aria-haspopup="dialog">
+          <span className="period-picker-label">{resolved ? formatPeriodRangeLabel(resolved) : '全期間'}</span>
+          {kind && <span className="period-picker-kind">{kind}</span>}
+          <span className="period-picker-caret" aria-hidden="true">▾</span>
+        </button>
+        <button type="button" className="period-picker-step" onClick={() => shift(1)} aria-label={`次の${unit}へ`}>›</button>
+      </div>
+      {!isDefault && (
+        <button type="button" className="period-picker-reset" onClick={() => apply(null)}>
+          {nullMeans === 'all' ? '全期間に戻る' : '今月に戻る'}
+        </button>
+      )}
+      {isOpen && (
+        <div className={`period-picker-menu ${mode === 'range' ? 'is-range' : ''}`} role="dialog" aria-label={`${ariaLabel}を選ぶ`}>
+          {mode === 'range' && (
+            <div className="period-picker-presets">
+              {nullMeans === 'all' && (
+                <button type="button" className={value === null ? 'is-on' : ''} onClick={() => apply(null)}><span>全期間</span></button>
+              )}
+              {presets.map((p, i) => (
+                <React.Fragment key={p.label}>
+                  {(i === 0 || presets[i - 1].group !== p.group) && <div className="period-picker-group">{p.group}</div>}
+                  <button type="button" className={resolved && isSamePeriodRange(p.range, resolved) ? 'is-on' : ''} onClick={() => apply(p.range)}>
+                    <span>{p.label}</span>
+                    <small>{formatPeriodRangeShort(p.range)}</small>
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
+          <div className="period-picker-months">
+            <div className="period-picker-yearnav">
+              <button type="button" onClick={() => setViewFiscalYear(y => y - 1)} aria-label="前の年度">‹</button>
+              <span>{viewFiscalYear}年度（3月〜翌2月）</span>
+              <button type="button" onClick={() => setViewFiscalYear(y => y + 1)} aria-label="次の年度">›</button>
+            </div>
+            <div className="period-picker-grid">
+              {Array.from({ length: 12 }, (_, i) => {
+                const d = periodMonthStart(viewFiscalYear, 2 + i);
+                const inRange = !!highlight && isWholeMonthRange(highlight)
+                  && d.getTime() >= periodMonthStart(highlight.start.getFullYear(), highlight.start.getMonth()).getTime()
+                  && d.getTime() <= highlight.end.getTime();
+                const isEdge = inRange && !!highlight && (isSameCalendarMonth(d, highlight.start) || isSameCalendarMonth(d, highlight.end));
+                return (
+                  <React.Fragment key={i}>
+                    {i % 3 === 0 && <div className="period-picker-quarter">第{i / 3 + 1}四半期</div>}
+                    <button
+                      type="button"
+                      className={[inRange ? 'is-in' : '', isEdge ? 'is-edge' : '', isSameCalendarMonth(d, now) ? 'is-now' : ''].filter(Boolean).join(' ')}
+                      onClick={() => handleMonthClick(d)}
+                      aria-label={`${d.getFullYear()}年${d.getMonth() + 1}月`}
+                      aria-pressed={inRange}
+                    >
+                      {d.getMonth() + 1}月
+                    </button>
+                  </React.Fragment>
+                );
+              })}
+            </div>
+            {mode === 'range' && (
+              <p className="period-picker-hint">
+                {pendingStart
+                  ? `${pendingStart.getFullYear()}年${pendingStart.getMonth() + 1}月を表示中です。続けて終わりの月を押すと、その間が範囲になります。`
+                  : '月を押すとその月を表示します。続けて別の月を押すと、その間が範囲になります。'}
+              </p>
+            )}
+          </div>
+          {mode === 'range' && (
+            <div className="period-picker-dates">
+              <span>日付で指定</span>
+              <input type="date" value={startInput} onChange={(e) => { setStartInput(e.target.value); setDateError(''); }} aria-label="開始日" />
+              <span>〜</span>
+              <input type="date" value={endInput} onChange={(e) => { setEndInput(e.target.value); setDateError(''); }} aria-label="終了日" />
+              <button type="button" className="period-picker-apply" onClick={handleApplyDates}>適用</button>
+              {dateError && <span className="period-picker-error" role="alert">{dateError}</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// 月だけを送る箇所（カレンダー・媒体別月次進捗など）向けの薄いラッパー。monthはその月の任意の日。
+const MonthPicker: React.FC<{ month: Date; onChange: (month: Date) => void; ariaLabel?: string; size?: 'md' | 'lg' }> = ({ month, onChange, ariaLabel = '表示する月', size }) => (
+  <PeriodPicker
+    value={isSameCalendarMonth(month, new Date()) ? null : monthRangeOf(month)}
+    onChange={(next) => onChange(next ? next.start : periodMonthStart(new Date().getFullYear(), new Date().getMonth()))}
+    mode="month"
+    ariaLabel={ariaLabel}
+    size={size}
+  />
+);
+
+// 週単位の送り（週間サマリー）。見た目は期間ピッカーのピルにそろえる。
+const WeekStepper: React.FC<{
+  weekStart: Date;
+  weekStartsOn: 0 | 6;
+  onPrev: () => void;
+  onNext: () => void;
+  onThisWeek?: () => void;
+}> = ({ weekStart, weekStartsOn, onPrev, onNext, onThisWeek }) => {
+  const end = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 6);
+  const isThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === weekStart.getTime();
+  const wd = ['日', '月', '火', '水', '木', '金', '土'];
+  const fmt = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日（${wd[d.getDay()]}）`;
+  return (
+    <div className="period-picker period-picker-md">
+      <div
+        className="period-picker-pill"
+        role="group"
+        aria-label="表示する週（左右キーで前後の週へ）"
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowLeft') { e.preventDefault(); onPrev(); }
+          if (e.key === 'ArrowRight' && !isThisWeek) { e.preventDefault(); onNext(); }
+        }}
+      >
+        <button type="button" className="period-picker-step" onClick={onPrev} aria-label="前の週へ">‹</button>
+        <span className="period-picker-main is-static">
+          <span className="period-picker-label">{fmt(weekStart)}〜{fmt(end)}</span>
+          {isThisWeek && <span className="period-picker-kind">今週</span>}
+        </span>
+        <button type="button" className="period-picker-step" onClick={onNext} disabled={isThisWeek} aria-label="次の週へ">›</button>
+      </div>
+      {!isThisWeek && onThisWeek && (
+        <button type="button" className="period-picker-reset" onClick={onThisWeek}>今週に戻る</button>
+      )}
+    </div>
+  );
+};
+
+// 全ユーザー/チーム別タブの各カード用。既定はページ上部の期間に従い、「このカードだけ期間を変える」で
+// カード個別の期間にできる（個別のときはバッジで示し、ワンクリックでページの期間に戻せる）。
+const CardPeriodControl: React.FC<{
+  pagePeriod: PeriodRange | null;
+  ownPeriod: PeriodRange | null;
+  onChangeOwn: (next: PeriodRange | null) => void;
+  mode?: 'range' | 'month';
+}> = ({ pagePeriod, ownPeriod, onChangeOwn, mode = 'range' }) => {
+  if (!ownPeriod) {
+    return (
+      <div className="card-period-control">
+        <span className="card-period-badge">ページの期間：{formatPeriodRangeLabel(pagePeriod ?? monthRangeOf(new Date()))}</span>
+        <button type="button" className="card-period-link" onClick={() => onChangeOwn(pagePeriod ?? monthRangeOf(new Date()))}>このカードだけ期間を変える</button>
+      </div>
+    );
+  }
+  return (
+    <div className="card-period-control is-own">
+      <span className="card-period-badge is-own">このカードだけ個別の期間</span>
+      <PeriodPicker value={ownPeriod} onChange={(next) => onChangeOwn(next ?? monthRangeOf(new Date()))} mode={mode} ariaLabel="このカードの期間" />
+      <button type="button" className="card-period-link" onClick={() => onChangeOwn(null)}>ページの期間に戻す</button>
+    </div>
+  );
+};
+
 
 const chartOptions = {
     responsive: true,
@@ -2447,13 +2770,13 @@ const WeeklySummary: React.FC<{
   weeklyKpiTargetsUpdatedAt?: string;
   onPrevWeek: () => void;
   onNextWeek: () => void;
+  onThisWeek?: () => void;
   weekStartsOn: 0 | 6;
-}> = ({ weekStartDate, data, weeklyKpiTargets, weeklyKpiTargetsUpdatedAt, onPrevWeek, onNextWeek, weekStartsOn }) => {
+}> = ({ weekStartDate, data, weeklyKpiTargets, weeklyKpiTargetsUpdatedAt, onPrevWeek, onNextWeek, onThisWeek, weekStartsOn }) => {
   const endDate = new Date(weekStartDate);
   endDate.setDate(weekStartDate.getDate() + 6);
 
   const formatDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
-  const weekRange = `${formatDate(weekStartDate)} - ${formatDate(endDate)}`;
 
   const isThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === weekStartDate.getTime();
   const targetChangedThisWeek = isThisWeek
@@ -2462,12 +2785,8 @@ const WeeklySummary: React.FC<{
 
   return (
     <div className="weekly-summary-container">
-      <div className="weekly-summary-header">
-        <h3>{weekRange}</h3>
-        <div>
-          <button onClick={onPrevWeek} aria-label="前の週へ">&lt; 前の週</button>
-          <button onClick={onNextWeek} disabled={isThisWeek} aria-label="次の週へ">次の週 &gt;</button>
-        </div>
+      <div className="period-row">
+        <WeekStepper weekStart={weekStartDate} weekStartsOn={weekStartsOn} onPrev={onPrevWeek} onNext={onNextWeek} onThisWeek={onThisWeek} />
       </div>
       {targetChangedThisWeek && (
         <p className="weekly-target-change-notice">
@@ -4413,10 +4732,10 @@ const CalendarView: React.FC<{
   entriesByDate: Map<string, KpiTotals>;
   allMedia: MediaEntry[];
   onDayClick: (date: string) => void;
-  onPrevMonth: () => void;
-  onNextMonth: () => void;
+  // 見出しの月ピッカー（‹ ›で前後の月、押すと月グリッドで好きな月へ）で月を変えたとき。
+  onChangeMonth: (month: Date) => void;
   weekStartsOn: 0 | 6;
-}> = ({ viewDate, entriesByDate, allMedia, onDayClick, onPrevMonth, onNextMonth, weekStartsOn }) => {
+}> = ({ viewDate, entriesByDate, allMedia, onDayClick, onChangeMonth, weekStartsOn }) => {
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth();
 
@@ -4498,10 +4817,8 @@ const CalendarView: React.FC<{
 
   return (
     <div className="calendar-container">
-      <div className="calendar-header">
-        <button onClick={onPrevMonth} aria-label="前の月へ">&lt; 前月</button>
-        <h2>{`${year}年 ${month + 1}月`}</h2>
-        <button onClick={onNextMonth} aria-label="次の月へ">次月 &gt;</button>
+      <div className="period-row">
+        <MonthPicker month={viewDate} onChange={onChangeMonth} ariaLabel="表示する月" size="lg" />
       </div>
       <div className="calendar-grid-header">
         {getWeekdayLabels(weekStartsOn).map(day => <div key={day}>{day}</div>)}
@@ -4526,6 +4843,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
+      '期間の切り替え（前月・次月、期間指定、よく使う期間）を、アプリ全体で「‹ 2026年10月 ›」の形にそろえた。‹ ›で前後の期間へ（四半期なら前後の四半期へ）、真ん中を押すとよく使う期間・年度の月グリッド・日付指定から選べます。選んだ時点で反映されるので、「この期間で絞り込む」などのボタンはなくなりました。今月以外を見ているときは「今月に戻る」が出ます',
+      '全ユーザー/チーム別タブの期間を、ページ上部の「このページの期間」1か所にまとめた。進捗・想定粗利・曜日別返信率の各カードも既定でこの期間に従います（これまではカードごとに別々でした）。カードだけ別の期間で見たいときは「このカードだけ期間を変える」から指定でき、個別の期間のカードにはバッジが付きます',
       '候補者の詳細表示にある各社の選考カードでも、企業名を面接対策ジェネレーターの企業一覧から選べるようにした。企業名をクリックして入力を始めると登録済みの企業が候補に出て、選ぶとその場で保存されます（↑↓キーで選んでEnterでも確定。Escで取り消し）。一覧に無い企業は候補の一番下の「新規登録」でジェネレーターにも追加できます',
       '見込み月・意思決定時期など、似た日付の項目を整理した。集計に使うのは候補者の「見込み月」だけになり、見込み月の絞り込み・並び替え・想定粗利・内定承諾一覧（成約月）・BP会レポートはすべて見込み月で集計します（以前は選考ごとの意思決定時期を優先していたため、画面によって月がずれることがありました）。見込み月には「週」も任意で入れられ、BP会レポートのメンバー側の時期に使われます。選考ごとの「意思決定時期」は集計に使わないメモになりました。見込み月が未入力の候補者は、これまでの選考の日付から自動で読み替えています（「◯月1日」になっていたものは週未定として扱います）',
       'カード上の選考状況の変更など、どの画面から「内定承諾」にしても成約月（何月・何週の成約か）を確認するようにした（以前は選考情報の画面から変えたときだけ確認していました）。選んだ月は見込み月（成約月）に入ります。「内定承諾にしない」を選ぶと、その選考は元のフェーズのまま保存されます',
@@ -5360,7 +5679,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
       image: { src: '/help/gross-profit.webp', alt: '想定粗利' },
       items: [
         '候補者の見込み月が対象期間に入る選考について、想定紹介料・媒体手数料・想定粗利・平均粗利をフェーズ別に集計します（候補者1人につき最も進んでいる／確度の高い1社で集計）。',
-        '「前月/次月」、開始日〜終了日の指定、「今四半期」「今期（3月〜翌2月）」「前期」「6月賞与対象」「12月賞与対象」のワンクリック指定ができます。複数月にまたがる期間では月別の内訳も表示されます。',
+        '期間は「‹ 2026年10月 ›」の部分で切り替えます。‹ ›で前後の期間へ、真ん中を押すと「今四半期」「今期（3月〜翌2月）」「前期」「6月賞与対象」「12月賞与対象」などのよく使う期間、年度の月グリッド（2回押すとその間が範囲）、日付での指定が選べます。複数月にまたがる期間では月別の内訳も表示されます。',
         '粗利の計算に足りない入力（年収・fee料率など）がある案件には「要入力」と表示されます。「編集」から年収・報酬形態・料率・媒体をその場で修正でき、候補者パイプラインにも反映されます。',
         '「内定承諾一覧（成約月ごと）」で、何月に誰が内定承諾したかを確認できます。成約月は一覧上で変更でき、想定粗利もその月に集計し直されます（非表示にした候補者の内定承諾も含みます）。',
         '同じ想定粗利は、個人実績タブ（自分の想定粗利・内定承諾一覧）、全ユーザー/チーム別タブでも確認できます。',
@@ -5440,7 +5759,8 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
     {
       title: 'チーム別・全ユーザーダッシュボード',
       items: [
-        'チーム・事業部・特定ユーザー単位で実績を横断的に比較できます。進捗・想定粗利・週間サマリー（合計／メンバー別）・月次推移・歩留まり分析・曜日別返信率の各カードは、それぞれ独立して前月/次月（前週/次週）に移動できます。',
+        'チーム・事業部・特定ユーザー単位で実績を横断的に比較できます。期間はページ上部の「このページの期間」で決め、進捗・想定粗利・曜日別返信率・歩留まり分析・CSV出力はその期間で表示されます。週間サマリー（合計／メンバー別）は前後の週に送れます。',
+        '特定のカードだけ別の期間で見たいときは、カード内の「このカードだけ期間を変える」を押します。個別の期間になっているカードにはオレンジのバッジが付き、「ページの期間に戻す」で元に戻せます。',
         '想定粗利では、メンバー別・メンバー別×月別の集計や、担当者付きの内定承諾一覧を確認できます。',
         '見送り・選考辞退・内定承諾後辞退がどのフェーズで発生したかの分析も確認できます。セクションの開閉状態と表示順は自分用に保存できます。',
       ],
@@ -12055,25 +12375,6 @@ const splitPeriodIntoMonths = (period: { start: Date; end: Date }): { label: str
     return result;
 };
 
-// 想定粗利の期間指定で使う「よく使う期間」ボタンの定義（全ユーザー/チーム別タブ・個人実績タブ共通）。
-// 会社の期は3月始まり（3月〜翌2月）。四半期も期に合わせて3〜5月/6〜8月/9〜11月/12〜翌2月で区切る。
-const buildGrossProfitPeriodPresets = (now: Date = new Date()): { label: string; start: Date; end: Date }[] => {
-    const y = now.getFullYear();
-    const m = now.getMonth();
-    const fiscalStartYear = m >= 2 ? y : y - 1;
-    const quarterStartMonth = Math.floor((m - 2 + 12) % 12 / 3) * 3 + 2 - (m < 2 ? 12 : 0);
-    // 賞与の査定期間: 6月賞与 = 前年12月〜5月、12月賞与 = 6月〜11月。12月に入ったら6月賞与は
-    // 次回分（今年12月〜翌5月）に切り替える（その月から次の査定期間が始まるため）。
-    const juneBonusEndYear = m === 11 ? y + 1 : y;
-    return [
-        { label: `6月賞与対象（${juneBonusEndYear - 1}年12月〜${juneBonusEndYear}年5月）`, start: new Date(juneBonusEndYear - 1, 11, 1), end: new Date(juneBonusEndYear, 5, 0) },
-        { label: `12月賞与対象（${y}年6月〜11月）`, start: new Date(y, 5, 1), end: new Date(y, 11, 0) },
-        { label: '今四半期', start: new Date(y, quarterStartMonth, 1), end: new Date(y, quarterStartMonth + 3, 0) },
-        { label: `今期（${fiscalStartYear}年3月〜${fiscalStartYear + 1}年2月）`, start: new Date(fiscalStartYear, 2, 1), end: new Date(fiscalStartYear + 1, 2, 0) },
-        { label: `前期（${fiscalStartYear - 1}年3月〜${fiscalStartYear}年2月）`, start: new Date(fiscalStartYear - 1, 2, 1), end: new Date(fiscalStartYear, 2, 0) },
-    ];
-};
-
 const formatManYen = (n: number): string => `${Math.round(n).toLocaleString()}万円`;
 // 平均粗利（1件あたり）。粗利を算出できた案件（想定年収×fee料率、または固定報酬額が入力済み）の
 // 粗利合計をその件数で割る — 未入力の案件は粗利0として数えると平均が不当に下がるため分母から除く。
@@ -12240,40 +12541,13 @@ const GrossProfitSummary: React.FC<{
         setSelectedStageFilters(selectedStageFilters.includes(stage) ? selectedStageFilters.filter(s => s !== stage) : [...selectedStageFilters, stage]);
     };
 
-    // 自前の期間ピッカー（isControlledがfalseの時だけ使う）。全ユーザー/チーム別ダッシュボードの
-    // 「表示・出力期間」バーと同じ、今月既定・前月/次月シフト・カスタム期間指定のパターン。
-    const [ownStartDate, setOwnStartDate] = useState('');
-    const [ownEndDate, setOwnEndDate] = useState('');
-    const [isOwnPeriodEnabled, setIsOwnPeriodEnabled] = useState(false);
-    const ownPeriodOverride = useMemo(() => {
-        if (!isOwnPeriodEnabled || !ownStartDate || !ownEndDate) return null;
-        return { start: new Date(ownStartDate + 'T00:00:00'), end: new Date(ownEndDate + 'T23:59:59') };
-    }, [isOwnPeriodEnabled, ownStartDate, ownEndDate]);
-    const handleToggleOwnPeriod = () => {
-        if (ownPeriodOverride) {
-            setIsOwnPeriodEnabled(false);
-            return;
-        }
-        if (!ownStartDate || !ownEndDate) {
-            alert('開始日と終了日を指定してください。');
-            return;
-        }
-        setIsOwnPeriodEnabled(true);
-    };
-    const handleShiftOwnMonth = (offset: number) => {
-        const reference = ownStartDate ? new Date(ownStartDate + 'T00:00:00') : new Date();
-        const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
-        const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
-        const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        setOwnStartDate(fmt(monthStart));
-        setOwnEndDate(fmt(monthEnd));
-        setIsOwnPeriodEnabled(true);
-    };
+    // 自前の期間ピッカー（isControlledがfalseの時だけ使う）。null＝今月。
+    const [ownPeriodOverride, setOwnPeriodOverride] = useState<PeriodRange | null>(null);
 
     const periodOverride = isControlled ? (externalPeriodOverride ?? null) : ownPeriodOverride;
     const periodLabel = isControlled
         ? (externalPeriodLabel || '今月')
-        : (ownPeriodOverride ? `${formatPeriodDate(ownPeriodOverride.start)}〜${formatPeriodDate(ownPeriodOverride.end)}` : '今月');
+        : (ownPeriodOverride ? formatPeriodRangeLabel(ownPeriodOverride) : '今月');
 
     const stageTotals = useMemo(() => computeGrossProfitByStage(candidates, allMedia, periodOverride), [candidates, allMedia, periodOverride]);
 
@@ -12315,16 +12589,8 @@ const GrossProfitSummary: React.FC<{
     return (
         <div className="gross-profit-summary">
             {!isControlled && (
-                <div className="custom-period-export-bar">
-                    <span>対象期間（未入力の場合は今月）:</span>
-                    <button type="button" onClick={() => handleShiftOwnMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                    <input type="date" value={ownStartDate} onChange={(e) => setOwnStartDate(e.target.value)} aria-label="開始日" />
-                    <span>〜</span>
-                    <input type="date" value={ownEndDate} onChange={(e) => setOwnEndDate(e.target.value)} aria-label="終了日" />
-                    <button type="button" onClick={() => handleShiftOwnMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                    <button type="button" onClick={handleToggleOwnPeriod} className="secondary-action-button">
-                        {ownPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
-                    </button>
+                <div className="period-row">
+                    <PeriodPicker value={ownPeriodOverride} onChange={setOwnPeriodOverride} ariaLabel="想定粗利の対象期間" />
                 </div>
             )}
             <p className="gross-profit-note">候補者の見込み月が「{periodLabel}」に該当する選考を集計しています。</p>
@@ -12721,45 +12987,9 @@ const PersonalGrossProfitSection: React.FC<{
     memberBreakdown?: { key: string; label: string; candidates: Candidate[] }[];
     canEditCandidate?: (candidate: Candidate) => boolean;
 }> = ({ candidates, allMedia, onSaveCandidate, memberBreakdown, canEditCandidate }) => {
-    const [monthOffset, setMonthOffset] = useState(0);
-    const [customStartDate, setCustomStartDate] = useState('');
-    const [customEndDate, setCustomEndDate] = useState('');
-    const [isCustomEnabled, setIsCustomEnabled] = useState(false);
-    const fmtDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const customPeriod = useMemo(() => {
-        if (!isCustomEnabled || !customStartDate || !customEndDate) return null;
-        return { start: new Date(customStartDate + 'T00:00:00'), end: new Date(customEndDate + 'T23:59:59') };
-    }, [isCustomEnabled, customStartDate, customEndDate]);
-    const monthPeriod = useMemo(() => getMonthRangeOverride(monthOffset), [monthOffset]);
-    const periodOverride = customPeriod ?? monthPeriod;
-    const periodLabel = periodOverride ? `${formatPeriodDate(periodOverride.start)}〜${formatPeriodDate(periodOverride.end)}` : '今月';
-
-    const handleToggleCustom = () => {
-        if (customPeriod) {
-            setIsCustomEnabled(false);
-            return;
-        }
-        if (!customStartDate || !customEndDate) {
-            alert('開始日と終了日を指定してください。');
-            return;
-        }
-        if (customStartDate > customEndDate) {
-            alert('終了日は開始日以降の日付を指定してください。');
-            return;
-        }
-        setIsCustomEnabled(true);
-    };
-    const handleShiftCustomMonth = (offset: number) => {
-        const reference = customStartDate ? new Date(customStartDate + 'T00:00:00') : new Date();
-        setCustomStartDate(fmtDate(new Date(reference.getFullYear(), reference.getMonth() + offset, 1)));
-        setCustomEndDate(fmtDate(new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0)));
-        setIsCustomEnabled(true);
-    };
-    const handleSetRange = (start: Date, end: Date) => {
-        setCustomStartDate(fmtDate(start));
-        setCustomEndDate(fmtDate(end));
-        setIsCustomEnabled(true);
-    };
+    // null＝今月。期間ピッカーで前後の月・よく使う期間・任意の範囲を選ぶ。
+    const [periodOverride, setPeriodOverride] = useState<PeriodRange | null>(null);
+    const periodLabel = periodOverride ? formatPeriodRangeLabel(periodOverride) : '今月';
 
     const [stageFilters, setStageFilters] = useState<PipelineStage[]>([]);
     const periodTotal = useMemo(
@@ -12817,27 +13047,8 @@ const PersonalGrossProfitSection: React.FC<{
 
     return (
         <div className="gross-profit-summary">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                <button type="button" onClick={() => setMonthOffset(o => o - 1)} disabled={isCustomEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                <span className="gmail-scout-message" style={{ margin: 0 }}>{periodLabel}</span>
-                <button type="button" onClick={() => setMonthOffset(o => o + 1)} disabled={isCustomEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
-            </div>
-            <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
-                <span>期間を指定して絞り込み・集計:</span>
-                <button type="button" onClick={() => handleShiftCustomMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                <input type="date" value={customStartDate} onChange={(e) => setCustomStartDate(e.target.value)} aria-label="自分の想定粗利の開始日" />
-                <span>〜</span>
-                <input type="date" value={customEndDate} onChange={(e) => setCustomEndDate(e.target.value)} aria-label="自分の想定粗利の終了日" />
-                <button type="button" onClick={() => handleShiftCustomMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                <button type="button" onClick={handleToggleCustom} className="secondary-action-button">
-                    {isCustomEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
-                </button>
-            </div>
-            <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
-                <span>よく使う期間:</span>
-                {buildGrossProfitPeriodPresets().map(p => (
-                    <button key={p.label} type="button" onClick={() => handleSetRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
-                ))}
+            <div className="period-row">
+                <PeriodPicker value={periodOverride} onChange={setPeriodOverride} ariaLabel="想定粗利の対象期間" />
             </div>
 
             <GrossProfitSummary candidates={candidates} allMedia={allMedia} periodOverride={periodOverride} periodLabel={periodLabel} stageFilters={stageFilters} onStageFiltersChange={setStageFilters} onSaveCandidate={onSaveCandidate} canEditCandidate={canEditCandidate} memberBreakdown={memberBreakdown} />
@@ -13036,7 +13247,6 @@ const MeetingForecastSection: React.FC<{
         const d = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     }, [monthOffset]);
-    const monthTitle = `${month.split('-')[0]}年${formatMonthLabel(month)}`;
     const weekCount = useMemo(() => getWeekCountOfMonth(month, weekStartsOn), [month, weekStartsOn]);
 
     const rates = useMemo(() => resolveMeetingRates(settings?.rates), [settings?.rates]);
@@ -13184,12 +13394,15 @@ const MeetingForecastSection: React.FC<{
             </p>
 
             <div className="custom-period-export-bar">
-                <button type="button" onClick={() => setMonthOffset(o => o - 1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                <strong>{teamName}／{monthTitle}</strong>
-                <button type="button" onClick={() => setMonthOffset(o => o + 1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                {monthOffset !== 0 && (
-                    <button type="button" onClick={() => setMonthOffset(0)} className="secondary-action-button">今月に戻す</button>
-                )}
+                <strong>{teamName}</strong>
+                <MonthPicker
+                    month={new Date(new Date().getFullYear(), new Date().getMonth() + monthOffset, 1)}
+                    onChange={(d) => {
+                        const now = new Date();
+                        setMonthOffset((d.getFullYear() - now.getFullYear()) * 12 + d.getMonth() - now.getMonth());
+                    }}
+                    ariaLabel="会議資料の対象月"
+                />
                 <label className="meeting-forecast-inline-field">
                     当月の目標本数
                     <input
@@ -13461,8 +13674,7 @@ const PipelineCalendarView: React.FC<{
     candidates: Candidate[];
     viewDate: Date;
     currentUserEmail: string;
-    onPrevMonth: () => void;
-    onNextMonth: () => void;
+    onChangeMonth: (month: Date) => void;
     onDayClick: (dateStr: string) => void;
     onEditApplication: (candidate: Candidate, application: CompanyApplication) => void;
     onEditRevival: (candidate: Candidate) => void;
@@ -13472,7 +13684,7 @@ const PipelineCalendarView: React.FC<{
     isCurrentUserMiddle: boolean;
     middleManagedMemberEmails: string[];
     weekStartsOn: 0 | 6;
-}> = ({ candidates, viewDate, currentUserEmail, onPrevMonth, onNextMonth, onDayClick, onEditApplication, onEditRevival, isCurrentUserMiddle, middleManagedMemberEmails, weekStartsOn }) => {
+}> = ({ candidates, viewDate, currentUserEmail, onChangeMonth, onDayClick, onEditApplication, onEditRevival, isCurrentUserMiddle, middleManagedMemberEmails, weekStartsOn }) => {
     const year = viewDate.getFullYear();
     const month = viewDate.getMonth();
 
@@ -13608,10 +13820,8 @@ const PipelineCalendarView: React.FC<{
 
     return (
         <div className="calendar-container pipeline-calendar-container">
-            <div className="calendar-header">
-                <button onClick={onPrevMonth} aria-label="前の月へ">&lt; 前月</button>
-                <h2>{`${year}年 ${month + 1}月`}</h2>
-                <button onClick={onNextMonth} aria-label="次の月へ">次月 &gt;</button>
+            <div className="period-row">
+                <MonthPicker month={viewDate} onChange={onChangeMonth} ariaLabel="表示する月" size="lg" />
             </div>
             <div className="calendar-grid-header">
                 {getWeekdayLabels(weekStartsOn).map(day => <div key={day}>{day}</div>)}
@@ -17319,8 +17529,7 @@ const CandidatePipelineView: React.FC<{
                         candidates={candidates}
                         viewDate={calendarViewDate}
                         currentUserEmail={currentUserEmail}
-                        onPrevMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
-                        onNextMonth={() => setCalendarViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                        onChangeMonth={(d) => setCalendarViewDate(new Date(d.getFullYear(), d.getMonth(), 1))}
                         onDayClick={(dateStr) => setScheduleModalDate(dateStr)}
                         onEditApplication={handleOpenApplicationModal}
                         onEditRevival={handleOpenRevivalModal}
@@ -18622,17 +18831,17 @@ const AllUsersDashboard: React.FC<{
   // 歩留まり分析（FunnelAnalysisSection）・CSV出力と連動する、ページ上部の共有「表示・出力期間」
   // バー由来の期間。以下3つの独立ナビゲーションとは別物。
   funnelPeriodOverride?: { start: Date; end: Date } | null;
-  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは、それぞれ単独の前月/次月ボタンで
-  // 他のカード・CSV出力に影響を与えずに期間を移動できる（カードごとに独立したnull=今月/期間指定）。
-  progressPeriodOverride: { start: Date; end: Date } | null;
-  onPrevProgressMonth: () => void;
-  onNextProgressMonth: () => void;
-  grossProfitPeriodOverride: { start: Date; end: Date } | null;
-  onPrevGrossProfitMonth: () => void;
-  onNextGrossProfitMonth: () => void;
-  dowPeriodOverride: { start: Date; end: Date } | null;
-  onPrevDowMonth: () => void;
-  onNextDowMonth: () => void;
+  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは、既定ではページ上部の期間
+  // （funnelPeriodOverride）に従い、カードごとに個別の期間も持てる（null＝ページの期間に従う）。
+  progressOwnPeriod: PeriodRange | null;
+  onChangeProgressOwnPeriod: (next: PeriodRange | null) => void;
+  grossProfitOwnPeriod: PeriodRange | null;
+  onChangeGrossProfitOwnPeriod: (next: PeriodRange | null) => void;
+  dowOwnPeriod: PeriodRange | null;
+  onChangeDowOwnPeriod: (next: PeriodRange | null) => void;
+  // 週間サマリー（合計・メンバー別）を今週に戻す。
+  onThisWeek?: () => void;
+  onThisMemberWeek?: () => void;
   // 想定粗利カードの「内定承諾一覧」で成約月を編集できるか（ユーザーのメールアドレス単位）と、
   // 編集時の保存処理。未指定なら閲覧のみ。
   canEditAcceptedDealOwner?: (ownerEmail: string) => boolean;
@@ -18644,9 +18853,10 @@ const AllUsersDashboard: React.FC<{
   sectionOrder = DEFAULT_ALL_USERS_SECTION_ORDER, onMoveSection,
   showGrossProfit = true,
   funnelPeriodOverride = null,
-  progressPeriodOverride: progressPeriodOverrideProp, onPrevProgressMonth, onNextProgressMonth,
-  grossProfitPeriodOverride: grossProfitPeriodOverrideProp, onPrevGrossProfitMonth, onNextGrossProfitMonth,
-  dowPeriodOverride, onPrevDowMonth, onNextDowMonth,
+  progressOwnPeriod, onChangeProgressOwnPeriod,
+  grossProfitOwnPeriod, onChangeGrossProfitOwnPeriod,
+  dowOwnPeriod, onChangeDowOwnPeriod,
+  onThisWeek, onThisMemberWeek,
   canEditAcceptedDealOwner, onChangeAcceptedDealMonth, onSaveAggregateCandidate,
 }) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
@@ -18657,89 +18867,16 @@ const AllUsersDashboard: React.FC<{
   };
   const activeMedia = useMemo(() => allMedia.filter(m => !m.isArchived), [allMedia]);
 
-  // 「全ユーザーの進捗」カード専用のカスタム期間指定（任意の開始日〜終了日）。前月/次月の
-  // 月送りナビゲーション（progressPeriodOverrideProp、親のprogressMonthOffset由来）とは別に、
-  // ここで日付を指定して有効化すると、そちらより優先して実績を絞り込める。無効化すると
-  // 月送りナビゲーションの表示に戻る。全ユーザー/チーム別タブの両方で共有されるこの
-  // コンポーネント内の状態なので、両タブに同時に適用される。
-  const [customProgressStartDate, setCustomProgressStartDate] = useState('');
-  const [customProgressEndDate, setCustomProgressEndDate] = useState('');
-  const [isCustomProgressPeriodEnabled, setIsCustomProgressPeriodEnabled] = useState(false);
-  const customProgressPeriodOverride = useMemo(() => {
-    if (!isCustomProgressPeriodEnabled || !customProgressStartDate || !customProgressEndDate) return null;
-    return { start: new Date(customProgressStartDate + 'T00:00:00'), end: new Date(customProgressEndDate + 'T23:59:59') };
-  }, [isCustomProgressPeriodEnabled, customProgressStartDate, customProgressEndDate]);
-  const handleToggleCustomProgressPeriod = () => {
-    if (customProgressPeriodOverride) {
-      setIsCustomProgressPeriodEnabled(false);
-      return;
-    }
-    if (!customProgressStartDate || !customProgressEndDate) {
-      alert('開始日と終了日を指定してください。');
-      return;
-    }
-    setIsCustomProgressPeriodEnabled(true);
-  };
-  const handleShiftCustomProgressMonth = (offset: number) => {
-    const reference = customProgressStartDate ? new Date(customProgressStartDate + 'T00:00:00') : new Date();
-    const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
-    const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
-    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    setCustomProgressStartDate(fmt(monthStart));
-    setCustomProgressEndDate(fmt(monthEnd));
-    setIsCustomProgressPeriodEnabled(true);
-  };
-  const progressPeriodOverride = customProgressPeriodOverride ?? progressPeriodOverrideProp;
-
-  // 「想定粗利」カード専用のカスタム期間指定 — 進捗カードと同じ仕組みで、有効化すると前月/次月の
-  // 月送り（grossProfitPeriodOverrideProp）より優先される。期間が複数月にまたがる場合は、
-  // 合計に加えて月別の集計表も表示する。
-  const [customGrossProfitStartDate, setCustomGrossProfitStartDate] = useState('');
-  const [customGrossProfitEndDate, setCustomGrossProfitEndDate] = useState('');
-  const [isCustomGrossProfitPeriodEnabled, setIsCustomGrossProfitPeriodEnabled] = useState(false);
-  const customGrossProfitPeriodOverride = useMemo(() => {
-    if (!isCustomGrossProfitPeriodEnabled || !customGrossProfitStartDate || !customGrossProfitEndDate) return null;
-    return { start: new Date(customGrossProfitStartDate + 'T00:00:00'), end: new Date(customGrossProfitEndDate + 'T23:59:59') };
-  }, [isCustomGrossProfitPeriodEnabled, customGrossProfitStartDate, customGrossProfitEndDate]);
-  const handleToggleCustomGrossProfitPeriod = () => {
-    if (customGrossProfitPeriodOverride) {
-      setIsCustomGrossProfitPeriodEnabled(false);
-      return;
-    }
-    if (!customGrossProfitStartDate || !customGrossProfitEndDate) {
-      alert('開始日と終了日を指定してください。');
-      return;
-    }
-    if (customGrossProfitStartDate > customGrossProfitEndDate) {
-      alert('終了日は開始日以降の日付を指定してください。');
-      return;
-    }
-    setIsCustomGrossProfitPeriodEnabled(true);
-  };
-  const handleShiftCustomGrossProfitMonth = (offset: number) => {
-    const reference = customGrossProfitStartDate ? new Date(customGrossProfitStartDate + 'T00:00:00') : new Date();
-    const monthStart = new Date(reference.getFullYear(), reference.getMonth() + offset, 1);
-    const monthEnd = new Date(reference.getFullYear(), reference.getMonth() + offset + 1, 0);
-    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    setCustomGrossProfitStartDate(fmt(monthStart));
-    setCustomGrossProfitEndDate(fmt(monthEnd));
-    setIsCustomGrossProfitPeriodEnabled(true);
-  };
-  // 開始月〜終了月をワンクリックで指定するためのショートカット（今期・賞与対象期間など）。
-  const handleSetCustomGrossProfitRange = (start: Date, end: Date) => {
-    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    setCustomGrossProfitStartDate(fmt(start));
-    setCustomGrossProfitEndDate(fmt(end));
-    setIsCustomGrossProfitPeriodEnabled(true);
-  };
-  const grossProfitPeriodOverride = customGrossProfitPeriodOverride ?? grossProfitPeriodOverrideProp;
-
-  // 歩留まり分析（periodOverride=funnelPeriodOverride）専用のラベル。進捗・想定粗利・曜日別
-  // 返信率はそれぞれ自分専用のラベル（下記）を使う。
-  const periodLabel = funnelPeriodOverride ? `${formatPeriodDate(funnelPeriodOverride.start)}〜${formatPeriodDate(funnelPeriodOverride.end)}` : '今月';
-  const progressPeriodLabel = progressPeriodOverride ? `${formatPeriodDate(progressPeriodOverride.start)}〜${formatPeriodDate(progressPeriodOverride.end)}` : '今月';
-  const grossProfitPeriodLabel = grossProfitPeriodOverride ? `${formatPeriodDate(grossProfitPeriodOverride.start)}〜${formatPeriodDate(grossProfitPeriodOverride.end)}` : '今月';
-  const dowPeriodLabel = dowPeriodOverride ? `${formatPeriodDate(dowPeriodOverride.start)}〜${formatPeriodDate(dowPeriodOverride.end)}` : '今月';
+  // 各カードの実際の集計期間 — カード個別の期間があればそれ、無ければページの期間。今月ちょうどの
+  // 範囲はnull（今月扱い）に寄せ、目標・達成率の表示などの分岐をそのまま活かす。
+  const progressPeriodOverride = progressOwnPeriod ? toMonthOverride(progressOwnPeriod) : funnelPeriodOverride;
+  const grossProfitPeriodOverride = grossProfitOwnPeriod ? toMonthOverride(grossProfitOwnPeriod) : funnelPeriodOverride;
+  const dowPeriodOverride = dowOwnPeriod ? toMonthOverride(dowOwnPeriod) : funnelPeriodOverride;
+  const labelOfOverride = (p: PeriodRange | null) => (p ? formatPeriodRangeLabel(p) : '今月');
+  const periodLabel = labelOfOverride(funnelPeriodOverride);
+  const progressPeriodLabel = labelOfOverride(progressPeriodOverride);
+  const grossProfitPeriodLabel = labelOfOverride(grossProfitPeriodOverride);
+  const dowPeriodLabel = labelOfOverride(dowPeriodOverride);
   const { data: aggregateWeeklyData, weeklyKpiTargets: aggregateWeeklyKpiTargets } = useMemo(
     () => computeAggregateWeeklyData(users, allUsersData, activeMedia, weekStartDate),
     [users, allUsersData, activeMedia, weekStartDate]
@@ -18752,14 +18889,11 @@ const AllUsersDashboard: React.FC<{
     })),
     [users, allUsersData, activeMedia, memberWeekStartDate]
   );
-  const memberWeeklyEndDate = useMemo(() => {
-    const d = new Date(memberWeekStartDate);
-    d.setDate(memberWeekStartDate.getDate() + 6);
-    return d;
-  }, [memberWeekStartDate]);
-  const formatMemberWeekDate = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
-  const memberWeekRange = `${formatMemberWeekDate(memberWeekStartDate)} - ${formatMemberWeekDate(memberWeeklyEndDate)}`;
-  const isMemberWeekThisWeek = getStartOfWeek(new Date(), weekStartsOn).getTime() === memberWeekStartDate.getTime();
+  const memberWeekRange = (() => {
+    const end = new Date(memberWeekStartDate.getFullYear(), memberWeekStartDate.getMonth(), memberWeekStartDate.getDate() + 6);
+    const fmt = (d: Date) => `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${fmt(memberWeekStartDate)} - ${fmt(end)}`;
+  })();
   // 想定粗利の一覧で担当者を表示し、編集時に保存先を振り分けられるよう、候補者に担当者を付けておく。
   const candidatesAcrossUsers = useMemo(
     () => users.flatMap(user => (allUsersData[user]?.candidates || []).map(c => ({ ...c, ownerEmail: user, ownerLabel: allUsersData[user]?.displayName || user }))),
@@ -18928,22 +19062,7 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.progress ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <button type="button" onClick={onPrevProgressMonth} disabled={isCustomProgressPeriodEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
-            <span className="gmail-scout-message" style={{ margin: 0 }}>{progressPeriodLabel}</span>
-            <button type="button" onClick={onNextProgressMonth} disabled={isCustomProgressPeriodEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
-          </div>
-          <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
-            <span>期間を指定して絞り込み:</span>
-            <button type="button" onClick={() => handleShiftCustomProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-            <input type="date" value={customProgressStartDate} onChange={(e) => setCustomProgressStartDate(e.target.value)} aria-label="開始日" />
-            <span>〜</span>
-            <input type="date" value={customProgressEndDate} onChange={(e) => setCustomProgressEndDate(e.target.value)} aria-label="終了日" />
-            <button type="button" onClick={() => handleShiftCustomProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-            <button type="button" onClick={handleToggleCustomProgressPeriod} className="secondary-action-button">
-              {isCustomProgressPeriodEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
-            </button>
-          </div>
+          <CardPeriodControl pagePeriod={funnelPeriodOverride} ownPeriod={progressOwnPeriod} onChangeOwn={onChangeProgressOwnPeriod} />
           {progressPeriodOverride && (
             <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
           )}
@@ -19078,28 +19197,7 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.grossProfit ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-gross-profit-content" className={`collapsible-content ${visibility.grossProfit ? 'open' : ''}`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <button type="button" onClick={onPrevGrossProfitMonth} disabled={isCustomGrossProfitPeriodEnabled} className="secondary-action-button month-shift-button">&lt; 前月</button>
-            <span className="gmail-scout-message" style={{ margin: 0 }}>{grossProfitPeriodLabel}</span>
-            <button type="button" onClick={onNextGrossProfitMonth} disabled={isCustomGrossProfitPeriodEnabled} className="secondary-action-button month-shift-button">次月 &gt;</button>
-          </div>
-          <div className="custom-period-export-bar" style={{ marginBottom: '0.5rem' }}>
-            <span>期間を指定して絞り込み・集計:</span>
-            <button type="button" onClick={() => handleShiftCustomGrossProfitMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-            <input type="date" value={customGrossProfitStartDate} onChange={(e) => setCustomGrossProfitStartDate(e.target.value)} aria-label="想定粗利の開始日" />
-            <span>〜</span>
-            <input type="date" value={customGrossProfitEndDate} onChange={(e) => setCustomGrossProfitEndDate(e.target.value)} aria-label="想定粗利の終了日" />
-            <button type="button" onClick={() => handleShiftCustomGrossProfitMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-            <button type="button" onClick={handleToggleCustomGrossProfitPeriod} className="secondary-action-button">
-              {isCustomGrossProfitPeriodEnabled ? '月送り表示に戻す' : 'この期間で絞り込む'}
-            </button>
-          </div>
-          <div className="custom-period-export-bar" style={{ marginBottom: '0.75rem' }}>
-            <span>よく使う期間:</span>
-            {buildGrossProfitPeriodPresets().map(p => (
-              <button key={p.label} type="button" onClick={() => handleSetCustomGrossProfitRange(p.start, p.end)} className="secondary-action-button">{p.label}</button>
-            ))}
-          </div>
+          <CardPeriodControl pagePeriod={funnelPeriodOverride} ownPeriod={grossProfitOwnPeriod} onChangeOwn={onChangeGrossProfitOwnPeriod} />
           <GrossProfitSummary
             candidates={candidatesAcrossUsers}
             allMedia={allMedia}
@@ -19263,6 +19361,7 @@ const AllUsersDashboard: React.FC<{
             weeklyKpiTargets={aggregateWeeklyKpiTargets}
             onPrevWeek={onPrevWeek}
             onNextWeek={onNextWeek}
+            onThisWeek={onThisWeek}
             weekStartsOn={weekStartsOn}
           />
         </div>
@@ -19286,12 +19385,8 @@ const AllUsersDashboard: React.FC<{
           <span className={`toggle-icon ${visibility.memberWeeklySummary ? 'open' : ''}`}>▼</span>
         </h2>
         <div id="all-users-member-weekly-summary-content" className={`collapsible-content ${visibility.memberWeeklySummary ? 'open' : ''}`}>
-          <div className="weekly-summary-header" style={{ marginBottom: '0.75rem' }}>
-            <h3 style={{ margin: 0 }}>{memberWeekRange}</h3>
-            <div>
-              <button onClick={onPrevMemberWeek} aria-label="前の週へ">&lt; 前の週</button>
-              <button onClick={onNextMemberWeek} disabled={isMemberWeekThisWeek} aria-label="次の週へ">次の週 &gt;</button>
-            </div>
+          <div className="period-row">
+            <WeekStepper weekStart={memberWeekStartDate} weekStartsOn={weekStartsOn} onPrev={onPrevMemberWeek} onNext={onNextMemberWeek} onThisWeek={onThisMemberWeek} />
           </div>
           {perMemberWeeklyData.length === 0 && <p className="no-data-message">表示するユーザーがいません。</p>}
           {perMemberWeeklyData.map(({ user, displayName, data, weeklyKpiTargets }) => (
@@ -19357,11 +19452,7 @@ const AllUsersDashboard: React.FC<{
             <span className={`toggle-icon ${visibility.dowRate ? 'open' : ''}`}>▼</span>
           </h2>
           <div id="all-users-dow-content" className={`collapsible-content ${visibility.dowRate ? 'open' : ''}`}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-              <button type="button" onClick={onPrevDowMonth} className="secondary-action-button month-shift-button">&lt; 前月</button>
-              <span className="gmail-scout-message" style={{ margin: 0 }}>{dowPeriodLabel}</span>
-              <button type="button" onClick={onNextDowMonth} className="secondary-action-button month-shift-button">次月 &gt;</button>
-            </div>
+            <CardPeriodControl pagePeriod={funnelPeriodOverride} ownPeriod={dowOwnPeriod} onChangeOwn={onChangeDowOwnPeriod} />
             <DayOfWeekReplyRateChart data={dayOfWeekReplyRateData} />
           </div>
         </section>
@@ -19793,100 +19884,31 @@ const App: React.FC = () => {
   // the effect near selectedTeamMemberEmails below) so a stale selection from a previous team
   // never silently narrows the newly-selected one.
   const [teamComparisonUserEmails, setTeamComparisonUserEmails] = useState<string[]>([]);
-  const [customExportStartDate, setCustomExportStartDate] = useState('');
-  const [customExportEndDate, setCustomExportEndDate] = useState('');
-  // Reuses the same start/end fields the custom-period CSV export already had: once explicitly
-  // enabled (below), 歩留まり分析（FunnelAnalysisSection）とCSV出力がこの範囲に切り替わる。
-  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは、それぞれ専用の前月/次月ボタンで
-  // 独立に動く別の状態（progressMonthOffset等、下記）を使うため、このバーの影響を受けない。
-  // Requires an explicit enable step rather than auto-activating whenever both dates happen to be
-  // filled in, so typing dates doesn't change the funnel/CSV period out from under the user
-  // before they're ready.
-  const [isPeriodFilterEnabled, setIsPeriodFilterEnabled] = useState(false);
-  const dashboardPeriodOverride = useMemo(() => {
-    if (!isPeriodFilterEnabled || !customExportStartDate || !customExportEndDate) return null;
-    return { start: new Date(customExportStartDate + 'T00:00:00'), end: new Date(customExportEndDate + 'T23:59:59') };
-  }, [isPeriodFilterEnabled, customExportStartDate, customExportEndDate]);
-
-  // 全ユーザー/チーム別タブの「全ユーザーの進捗」「想定粗利」「曜日別返信率」カードそれぞれが持つ、
-  // 独立した前月/次月ナビゲーション用の状態（0=今月、±1=前月/次月…）。上のcustomExportStartDate
-  // 系（歩留まり分析・CSV出力用）や、週間サマリー用のviewWeekStartDate（下記）とは別物 — カード
-  // ごとに他へ影響を与えずに期間を移動できるようにするため、それぞれ独立したstateを持つ。タブを
-  // 切り替えても状態を保つ（週間サマリーのviewWeekStartDateと同じ扱い）ため、AllUsersDashboardの
-  // ローカルstateではなくここに置く。
-  const [progressMonthOffset, setProgressMonthOffset] = useState(0);
-  const [grossProfitMonthOffset, setGrossProfitMonthOffset] = useState(0);
-  const [dowMonthOffset, setDowMonthOffset] = useState(0);
-  const progressPeriodOverride = useMemo(() => getMonthRangeOverride(progressMonthOffset), [progressMonthOffset]);
-  const grossProfitPeriodOverride = useMemo(() => getMonthRangeOverride(grossProfitMonthOffset), [grossProfitMonthOffset]);
-  const dowPeriodOverride = useMemo(() => getMonthRangeOverride(dowMonthOffset), [dowMonthOffset]);
-  const handleTogglePeriodFilter = () => {
-    if (dashboardPeriodOverride) {
-      setIsPeriodFilterEnabled(false);
-      // Returning to "this month" should also snap 週間サマリー back to the current real week,
-      // rather than leaving it wherever 前月/次月 last moved it.
-      setViewWeekStartDate(getStartOfWeek(new Date()));
-      return;
-    }
-    if (!customExportStartDate || !customExportEndDate) {
-      alert('開始日と終了日を指定してください。');
-      return;
-    }
-    setIsPeriodFilterEnabled(true);
+  // 全ユーザー/チーム別タブの「このページの期間」（null＝今月）。歩留まり分析・CSV出力に使い、
+  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードも、個別の期間を指定していなければ
+  // これに従う。
+  const [dashboardPeriodOverride, setDashboardPeriodOverride] = useState<PeriodRange | null>(null);
+  // 3カードそれぞれの個別の期間（null＝ページの期間に従う）。タブを切り替えても保つ（週間サマリーの
+  // viewWeekStartDateと同じ扱い）ため、AllUsersDashboardのローカルstateではなくここに置く。
+  const [progressOwnPeriod, setProgressOwnPeriod] = useState<PeriodRange | null>(null);
+  const [grossProfitOwnPeriod, setGrossProfitOwnPeriod] = useState<PeriodRange | null>(null);
+  const [dowOwnPeriod, setDowOwnPeriod] = useState<PeriodRange | null>(null);
+  const dowPeriodOverride = dowOwnPeriod ? toMonthOverride(dowOwnPeriod) : dashboardPeriodOverride;
+  // ページの期間を変えたら、週間サマリー（独自の週送りを持つ）もその月の週へ合わせる——ほかのカードが
+  // 動いたのに週間サマリーだけ別の月の週に残らないように。今月に戻したら今週へ。複数月の範囲のときは
+  // 週の位置を決めようがないので動かさない。
+  const handleChangeDashboardPeriod = (next: PeriodRange | null) => {
+    setDashboardPeriodOverride(next);
+    if (!next) setViewWeekStartDate(getStartOfWeek(new Date(), weekStartsOn));
+    else if (isWholeMonthRange(next) && countRangeMonths(next) === 1) setViewWeekStartDate(getStartOfWeek(next.start, weekStartsOn));
   };
-
-  const formatDateInputValue = (d: Date): string =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
-  // Steps 歩留まり分析（FunnelAnalysisSection）とCSV出力の対象期間を一括で一ヶ月分前後させる
-  // （「全ユーザーの進捗」「想定粗利」「曜日別返信率」の3カードは各自の独立したナビゲーションを
-  // 持つため、これには影響されない）。Shifts relative to whichever month is currently selected
-  // (so repeated clicks keep walking further back/forward), or from today's month if the period
-  // filter isn't enabled yet. Also moves 週間サマリー (which has its own independent 前週/次週
-  // navigation) to the week containing this month's 1st, so it doesn't silently stay stuck on a
-  // week from a different month while everything else moved — the weekly nav remains usable
-  // afterwards for fine-tuning within/around that month.
-  const handleShiftDashboardMonth = (offset: number) => {
-    const reference = customExportStartDate ? new Date(customExportStartDate + 'T00:00:00') : new Date();
-    const targetYear = reference.getFullYear();
-    const targetMonth = reference.getMonth() + offset;
-    const monthStart = new Date(targetYear, targetMonth, 1);
-    const monthEnd = new Date(targetYear, targetMonth + 1, 0);
-    setCustomExportStartDate(formatDateInputValue(monthStart));
-    setCustomExportEndDate(formatDateInputValue(monthEnd));
-    setIsPeriodFilterEnabled(true);
-    setViewWeekStartDate(getStartOfWeek(monthStart));
-  };
-
-  // 「全ユーザーの進捗」「想定粗利」「曜日別返信率」各カード専用の前月/次月ボタン — 他のカードや
-  // 歩留まり分析・CSV出力には一切影響しない、カード単独のナビゲーション。
-  const handleShiftProgressMonth = (offset: number) => setProgressMonthOffset(prev => prev + offset);
-  const handleShiftGrossProfitMonth = (offset: number) => setGrossProfitMonthOffset(prev => prev + offset);
-  const handleShiftDowMonth = (offset: number) => setDowMonthOffset(prev => prev + offset);
 
   // Independent period control for 個人実績's own 曜日別累積返信率 chart — separate from the
   // 全ユーザー/チーム別 dashboards' period fields above, since a period picked for one's own
   // chart has no reason to be coupled to whatever is selected on a different tab. Unfiltered
   // default is all-time (unlike the other dashboards' "this month" default), matching this
   // chart's existing behavior before this control existed.
-  const [personalDowStartDate, setPersonalDowStartDate] = useState('');
-  const [personalDowEndDate, setPersonalDowEndDate] = useState('');
-  const [isPersonalDowPeriodEnabled, setIsPersonalDowPeriodEnabled] = useState(false);
-  const personalDowPeriodOverride = useMemo(() => {
-    if (!isPersonalDowPeriodEnabled || !personalDowStartDate || !personalDowEndDate) return null;
-    return { start: new Date(personalDowStartDate + 'T00:00:00'), end: new Date(personalDowEndDate + 'T23:59:59') };
-  }, [isPersonalDowPeriodEnabled, personalDowStartDate, personalDowEndDate]);
-  const handleTogglePersonalDowPeriod = () => {
-    if (personalDowPeriodOverride) {
-      setIsPersonalDowPeriodEnabled(false);
-      return;
-    }
-    if (!personalDowStartDate || !personalDowEndDate) {
-      alert('開始日と終了日を指定してください。');
-      return;
-    }
-    setIsPersonalDowPeriodEnabled(true);
-  };
+  const [personalDowPeriodOverride, setPersonalDowPeriodOverride] = useState<PeriodRange | null>(null);
   const [pipelineScope, setPipelineScope] = useState<'personal' | 'all_users' | 'team' | 'user'>('personal');
   const [pipelineSelectedTeamId, setPipelineSelectedTeamId] = useState<string | null>(null);
   const [pipelineSelectedUserEmail, setPipelineSelectedUserEmail] = useState<string | null>(null);
@@ -20716,23 +20738,14 @@ const App: React.FC = () => {
     setCurrentUserData(prev => (prev ? { ...prev, personalMediaIds: undefined } : prev));
   };
 
-  const handleCustomPeriodExport = (label: string, exportUsers: string[]) => {
-    if (!customExportStartDate || !customExportEndDate) {
-      alert('開始日と終了日を指定してください。');
-      return;
-    }
-    const start = new Date(customExportStartDate + 'T00:00:00');
-    const end = new Date(customExportEndDate + 'T23:59:59');
-    if (start > end) {
-      alert('開始日は終了日より前の日付にしてください。');
-      return;
-    }
+  const handleCustomPeriodExport = (label: string, exportUsers: string[], period: PeriodRange) => {
+    const { start, end } = period;
     const csvContent = buildTeamProgressCsvForRange(label, exportUsers, displayedAllUsersData, allMedia, start, end);
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${customExportStartDate}_to_${customExportEndDate}.csv`);
+    link.setAttribute('download', `progress_${label.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g, '_')}_${toDateInputValue(start)}_to_${toDateInputValue(end)}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -20744,7 +20757,7 @@ const App: React.FC = () => {
   // regular this-month/this-week data otherwise — instead of having a separate button per mode.
   const handleExportAllUsersProgress = (label: string, exportUsers: string[]) => {
     if (dashboardPeriodOverride) {
-      handleCustomPeriodExport(label, exportUsers);
+      handleCustomPeriodExport(label, exportUsers, dashboardPeriodOverride);
       return;
     }
     const csvContent = buildTeamProgressCsv(label, exportUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
@@ -20762,7 +20775,7 @@ const App: React.FC = () => {
 
   const handleExportTeamProgress = (teamName: string, teamUsers: string[]) => {
     if (dashboardPeriodOverride) {
-      handleCustomPeriodExport(teamName, teamUsers);
+      handleCustomPeriodExport(teamName, teamUsers, dashboardPeriodOverride);
       return;
     }
     const csvContent = buildTeamProgressCsv(teamName, teamUsers, displayedAllUsersData, allMedia, viewWeekStartDate);
@@ -22724,9 +22737,6 @@ const App: React.FC = () => {
   const [monthlyProgressViewDate, setMonthlyProgressViewDate] = useState(new Date());
   const isCurrentRealMonth = monthlyProgressViewDate.getFullYear() === new Date().getFullYear()
     && monthlyProgressViewDate.getMonth() === new Date().getMonth();
-  const handleShiftMonthlyProgressMonth = (offset: number) => {
-    setMonthlyProgressViewDate(d => new Date(d.getFullYear(), d.getMonth() + offset, 1));
-  };
 
   const monthlyTotals = useMemo<KpiTotals>(() => {
     const year = monthlyProgressViewDate.getFullYear();
@@ -23647,8 +23657,7 @@ const App: React.FC = () => {
                   entriesByDate={calendarEntriesByDate}
                   allMedia={allMedia}
                   onDayClick={setSelectedDate}
-                  onPrevMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
-                  onNextMonth={() => setViewDate(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                  onChangeMonth={(d) => setViewDate(new Date(d.getFullYear(), d.getMonth(), 1))}
                   weekStartsOn={weekStartsOn}
                 />
               </div>
@@ -23689,6 +23698,7 @@ const App: React.FC = () => {
                     weeklyKpiTargetsUpdatedAt={currentUserData?.weeklyKpiTargetsUpdatedAt}
                     onPrevWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() - 7)))}
                     onNextWeek={() => setViewWeekStartDate(d => new Date(d.setDate(d.getDate() + 7)))}
+                    onThisWeek={() => setViewWeekStartDate(getStartOfWeek(new Date(), weekStartsOn))}
                     weekStartsOn={weekStartsOn}
                 />
               </div>
@@ -23706,13 +23716,8 @@ const App: React.FC = () => {
                   <span className={`toggle-icon ${sectionVisibility.mediaProgress ? 'open' : ''}`}>▼</span>
                 </h2>
                 <div id="media-progress-content" className={`collapsible-content ${sectionVisibility.mediaProgress ? 'open' : ''}`}>
-                  <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
-                    <button type="button" onClick={() => handleShiftMonthlyProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                    <span>{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月</span>
-                    <button type="button" onClick={() => handleShiftMonthlyProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                    {!isCurrentRealMonth && (
-                      <button type="button" onClick={() => setMonthlyProgressViewDate(new Date())} className="secondary-action-button">今月に戻す</button>
-                    )}
+                  <div className="period-row">
+                    <MonthPicker month={monthlyProgressViewDate} onChange={setMonthlyProgressViewDate} ariaLabel="表示する月" />
                   </div>
                   {!isCurrentRealMonth && (
                     <p className="gmail-scout-message">
@@ -23747,13 +23752,8 @@ const App: React.FC = () => {
                 <span className={`toggle-icon ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="current-month-performance-content" className={`collapsible-content ${sectionVisibility.monthlyPerformance ? 'open' : ''}`}>
-                 <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
-                   <button type="button" onClick={() => handleShiftMonthlyProgressMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                   <span>{monthlyProgressViewDate.getFullYear()}年{monthlyProgressViewDate.getMonth() + 1}月</span>
-                   <button type="button" onClick={() => handleShiftMonthlyProgressMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                   {!isCurrentRealMonth && (
-                     <button type="button" onClick={() => setMonthlyProgressViewDate(new Date())} className="secondary-action-button">今月に戻す</button>
-                   )}
+                 <div className="period-row">
+                   <MonthPicker month={monthlyProgressViewDate} onChange={setMonthlyProgressViewDate} ariaLabel="表示する月" />
                  </div>
                  <CurrentMonthPerformanceChart data={currentMonthPerformanceChartData} />
               </div>
@@ -23794,18 +23794,12 @@ const App: React.FC = () => {
                 aria-expanded={sectionVisibility.dayOfWeekRate}
                 aria-controls="day-of-week-rate-content"
               >
-                <span className="section-title-label"><span>曜日別 累積返信率（{personalDowPeriodOverride ? '指定期間' : '全期間'}）</span>{renderPersonalSectionMoveControls('dayOfWeekRate', '曜日別 累積返信率')}</span>
+                <span className="section-title-label"><span>曜日別 累積返信率（{personalDowPeriodOverride ? formatPeriodRangeLabel(personalDowPeriodOverride) : '全期間'}）</span>{renderPersonalSectionMoveControls('dayOfWeekRate', '曜日別 累積返信率')}</span>
                 <span className={`toggle-icon ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>▼</span>
               </h2>
               <div id="day-of-week-rate-content" className={`collapsible-content ${sectionVisibility.dayOfWeekRate ? 'open' : ''}`}>
-                <div className="custom-period-export-bar" onClick={(e) => e.stopPropagation()}>
-                  <span>表示期間（未入力の場合は全期間）:</span>
-                  <input type="date" value={personalDowStartDate} onChange={(e) => setPersonalDowStartDate(e.target.value)} aria-label="開始日" />
-                  <span>〜</span>
-                  <input type="date" value={personalDowEndDate} onChange={(e) => setPersonalDowEndDate(e.target.value)} aria-label="終了日" />
-                  <button onClick={handleTogglePersonalDowPeriod} className="secondary-action-button">
-                    {personalDowPeriodOverride ? '全期間表示に戻す' : '期間で絞り込みを有効にする'}
-                  </button>
+                <div className="period-row">
+                  <PeriodPicker value={personalDowPeriodOverride} onChange={setPersonalDowPeriodOverride} nullMeans="all" ariaLabel="曜日別 累積返信率の期間" />
                 </div>
                 {dayOfWeekReplyRateData ? (
                     <DayOfWeekReplyRateChart data={dayOfWeekReplyRateData} />
@@ -24217,16 +24211,10 @@ const App: React.FC = () => {
                 </button>
                 <button onClick={() => fetchAllUsersData()}>更新</button>
               </div>
-              <div className="custom-period-export-bar">
-                <span>表示・出力期間（未入力の場合は今月）:</span>
-                <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-                <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
-                <span>〜</span>
-                <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-                <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-                <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
-                  {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
-                </button>
+              <div className="page-period-bar">
+                <span className="page-period-bar-title">このページの期間</span>
+                <PeriodPicker value={dashboardPeriodOverride} onChange={handleChangeDashboardPeriod} ariaLabel="このページの期間" />
+                <span className="period-row-note">各カード・歩留まり分析・CSV出力の期間です。カードごとに個別の期間にもできます。</span>
               </div>
               <AllUsersDashboard
                   users={comparisonUsers}
@@ -24246,15 +24234,14 @@ const App: React.FC = () => {
                   sectionOrder={resolveAllUsersSectionOrder(currentUserData?.allUsersSectionOrder)}
                   onMoveSection={handleMoveAllUsersSection}
                   funnelPeriodOverride={dashboardPeriodOverride}
-                  progressPeriodOverride={progressPeriodOverride}
-                  onPrevProgressMonth={() => handleShiftProgressMonth(-1)}
-                  onNextProgressMonth={() => handleShiftProgressMonth(1)}
-                  grossProfitPeriodOverride={grossProfitPeriodOverride}
-                  onPrevGrossProfitMonth={() => handleShiftGrossProfitMonth(-1)}
-                  onNextGrossProfitMonth={() => handleShiftGrossProfitMonth(1)}
-                  dowPeriodOverride={dowPeriodOverride}
-                  onPrevDowMonth={() => handleShiftDowMonth(-1)}
-                  onNextDowMonth={() => handleShiftDowMonth(1)}
+                  progressOwnPeriod={progressOwnPeriod}
+                  onChangeProgressOwnPeriod={setProgressOwnPeriod}
+                  grossProfitOwnPeriod={grossProfitOwnPeriod}
+                  onChangeGrossProfitOwnPeriod={setGrossProfitOwnPeriod}
+                  dowOwnPeriod={dowOwnPeriod}
+                  onChangeDowOwnPeriod={setDowOwnPeriod}
+                  onThisWeek={() => setViewWeekStartDate(getStartOfWeek(new Date(), weekStartsOn))}
+                  onThisMemberWeek={() => setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), weekStartsOn))}
                   canEditAcceptedDealOwner={canEditAcceptedDealOwner}
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
                   onSaveAggregateCandidate={handleSaveAggregateCandidate}
@@ -24318,16 +24305,10 @@ const App: React.FC = () => {
                 </div>
               </div>
             )}
-            <div className="custom-period-export-bar">
-              <span>表示・出力期間（未入力の場合は今月）:</span>
-              <button onClick={() => handleShiftDashboardMonth(-1)} className="secondary-action-button month-shift-button">&lt; 前月</button>
-              <input type="date" value={customExportStartDate} onChange={(e) => setCustomExportStartDate(e.target.value)} aria-label="開始日" />
-              <span>〜</span>
-              <input type="date" value={customExportEndDate} onChange={(e) => setCustomExportEndDate(e.target.value)} aria-label="終了日" />
-              <button onClick={() => handleShiftDashboardMonth(1)} className="secondary-action-button month-shift-button">次月 &gt;</button>
-              <button onClick={handleTogglePeriodFilter} className="secondary-action-button">
-                {dashboardPeriodOverride ? '今月表示に戻す' : '期間で絞り込みを有効にする'}
-              </button>
+            <div className="page-period-bar">
+              <span className="page-period-bar-title">このページの期間</span>
+              <PeriodPicker value={dashboardPeriodOverride} onChange={handleChangeDashboardPeriod} ariaLabel="このページの期間" />
+              <span className="period-row-note">各カード・歩留まり分析・CSV出力の期間です。カードごとに個別の期間にもできます。</span>
             </div>
             {selectedTeamId && (
               <TeamChatReportPanel
@@ -24368,15 +24349,14 @@ const App: React.FC = () => {
                   sectionOrder={resolveAllUsersSectionOrder(currentUserData?.allUsersSectionOrder)}
                   onMoveSection={handleMoveAllUsersSection}
                   funnelPeriodOverride={dashboardPeriodOverride}
-                  progressPeriodOverride={progressPeriodOverride}
-                  onPrevProgressMonth={() => handleShiftProgressMonth(-1)}
-                  onNextProgressMonth={() => handleShiftProgressMonth(1)}
-                  grossProfitPeriodOverride={grossProfitPeriodOverride}
-                  onPrevGrossProfitMonth={() => handleShiftGrossProfitMonth(-1)}
-                  onNextGrossProfitMonth={() => handleShiftGrossProfitMonth(1)}
-                  dowPeriodOverride={dowPeriodOverride}
-                  onPrevDowMonth={() => handleShiftDowMonth(-1)}
-                  onNextDowMonth={() => handleShiftDowMonth(1)}
+                  progressOwnPeriod={progressOwnPeriod}
+                  onChangeProgressOwnPeriod={setProgressOwnPeriod}
+                  grossProfitOwnPeriod={grossProfitOwnPeriod}
+                  onChangeGrossProfitOwnPeriod={setGrossProfitOwnPeriod}
+                  dowOwnPeriod={dowOwnPeriod}
+                  onChangeDowOwnPeriod={setDowOwnPeriod}
+                  onThisWeek={() => setViewWeekStartDate(getStartOfWeek(new Date(), weekStartsOn))}
+                  onThisMemberWeek={() => setMemberWeeklyWeekStartDate(getStartOfWeek(new Date(), weekStartsOn))}
                   canEditAcceptedDealOwner={canEditAcceptedDealOwner}
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
                   onSaveAggregateCandidate={handleSaveAggregateCandidate}
