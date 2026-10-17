@@ -4846,6 +4846,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     date: '2026-10-18',
     items: [
       'AI（Gemini）の呼び出しを、KPI管理くんのサーバーを経由する形に変えた（APIキーをブラウザに渡さないようにするため）。使い方は変わりません。音声やPDFなど大きいファイルは、いったん自分のドライブに一時ファイル（kpi-mgr-ai-temp-…）として置いてAIに渡し、終わったら自動で削除します。AIのエラーも日本語で表示するようにしました（クレジット不足・混雑・一時的な上限など）',
+      '面談ログ（議事録・ファイル・音声）を取り込んだときに自動で入る項目を増やした。これまでの年齢・希望年収・電話番号・メールアドレスに加えて、現職・職種・現年収・入社希望時期・他社の選考状況・他エージェントの利用も読み取ります。空欄の項目はそのまま入り、すでに入力済みで内容が違う項目は「上書きしますか？」と一覧で確認します（キャンセルすると登録済みの内容を残します）',
     ],
   },
   {
@@ -7101,6 +7102,12 @@ const CANDIDATE_BASIC_INFO_SCHEMA = {
         salary: { type: Type.NUMBER, description: '候補者の希望年収（万円単位の数値。例: 650万円なら650）。言及がなければ省略する。' },
         phoneNumber: { type: Type.STRING, description: '候補者の電話番号。言及がなければ省略する。' },
         email: { type: Type.STRING, description: '候補者のメールアドレス。言及がなければ省略する。' },
+        currentSalary: { type: Type.NUMBER, description: '候補者の現在の年収（万円単位の数値。例: 600万円なら600）。言及がなければ省略する。' },
+        currentCompany: { type: Type.STRING, description: '候補者の現在の勤務先の企業名（正式名称が分かればそれ）。言及がなければ省略する。' },
+        jobType: { type: Type.STRING, description: '候補者の現在の職種（例: 法人営業、経営企画、Webエンジニア）。短い名詞で。言及がなければ省略する。' },
+        desiredJoinTiming: { type: Type.STRING, description: '候補者の入社可能時期・入社希望時期を yyyy-MM 形式で（例: 2027-01）。「3か月後」など相対的な表現は面談日から計算する。特定できなければ省略する。' },
+        usingOtherAgents: { type: Type.BOOLEAN, description: '他の転職エージェントを利用しているならtrue、利用していないと明言していればfalse。言及がなければ省略する。' },
+        otherCompanyStatus: { type: Type.STRING, description: '他社（他エージェント経由・直接応募を含む）での選考状況を1〜3行で。企業名・段階が分かれば入れる。言及がなければ省略する。' },
     },
 };
 
@@ -7116,12 +7123,18 @@ const toGenerateContentParts = (contents: any): any[] => {
  * 混ざらないよう、responseSchemaで厳密なJSON出力を強制する別呼び出しにしている。CandidateModal
  * （新規登録時）とPipelineCandidateCard（登録済み候補者への追加取込み時）の両方から使う。
  */
+type ExtractedCandidateInfo = {
+    age?: number; salary?: number; phoneNumber?: string; email?: string;
+    currentSalary?: number; currentCompany?: string; jobType?: string; desiredJoinTiming?: string;
+    usingOtherAgents?: boolean; otherCompanyStatus?: string;
+};
+
 const extractCandidateBasicInfo = async (
     contents: any
-): Promise<{ age?: number; salary?: number; phoneNumber?: string; email?: string }> => {
+): Promise<ExtractedCandidateInfo> => {
     const ai = gemini;
     const instructionPart = {
-        text: '上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレスが読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。',
+        text: `上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレス、現年収、現職の企業名、職種、入社可能時期、他エージェントの利用有無、他社の選考状況が読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。（参考：今日は${new Date().toLocaleDateString('sv-SE')}です）`,
     };
     try {
         const response = await ai.models.generateContent({
@@ -7137,6 +7150,55 @@ const extractCandidateBasicInfo = async (
         console.error('Error extracting candidate basic info:', error);
         return {};
     }
+};
+
+// 面談ログから読み取った項目を、候補者のどの欄に入れるか（表示名・表示の形）。
+const EXTRACTED_CANDIDATE_FIELDS: { key: keyof ExtractedCandidateInfo; label: string; format: (v: any) => string }[] = [
+    { key: 'currentCompany', label: '現職', format: v => String(v) },
+    { key: 'jobType', label: '職種', format: v => String(v) },
+    { key: 'currentSalary', label: '現年収', format: v => `${v}万円` },
+    { key: 'salary', label: '希望年収', format: v => `${v}万円` },
+    { key: 'age', label: '年齢', format: v => `${v}歳` },
+    { key: 'desiredJoinTiming', label: '入社希望時期', format: v => String(v) },
+    { key: 'otherCompanyStatus', label: '他社の選考状況', format: v => String(v) },
+    { key: 'phoneNumber', label: '電話番号', format: v => String(v) },
+    { key: 'email', label: 'メールアドレス', format: v => String(v) },
+];
+
+const isBlankCandidateValue = (v: unknown) => v === undefined || v === null || v === '' || v === 0;
+
+/**
+ * 面談ログから読み取った項目のうち、候補者に反映するものを返す。空欄の項目はそのまま埋め、
+ * すでに入力されていて値が違う項目は、一覧を出して上書きしてよいか確認する（断ればそのまま）。
+ * 他エージェントの利用は「利用している」と読み取れた時だけ反映する（未入力と「利用なし」を区別できないため）。
+ */
+const resolveExtractedCandidateInfo = (
+    current: Pick<Candidate, 'age' | 'salary' | 'phoneNumber' | 'email' | 'currentSalary' | 'currentCompany' | 'jobType' | 'desiredJoinTiming' | 'usingOtherAgents' | 'otherCompanyStatus'>,
+    info: ExtractedCandidateInfo,
+): Partial<Candidate> => {
+    const fill: Partial<Candidate> = {};
+    const conflicts: { key: keyof ExtractedCandidateInfo; label: string; before: string; after: string; value: any }[] = [];
+    for (const field of EXTRACTED_CANDIDATE_FIELDS) {
+        let value: any = info[field.key];
+        if (typeof value === 'string') value = value.trim();
+        if (typeof value === 'number') value = Math.round(value);
+        if (field.key === 'desiredJoinTiming' && !/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value || ''))) continue;
+        if (isBlankCandidateValue(value)) continue;
+        const before = (current as any)[field.key];
+        if (isBlankCandidateValue(before)) {
+            (fill as any)[field.key] = value;
+        } else if (String(before).trim() !== String(value)) {
+            conflicts.push({ key: field.key, label: field.label, before: field.format(before), after: field.format(value), value });
+        }
+    }
+    if (info.usingOtherAgents === true && !current.usingOtherAgents) fill.usingOtherAgents = true;
+    if (conflicts.length > 0) {
+        const lines = conflicts.map(c => `・${c.label}：${c.before} → ${c.after}`).join('\n');
+        if (window.confirm(`面談ログから読み取った内容が、登録済みの内容と違います。上書きしますか？\n（キャンセルすると、登録済みの内容をそのまま残します。空欄だった項目は反映済みです）\n\n${lines}`)) {
+            conflicts.forEach(c => { (fill as any)[c.key] = c.value; });
+        }
+    }
+    return fill;
 };
 
 // Shared by CandidateModal (resume/audio upload) and PipelineCandidateCard's inline audio
@@ -7572,13 +7634,11 @@ const CandidateModal: React.FC<{
                 updatedAt: now.toISOString(),
                 logDate: now.toISOString(),
             };
+            const extractedPatch = resolveExtractedCandidateInfo(candidate, basicInfo);
             setCandidate(prev => ({
                 ...prev,
                 memos: [...(prev.memos || []), newMemo],
-                age: basicInfo.age ?? prev.age,
-                salary: basicInfo.salary ?? prev.salary,
-                phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
-                email: basicInfo.email?.trim() || prev.email,
+                ...extractedPatch,
             }));
 
         } catch (error) {
@@ -7664,13 +7724,11 @@ const CandidateModal: React.FC<{
                 logDate,
                 sourceFileId,
             };
+            const extractedPatch = resolveExtractedCandidateInfo(candidate, basicInfo);
             setCandidate(prev => ({
                 ...prev,
                 memos: [...(prev.memos || []), newMemo],
-                age: basicInfo.age ?? prev.age,
-                salary: basicInfo.salary ?? prev.salary,
-                phoneNumber: basicInfo.phoneNumber?.trim() || prev.phoneNumber,
-                email: basicInfo.email?.trim() || prev.email,
+                ...extractedPatch,
             }));
         } catch (error) {
             console.error('Error summarizing interview log:', error);
@@ -15772,10 +15830,7 @@ const PipelineCandidateCard: React.FC<{
         memos: [...displayMemos, newMemo],
         interviewMemo: undefined,
         interviewSummary: undefined,
-        age: basicInfo.age ?? c.age,
-        salary: basicInfo.salary ?? c.salary,
-        phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
-        email: basicInfo.email?.trim() || c.email,
+        ...resolveExtractedCandidateInfo(c, basicInfo),
       });
       setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
     } catch (error) {
@@ -15864,10 +15919,7 @@ const PipelineCandidateCard: React.FC<{
         memos: [...displayMemos, newMemo],
         interviewMemo: undefined,
         interviewSummary: undefined,
-        age: basicInfo.age ?? c.age,
-        salary: basicInfo.salary ?? c.salary,
-        phoneNumber: basicInfo.phoneNumber?.trim() || c.phoneNumber,
-        email: basicInfo.email?.trim() || c.email,
+        ...resolveExtractedCandidateInfo(c, basicInfo),
       });
       setExpandedMemoIds(prev => new Set(prev).add(newMemo.id));
     } catch (error) {
