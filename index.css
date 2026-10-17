@@ -5084,8 +5084,8 @@ p.memo-content-text {
 .jd-send-text { width: 100%; box-sizing: border-box; font-family: inherit; line-height: 1.6; }
 .jd-send-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; margin-top: 0.5rem; }
 .jd-send-template-editor { margin-top: 0; }
-.jd-send-composer label.jd-send-check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; width: 100%; }
-.jd-send-composer .jd-send-check input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+.jd-send-composer label.jd-send-check, .jd-send-template-editor label.jd-send-check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; width: 100%; }
+.jd-send-composer .jd-send-check input[type="checkbox"], .jd-send-template-editor .jd-send-check input[type="checkbox"] { width: auto; margin: 0; flex: none; }
 
 .jd-bundle-generator { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.75rem; margin: 0 0 0.6rem; }
 .jd-bundle-generator .field-hint { margin: 0; flex: 1 1 240px; }

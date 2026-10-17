@@ -1,13 +1,20 @@
 // 「求人票出力」で作ったPDFを候補者に送るときの文面（メール／メッセージ）。
 //
 // 文面は各ユーザーが自分用に書き換えられる（UserData.jdSendTemplates、2026-10-16）。差し込み項目は
-// JD_SEND_TEMPLATE_FIELDS。{企業情報} には、担当者が任意で付けた企業概要・企業URL（Web検索で調べて
+// JD_SEND_TEMPLATE_FIELDS。{企業情報} には、担当者が付けた企業概要・企業URL（Web検索で調べて
 // 画面で直せる）が入る。付けない場合は空になり、前後の空行は詰める。
+// 2026-10-17: {企業概要}{企業URL} を追加し、URL（や概要）を {企業情報} と別の位置に置けるようにした。
+// テンプレートに {企業URL} があれば URL はそこに入り、{企業情報} からは外れる（{企業概要} も同じ）。
+// 企業概要・URLは既定で付ける（コピーを押した時にWeb検索して入れる）。付けないのを既定にしたい人は
+// UserData.jdSendDefaults で変えられる。
 
 import { GoogleGenAI } from '@google/genai';
 
 export type JdSendChannel = 'email' | 'message';
 export type JdSendTemplates = Partial<Record<JdSendChannel, string>>;
+/** 企業概要・企業URLを既定で付けるか（未設定＝付ける）。UserData.jdSendDefaults。 */
+export interface JdSendDefaults { overview?: boolean; url?: boolean }
+export const resolveJdSendDefaults = (d?: JdSendDefaults) => ({ overview: d?.overview !== false, url: d?.url !== false });
 
 export const JD_SEND_CHANNEL_LABELS: Record<JdSendChannel, string> = {
   email: 'メール',
@@ -20,6 +27,8 @@ export const JD_SEND_TEMPLATE_FIELDS = [
   { token: '{件数}', label: '求人の件数' },
   { token: '{求人一覧}', label: '企業名・ポジションの一覧' },
   { token: '{企業情報}', label: '付けた企業概要・URL（無ければ空）' },
+  { token: '{企業概要}', label: '企業概要だけ（置くと{企業情報}からは外れる）' },
+  { token: '{企業URL}', label: '企業URLだけ（置くと{企業情報}からは外れる）' },
 ] as const;
 
 /** 既定の文面（差し込み項目入り）。編集画面の初期値と、未設定時の文面に使う。 */
@@ -78,18 +87,46 @@ export interface JdSendParams {
 const jobList = (channel: JdSendChannel, jobs: JdSendJob[]): string =>
   jobs.map((j, i) => `${channel === 'email' ? `${i + 1}. ` : '・'}${j.company}／${j.position || '企業共通'}`).join('\n');
 
-const companyInfoBlock = (channel: JdSendChannel, infos: JdSendCompanyInfo[]): string => {
+type CleanInfo = { company: string; overview: string; url: string };
+const cleanInfos = (infos: JdSendCompanyInfo[]): CleanInfo[] =>
+  infos.map(c => ({ company: c.company, overview: c.overview.trim(), url: c.url.trim() })).filter(c => c.overview || c.url);
+
+/** {企業URL}: 1社ならURLだけ、複数社なら「企業名：URL」を1行ずつ（見出しはテンプレート側で書く）。 */
+const companyUrlBlock = (infos: CleanInfo[]): string => {
+  const withUrl = infos.filter(c => c.url);
+  if (withUrl.length === 1) return withUrl[0].url;
+  return withUrl.map(c => `${c.company}：${c.url}`).join('\n');
+};
+
+/** {企業概要}: 1社なら概要だけ、複数社なら【企業名】付きで並べる。 */
+const companyOverviewBlock = (infos: CleanInfo[]): string => {
+  const withOverview = infos.filter(c => c.overview);
+  if (withOverview.length === 1) return withOverview[0].overview;
+  return withOverview.map(c => `【${c.company}】\n${c.overview}`).join('\n\n');
+};
+
+const companyInfoBlock = (channel: JdSendChannel, infos: CleanInfo[]): string => {
   const blocks = infos
-    .map(c => ({ ...c, overview: c.overview.trim(), url: c.url.trim() }))
     .filter(c => c.overview || c.url)
     .map(c => [`【${c.company}】`, c.overview, c.url ? (channel === 'email' ? `URL：${c.url}` : c.url) : ''].filter(Boolean).join('\n'));
   if (blocks.length === 0) return '';
   return [channel === 'email' ? '■企業情報' : '▼企業情報', blocks.join('\n\n')].join('\n');
 };
 
-/** テンプレートに差し込み項目を入れて文面にする。{企業情報} が無いテンプレートで企業情報を付けた場合は求人一覧の後ろ（無ければ末尾）に入れる。 */
+/**
+ * テンプレートに差し込み項目を入れて文面にする。{企業URL}／{企業概要} があればそれぞれその位置に入れ、
+ * {企業情報} にはそれ以外の分だけを入れる。{企業情報} が無いテンプレートで、どこにも置かれていない
+ * 企業情報がある場合は求人一覧の後ろ（無ければ末尾）に入れる。
+ */
 export const fillJdSendTemplate = (channel: JdSendChannel, template: string, params: JdSendParams): string => {
-  const info = companyInfoBlock(channel, params.companyInfos);
+  const infos = cleanInfos(params.companyInfos);
+  const hasUrlToken = template.includes('{企業URL}');
+  const hasOverviewToken = template.includes('{企業概要}');
+  const info = companyInfoBlock(channel, infos.map(c => ({
+    company: c.company,
+    overview: hasOverviewToken ? '' : c.overview,
+    url: hasUrlToken ? '' : c.url,
+  })));
   let t = template;
   if (info && !t.includes('{企業情報}')) {
     t = t.includes('{求人一覧}') ? t.replace('{求人一覧}', '{求人一覧}\n\n{企業情報}') : `${t.trimEnd()}\n\n{企業情報}`;
@@ -101,6 +138,8 @@ export const fillJdSendTemplate = (channel: JdSendChannel, template: string, par
     .split('{件数}').join(String(params.jobs.length))
     .split('{求人一覧}').join(jobList(channel, params.jobs))
     .split('{企業情報}').join(info)
+    .split('{企業概要}').join(companyOverviewBlock(infos))
+    .split('{企業URL}').join(companyUrlBlock(infos))
     // 候補者名・企業情報が無い時に残る空行を詰める
     .replace(/^\s*\n/, '')
     .replace(/\n{3,}/g, '\n\n')
