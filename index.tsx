@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import { gemini, Type } from "./services/gemini";
 import {
   Chart as ChartJS,
@@ -4878,6 +4879,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '全ユーザー/チーム別タブの一番下に「1on1スコアカード」を追加した。メンバーと月を選ぶと、主な指標（スカウト数・返信率・書類回収・初回面談・推薦〜内定など）について、本人の値・画面で選択中のメンバーの中央値・過去3か月の推移を並べ、中央値より2割以上低い指標を赤、高い指標を緑で表示します。14日以上動いていない選考（先の予定日が入っているものは除く）の一覧も出ます。「1on1で話すべき点をAIに聞く」では、数字と停滞中の選考の段階・日数だけをAIに送ります（候補者名・企業名は送りません）',
       'ミドル向けに「チーム一括入力（表）」を追加した。個人実績タブの「実績カレンダー」にある代理入力の欄から開き、日付と媒体を選ぶと、自分と代理入力できるメンバー全員分の実績（スカウト送信数〜有効初回面談数）を1つの表でまとめて入力できます。すでに値が入っているマスは色付きで表示し、保存するのは値を変えたマスだけです（本人がその日に入れた他の項目は変わりません）',
       'ブラインドレジュメ作成（候補者カードからの1件作成・「ブラインドレジュメ収集」）の推薦先の企業名とポジション名で、面接対策ジェネレーターに登録されている企業・ポジションを候補に出すようにした。企業とポジションを選ぶと、ジェネレーターにそのポジションの求人票が保存されていれば求人内容に自動で入ります（求人内容をすでに入力している時は上書きせず、「面接対策ジェネレーターの求人票から選ぶ」から追加できます）。ジェネレーターに無い企業・ポジションは、これまでどおり自由に入力できます',
+      '候補者パイプラインのカードで、長い「他社状況」でカードが縦に長くなりすぎないようにした。2行を超える分は「…」で省略し、マウスを合わせると全文を吹き出しで表示、クリックすると全文を広げて表示します（もう一度クリックで折りたたみ）。編集は右の「編集」から行えます（空欄の時はこれまでどおりクリックで入力できます）',
     ],
   },
   {
@@ -14772,6 +14774,107 @@ const InlineTextField: React.FC<{
   );
 };
 
+/**
+ * 長くなりがちな文章（他社状況など）の表示。カード上では2行までに省略し、
+ * - マウスを合わせると全文を吹き出しで表示（カードの overflow:hidden で切れないよう body 直下に出す）
+ * - クリック（Enter/Space）で全文の表示と省略を切り替え
+ * - onCommit があれば「編集」ボタンで複数行の入力欄に切り替えて編集できる（フォーカスが外れると保存）
+ */
+const EXPANDABLE_TEXT_POPOVER_WIDTH = 420;
+const ExpandableTextField: React.FC<{
+  value: string;
+  onCommit?: (value: string) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+  emptyText?: string;
+}> = ({ value, onCommit, placeholder, ariaLabel, emptyText = '未設定' }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const [popover, setPopover] = useState<{ left: number; top: number; placeAbove: boolean } | null>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { setDraft(value); }, [value]);
+  useEffect(() => { if (isEditing) textareaRef.current?.focus(); }, [isEditing]);
+  // 省略表示のときに、実際に2行に収まっていないか（収まっていれば吹き出し・切り替えは不要）
+  useEffect(() => {
+    const el = textRef.current;
+    if (!el || expanded) return;
+    const check = () => setIsOverflowing(el.scrollHeight > el.clientHeight + 1);
+    check();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(check) : null;
+    observer?.observe(el);
+    return () => observer?.disconnect();
+  }, [value, expanded, isEditing]);
+
+  if (isEditing) {
+    return (
+      <textarea
+        ref={textareaRef}
+        className="expandable-text-editor"
+        value={draft}
+        rows={Math.min(8, Math.max(3, draft.split('\n').length + 1))}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== value) onCommit?.(draft); setIsEditing(false); }}
+        onKeyDown={e => { if (e.key === 'Escape') { setDraft(value); setIsEditing(false); } }}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+      />
+    );
+  }
+
+  // 空欄のときは、本文をクリックするとそのまま入力できる（これまでのクリックで編集と同じ）
+  const editOnClick = !value && !!onCommit;
+  const canToggle = !editOnClick && (isOverflowing || expanded);
+  const showPopover = () => {
+    const el = textRef.current;
+    if (!el || expanded || !isOverflowing) return;
+    const rect = el.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - EXPANDABLE_TEXT_POPOVER_WIDTH - 8));
+    const placeAbove = rect.bottom + 200 > window.innerHeight && rect.top > 200;
+    setPopover({ left, top: placeAbove ? rect.top - 6 : rect.bottom + 6, placeAbove });
+  };
+  const toggle = () => {
+    if (editOnClick) { setIsEditing(true); return; }
+    if (canToggle) { setExpanded(x => !x); setPopover(null); }
+  };
+  const interactive = canToggle || editOnClick;
+
+  return (
+    <div className="expandable-text">
+      <div
+        ref={textRef}
+        className={`expandable-text-body info-value ${expanded ? 'is-expanded' : ''} ${interactive ? 'is-toggleable' : ''} ${!value ? 'is-empty' : ''}`}
+        role={interactive ? 'button' : undefined}
+        tabIndex={interactive ? 0 : undefined}
+        aria-expanded={canToggle ? expanded : undefined}
+        aria-label={ariaLabel}
+        title={canToggle ? (expanded ? 'クリックで折りたたむ' : 'クリックで全文を表示') : undefined}
+        onClick={toggle}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+        onMouseEnter={showPopover}
+        onMouseLeave={() => setPopover(null)}
+      >
+        {value || (onCommit ? (placeholder || emptyText) : emptyText)}
+      </div>
+      {onCommit && value && (
+        <button type="button" className="expandable-text-edit" onClick={() => setIsEditing(true)} aria-label={`${ariaLabel || ''}を編集`}>編集</button>
+      )}
+      {popover && createPortal(
+        <div
+          className={`expandable-text-popover ${popover.placeAbove ? 'is-above' : ''}`}
+          style={{ left: popover.left, top: popover.top, maxWidth: EXPANDABLE_TEXT_POPOVER_WIDTH }}
+          role="tooltip"
+        >
+          {value}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+};
+
 // Same buffering pattern as InlineTextField, for numeric fields (salary, feeRate, etc.) — commits
 // a number (or undefined when cleared) rather than a raw string. `unit` (e.g. '万円', '歳') is
 // appended only to the display-mode text, matching how the read-only view formats the same value.
@@ -16719,9 +16822,9 @@ const PipelineCandidateCard: React.FC<{
                 <div className="key-info-item">
                     <span>他社状況</span>
                     {candidateIsOwn ? (
-                        <InlineTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
+                        <ExpandableTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
                     ) : (
-                        c.otherCompanyStatus || 'N/A'
+                        <ExpandableTextField value={c.otherCompanyStatus || ''} ariaLabel="他社状況" emptyText="N/A" />
                     )}
                 </div>
                 <div className="key-info-item">
@@ -16943,9 +17046,9 @@ const PipelineCandidateCard: React.FC<{
                 <div className="candidate-info-item">
                     <span className="info-label">他社状況</span>
                     {candidateIsOwn ? (
-                        <InlineTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
+                        <ExpandableTextField value={c.otherCompanyStatus || ''} onCommit={(v) => commitCandidateField('otherCompanyStatus', v)} placeholder="例: A社最終面接、B社選考中" ariaLabel="他社状況" />
                     ) : (
-                        <span className="info-value">{c.otherCompanyStatus || 'N/A'}</span>
+                        <ExpandableTextField value={c.otherCompanyStatus || ''} ariaLabel="他社状況" emptyText="N/A" />
                     )}
                 </div>
                 <div className="candidate-info-item">
