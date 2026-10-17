@@ -8,7 +8,7 @@
 // かける。年齢・学歴・在籍企業名・年収は伏せない。推薦文の中の候補者は「〇〇様」と書かせ、送る前に
 // 担当者が名前を入れる。
 
-import { GoogleGenAI } from '@google/genai';
+import { gemini } from './gemini';
 import { redactPersonalInfo, collectNotes, basicFacts, type BlindSourceCandidate } from './blindResume';
 
 const MODEL = 'gemini-2.5-flash';
@@ -55,7 +55,7 @@ export const generateRecommendationDraft = async (input: RecommendationInput): P
 - 見出しや記号はプレーンテキストで（Markdownの # や ** は使わない。箇条書きは「・」）
 
 ${material}`;
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const ai = gemini;
   const response = await ai.models.generateContent({ model: MODEL, contents: instruction });
   const text = (response.text || '').trim();
   if (!text) throw new Error('推薦文を作成できませんでした。時間をおいて再度お試しください。');

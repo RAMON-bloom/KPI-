@@ -10,7 +10,7 @@
 //
 // 候補者の氏名・連絡先は送らない。AI下書きでも氏名を「候補者」に置き換える。
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { gemini, Type } from './gemini';
 import { INTERVIEW_PREP_GENERATOR_URL } from './interviewPrep';
 import { googleFetch, INTERVIEW_PREP_SPREADSHEET_ID, companyNamesEqual, companyNamesMatch, type InterviewPrepData } from './interviewPrepData';
 
@@ -340,7 +340,7 @@ export const draftKnowledgeFromMemo = async (params: {
     '■面談ログ',
     masked,
   ].join('\n');
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const ai = gemini;
   const response = await ai.models.generateContent({
     model: MODEL,
     contents: instruction,
@@ -456,7 +456,7 @@ export const saveJdToGenerator = async (companyId: string, position: string, con
  * そのまま文字にする（ジェネレーターに貼り付けるのと同じ扱いにするため）。
  */
 export const extractDocumentText = async (file: { mimeType: string; base64: string; name: string }, kind: 'jd' | 'resume'): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const ai = gemini;
   const what = kind === 'jd' ? '求人票（募集要項）' : '職務経歴書・履歴書';
   const response = await ai.models.generateContent({
     model: MODEL,

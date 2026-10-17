@@ -1,5 +1,8 @@
 {
   "rewrites": [
     { "source": "/q/:code", "destination": "/api/q?code=:code" }
-  ]
+  ],
+  "functions": {
+    "api/gemini.ts": { "maxDuration": 300 }
+  }
 }

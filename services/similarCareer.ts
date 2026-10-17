@@ -8,7 +8,7 @@
 // 個人情報の扱い: ブラインドレジュメと同じく、Geminiには氏名・電話番号・メールアドレスを渡さない
 // （本文中に出てくる氏名・連絡先も redactPersonalInfo で伏せ字にしてから送る）。
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { gemini, Type } from './gemini';
 import { redactPersonalInfo } from './blindResume';
 
 const MODEL = 'gemini-2.5-flash';
@@ -92,7 +92,7 @@ export const similarKey = (e: SimilarPoolEntry) => `${e.ownerEmail}::${e.candida
 export class SimilarResearchCancelled extends Error {
   constructor() { super('キャンセルしました'); }
 }
-// 使っている@google/genaiのバージョンは送信済みのリクエストを中断できないため、キャンセル後は
+// 送信済みのAIの呼び出しは中断しないため、キャンセル後は
 // 次の呼び出しを始めないようにし、返ってきた結果は捨てる。
 const throwIfCancelled = (signal?: AbortSignal) => { if (signal?.aborted) throw new SimilarResearchCancelled(); };
 
@@ -172,7 +172,7 @@ const buildProfile = (c: SimilarSourceCandidate, id: string, detailed: boolean):
 export const hasEnoughProfile = (c: SimilarSourceCandidate) =>
   !!((c.summary || '').trim() || (c.jobType || '').trim() || (c.currentCompany || '').trim() || collectNotes(c).trim());
 
-const newAi = () => new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+const newAi = () => gemini;
 
 const runWithConcurrency = async <T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
   const results: R[] = new Array(items.length);

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type } from "@google/genai";
+import { gemini, Type } from "./services/gemini";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -4227,7 +4227,7 @@ const SpreadsheetKpiImportModal: React.FC<{
   // 何百あってもここのトークン量には影響しない）。実際の全行の数値集計はAIを介さず
   // computeKpiCountsByTargetで行う。
   const analyzeColumns = async (candidateGrid: SpreadsheetGrid) => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const ai = gemini;
     const sampleRows = candidateGrid.rows.slice(0, 5);
     const tableText = [candidateGrid.header, ...sampleRows].map(r => r.join(' | ')).join('\n');
     const catalogText = kpiFieldCatalog.map(f => `${f.key}: ${f.label}`).join('\n');
@@ -4289,7 +4289,7 @@ const SpreadsheetKpiImportModal: React.FC<{
   // アドレスに対応付ける小さめのAI呼び出し。列の意味判定（analyzeColumns）とは別呼び出しにして
   // いるのは、担当者列が決まって初めて「実際にどんな値が登場するか」が分かるため。
   const analyzeAssignees = async (values: string[]) => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const ai = gemini;
     const rosterText = roster.map(r => `${r.email}: ${r.label}`).join('\n');
     const valuesText = values.map((v, i) => `${i + 1}. ${v}`).join('\n');
 
@@ -4842,6 +4842,12 @@ interface ChangelogEntry {
 }
 
 const APP_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: '2026-10-18',
+    items: [
+      'AI（Gemini）の呼び出しを、KPI管理くんのサーバーを経由する形に変えた（APIキーをブラウザに渡さないようにするため）。使い方は変わりません。音声やPDFなど大きいファイルは、いったん自分のドライブに一時ファイル（kpi-mgr-ai-temp-…）として置いてAIに渡し、終わったら自動で削除します。AIのエラーも日本語で表示するようにしました（クレジット不足・混雑・一時的な上限など）',
+    ],
+  },
   {
     date: '2026-10-17',
     items: [
@@ -7113,7 +7119,7 @@ const toGenerateContentParts = (contents: any): any[] => {
 const extractCandidateBasicInfo = async (
     contents: any
 ): Promise<{ age?: number; salary?: number; phoneNumber?: string; email?: string }> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    const ai = gemini;
     const instructionPart = {
         text: '上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレスが読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。',
     };
@@ -7348,7 +7354,7 @@ const CandidateModal: React.FC<{
     // (file data vs. plain pasted text) differ; the extraction prompt, schema, and how the
     // result gets merged into the candidate are identical either way.
     const extractResumeInfoFromParts = async (contentParts: ({ inlineData: { mimeType: string; data: string } } | { text: string })[]) => {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const ai = gemini;
 
       const instructionPart = {
           text: 'これらの履歴書から候補者の氏名、現在の勤務先企業名、最終学歴、年齢、希望年収、電話番号、メールアドレス、そして学歴、職歴、スキルを重視した概要を抽出してください。複数の情報源がある場合は、情報を集約し、最も包括的な内容にしてください。',
@@ -7533,7 +7539,7 @@ const CandidateModal: React.FC<{
         setIsGeneratingInterviewSummary(true);
 
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+            const ai = gemini;
 
             const base64Data = await fileToBase64(audioFile);
             const audioPart = {
@@ -7633,7 +7639,7 @@ const CandidateModal: React.FC<{
     };
 
     // Shared by both the Drive-search result path and the manual-file-drop fallback below.
-    // `contents` is whatever GoogleGenAI.generateContent accepts — a plain text prompt for
+    // `contents` is whatever gemini.models.generateContent (services/gemini.ts) accepts — a plain text prompt for
     // Drive-fetched/plain-text logs, or a multimodal {parts} array (inlineData + instruction)
     // for PDF/Word files, letting Gemini read the document itself instead of this app trying to
     // extract text from those formats client-side.
@@ -7645,7 +7651,7 @@ const CandidateModal: React.FC<{
     const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string, logDate: string, sourceFileId?: string) => {
         setIsSummarizingInterviewLog(true);
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+            const ai = gemini;
             const [response, basicInfo] = await Promise.all([
                 ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
                 extractCandidateBasicInfo(contents),
@@ -15740,7 +15746,7 @@ const PipelineCandidateCard: React.FC<{
     onSave({ ...c, interviewAudioFile: audioFileInfo });
     setIsGeneratingInterviewSummary(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const ai = gemini;
       const base64Data = await fileToBase64(audioFile);
       const audioPart = { inlineData: { mimeType: audioFile.type, data: base64Data } };
       const textPart = { text: INTERVIEW_SUMMARY_AUDIO_PROMPT };
@@ -15840,7 +15846,7 @@ const PipelineCandidateCard: React.FC<{
   const summarizeAndAppendInterviewLog = async (contents: any, sourceLabel: string, dateLabel: string, logDate: string, sourceFileId?: string) => {
     setIsSummarizingInterviewLog(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const ai = gemini;
       const [response, basicInfo] = await Promise.all([
         ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
         extractCandidateBasicInfo(contents),
@@ -18330,7 +18336,7 @@ const FunnelAnalysisSection: React.FC<{
     setIsGeneratingSuggestion(true);
     setAiSuggestion('');
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+      const ai = gemini;
       const lines: string[] = [`【全体ファネル実績（${periodLabel}・${mediaLabel}・全ユーザー合計）】`];
       visibleStages.forEach((stage, i) => {
         const rate = totalConversionRates[i];

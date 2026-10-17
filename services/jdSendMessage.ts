@@ -9,7 +9,7 @@
 // 企業概要・URLは既定で付ける（コピーを押した時にWeb検索して入れる）。付けないのを既定にしたい人は
 // UserData.jdSendDefaults で変えられる。
 
-import { GoogleGenAI } from '@google/genai';
+import { gemini } from './gemini';
 
 export type JdSendChannel = 'email' | 'message';
 export type JdSendTemplates = Partial<Record<JdSendChannel, string>>;
@@ -177,7 +177,7 @@ export const splitEmailSubject = (text: string): { subject: string; body: string
 // ---- 企業概要・URLのWeb検索（Gemini + Google検索） ----
 
 const MODEL = 'gemini-2.5-flash';
-const newAi = () => new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+const newAi = () => gemini;
 
 /**
  * 企業の公式サイトURLと、候補者向けの短い企業概要をWeb検索で調べる。hint（求人票の事業内容・本社所在地など）は

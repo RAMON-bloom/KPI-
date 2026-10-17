@@ -8,7 +8,7 @@
 // 本文中に出てくる氏名・連絡先も機械的に伏せ字にしてから送る）。生成結果にも念のため同じ伏せ字
 // 処理をかける。年齢・学歴・在籍企業名・年収は伏せない（2026-10-14 ユーザー指示）。
 
-import { GoogleGenAI, Type } from '@google/genai';
+import { gemini, Type } from './gemini';
 
 const MODEL = 'gemini-2.5-flash';
 
@@ -160,7 +160,7 @@ export const buildMatchingProfile = (entry: BlindPoolEntry, id: string, detailed
   ].filter(Boolean).join('\n');
 };
 
-const newAi = () => new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+const newAi = () => gemini;
 
 // ---- 所要時間の見積もり ----
 // 画面に「推定時間・残り時間」を出すための目安。Geminiの応答時間は混み具合で大きく変わるので、
