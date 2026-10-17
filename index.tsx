@@ -673,6 +673,7 @@ interface CompanyApplication {
   // When a final decision (内定/内定承諾, occasionally お見送り) is expected to be reached for
   // this application — distinct from scheduledDate, which is the next scheduled
   // interview/action, not the eventual outcome date.
+  // 意思決定時期（メモ）。集計には使わない — 集計は候補者の見込み月（Candidate.expectedDecisionMonth）。
   expectedDecisionDate?: string; // ISO yyyy-mm-dd
   memo?: string;
   isHidden?: boolean;
@@ -858,12 +859,17 @@ interface Candidate {
   // `salary` (their stated desired salary) — used with each application's feeRate to project
   // gross profit.
   expectedAnnualSalary?: number;
-  // Manually-set forecast month (yyyy-MM, matching <input type="month">) for when this candidate
-  // is expected to close — for use when there's no CompanyApplication to derive a real
-  // expectedDecisionDate from — e.g. no company currently in selection yet, or between
-  // applications. The 見込み月 pipeline filter matches on either this or the nearest
-  // application-derived expectedDecisionDate, whichever is set.
+  // 見込み月（yyyy-MM）— この候補者が「いつ決まりそうか／いつ成約したか」の唯一の正本。見込み月の
+  // 絞り込み・並び替え・想定粗利・内定承諾一覧（成約月）・BP会レポートはすべてこれ（と下の週）だけを
+  // 見る。選考ごとの意思決定時期（CompanyApplication.expectedDecisionDate）は集計に使わないメモ。
+  // 値の取り出しは必ず getCandidateDecisionTiming を通す（未移行の旧データの読み替えを含むため）。
   expectedDecisionMonth?: string;
+  // 見込み月の第N週（1始まり、週の始まり設定に従う。getWeekOfMonth と同じ数え方）。未設定＝週未定。
+  expectedDecisionWeek?: number;
+  // 見込み月を「正本」として確定済みか。以前は選考ごとの意思決定時期が集計の優先値だったため、
+  // これが無い旧データは見込み月が空なら選考の日付から読み替える（deriveLegacyDecisionTiming）。
+  // 見込み月を入力・保存した時点で true になり、以後は読み替えない。
+  decisionTimingConfirmed?: boolean;
   // Only set when viewing the all-users/team-aggregated pipeline (never persisted) —
   // identifies whose data this candidate belongs to, for display and edit-permission checks.
   ownerEmail?: string;
@@ -955,6 +961,13 @@ function computeStageAdvanceUpdate(
   const funnelRecorded = new Set<keyof typeof GENERAL_KPIS>(nextCandidate.recordedFunnelKpiKeys || []);
   nextCandidate.applications.forEach(a => (a.recordedAchievementKpiKeys || []).forEach(k => funnelRecorded.add(k)));
 
+  // 見込み月を正本として確定させ、新たに内定承諾になったのに見込み月が無ければ今月を入れる。
+  {
+    const materialized = materializeDecisionTiming(prevCandidate, nextCandidate);
+    const needsMonth = !materialized.expectedDecisionMonth && findNewlyAcceptedApplications(prevCandidate, materialized).length > 0;
+    nextCandidate = needsMonth ? { ...materialized, expectedDecisionMonth: todayStr.slice(0, 7), expectedDecisionWeek: undefined } : materialized;
+  }
+
   // Pass 1: forward-progress KPIs (candidatesSubmitted through placements) fire immediately,
   // same as always — real progress at one company counts regardless of what's going on at
   // others, and never on creation (no prevApp). declined/withdrawn are excluded here; they're
@@ -1021,15 +1034,9 @@ function computeStageAdvanceUpdate(
       base = { ...base, exitedFromStage: prevApp.stage, exitedAt: todayStr };
     }
 
-    // 内定承諾にした時点の成約月の確認ポップアップ（DecisionMonthPromptModal）は選考情報の編集
-    // モーダルからの保存でしか出ず、パイプラインのカード上でのステータス変更などでは意思決定時期が
-    // 空のまま（または内定前の見込みの日付のまま）残っていた。想定粗利は意思決定時期で集計月を
-    // 決めるため、年収・オファー金額・料率が入っていても、空ならどの期間にも出ず、古い見込みのまま
-    // なら別の月に計上されていた。ポップアップを経ずに内定承諾になった（＝この保存で意思決定時期が
-    // 変わっていない）場合は、ポップアップの既定（今月の成約）と同じく今日の日付を入れる。
-    if (app.stage === '内定承諾' && (base.expectedDecisionDate || '') === (prevApp.expectedDecisionDate || '')) {
-      base = { ...base, expectedDecisionDate: todayStr };
-    }
+    // 内定承諾の成約月は候補者の見込み月に入れる（保存処理の DecisionMonthPromptModal で選ぶ）。
+    // ポップアップを経ない経路（代理編集のドライブ側での再計算など）で見込み月が空のままのときだけ、
+    // 下の candidateTiming で今月を入れる。
 
     // Records this transition on the 選考トラック (see CompanyApplication.stageHistory). An
     // application saved before this feature existed has no history yet — backfill one entry for
@@ -4519,6 +4526,8 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
+      '見込み月・意思決定時期など、似た日付の項目を整理した。集計に使うのは候補者の「見込み月」だけになり、見込み月の絞り込み・並び替え・想定粗利・内定承諾一覧（成約月）・BP会レポートはすべて見込み月で集計します（以前は選考ごとの意思決定時期を優先していたため、画面によって月がずれることがありました）。見込み月には「週」も任意で入れられ、BP会レポートのメンバー側の時期に使われます。選考ごとの「意思決定時期」は集計に使わないメモになりました。見込み月が未入力の候補者は、これまでの選考の日付から自動で読み替えています（「◯月1日」になっていたものは週未定として扱います）',
+      'カード上の選考状況の変更など、どの画面から「内定承諾」にしても成約月（何月・何週の成約か）を確認するようにした（以前は選考情報の画面から変えたときだけ確認していました）。選んだ月は見込み月（成約月）に入ります。「内定承諾にしない」を選ぶと、その選考は元のフェーズのまま保存されます',
       '【不具合修正】選考状況を変えても、実績の加算が発生しない変更（同じ候補者の2社目が同じ段階を通過した、他社がまだ選考中のままお見送りにした、ステータスを前に戻した等）では、前の段階の予定日が消えない・先の日程が次の予定に繰り上がらない・選考トラックに記録されない・お見送り/辞退の発生フェーズが歩留まり分析に入らない、といった不具合を修正',
       '【不具合修正】週間サマリー（個人・チーム別・全ユーザー・CSV）で、週の最終日（日曜始まりなら土曜）の実績が集計に入っていなかった不具合を修正',
       '【不具合修正】週次・日次の目標が未設定の媒体に、月次の既定値（スカウト200通など）が目標として入っていた不具合を修正。未設定なら0（未設定）として扱います。これまでに自動で入っていた既定値のままの目標も、未設定に戻ります（自分で編集した目標はそのまま残ります）',
@@ -5293,7 +5302,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
         '「進捗状況・選考日程」は、通過済みのフェーズ（日付をクリックして修正可）→ 現在のフェーズ → 企業から伝えられている先の日程を1本の流れで表示します。現在のフェーズはプルダウンで変更し、日程は「確定」（日時を入力）か「調整中」（候補者ボール／企業ボール／その他）を選びます。',
         '先の日程は「＋ 選考を追加」で登録でき、実際にそのフェーズまで進んだら「✓」を押すだけで現在のフェーズに昇格します。',
         '報酬は「料率(%)」か「固定報酬（万円）」を選びます。内定以降は「オファー金額（円）」を入力でき、料率の選考では想定年収より優先して想定粗利の計算に使われます。',
-        '内定確度・入社確度、意思決定時期（見込み月）も入力できます。「内定承諾」に変更して保存すると、その成約を何月扱いにするかを選ぶ確認が出ます。',
+        '内定確度・入社確度、意思決定時期（メモ）も入力できます。意思決定時期は選考ごとのメモで、集計には使いません。集計に使うのは候補者の「見込み月（週は任意）」です。どの画面から「内定承諾」に変えても、その成約を何月（何週）扱いにするかを選ぶ確認が出て、選んだ月が見込み月（成約月）に入ります。',
         '選考予定日はGoogleタスクに自動で登録されます（お見送り・辞退にすると自動で削除）。面接の予定には面接対策資料へのリンクも添えられます。',
         '「求人票」欄には、求人票ジェネレーターで作った求人票（ドライブに保存された正本）のうち、企業名・ポジションが合うもののPDF・Googleドキュメント・フォルダへのリンクが出ます。正本が無い場合は「求人票ジェネレーターで作る」で作るか、求人票のURLを貼っておけます。',
         '「推薦文の下書き」の「推薦文を作る」で、その選考の求人票（ドライブの正本、無ければ面接対策ジェネレーターの保存済み・面接対策資料タブで入力したもの）と候補者の経歴・面談メモから、企業に送る推薦文の下書きをAIが作ります。氏名・連絡先はAIに送らず、本文の候補者は「〇〇様」になります。編集して「コピー」で使ってください（下書きは保存されません）。',
@@ -5339,7 +5348,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
       image: { src: '/help/pipeline-calendar.webp', alt: '選考スケジュール カレンダー' },
       items: [
         '「自分」「全ユーザー」「チーム」「ユーザー別」で表示対象を切り替えます。上部の検索欄では名前・現職・職種・メール・電話番号で探せます。',
-        '「選考フェーズで絞り込み」「並び替え（登録日・意思決定時期・確度）」「見込み月で絞り込み」が使えます。よく使う絞り込みは「現在の選択をデフォルトとして保存」で次回以降も自動で適用されます（表示対象ごとに保存）。',
+        '「選考フェーズで絞り込み」「並び替え（登録日・見込み月・確度）」「見込み月で絞り込み」が使えます。よく使う絞り込みは「現在の選択をデフォルトとして保存」で次回以降も自動で適用されます（表示対象ごとに保存）。',
         '「選考スケジュール カレンダー」に確定した選考予定と掘り起しリマインドが表示されます（破線は企業から伝えられている先の日程）。バッジをクリックすると編集できます。',
         '上部の「メールで届いた選考結果」には、企業からのメールで読み取った選考結果のうち未反映のものが出ます。「反映する」で結果を入れた状態の選考情報が開くので、確認して保存してください。',
         '他のメンバーの更新が見えない時は「候補者一覧を更新」、自分のデータが反映されていないかもしれない時は「自分のパイプラインをDriveに保存し直す」を押してください。「CSV出力」で一覧を書き出せます。',
@@ -5349,7 +5358,7 @@ const HELP_CONTENT: Record<'member' | 'manager', HelpSection[]> = {
       title: '想定粗利と内定承諾一覧',
       image: { src: '/help/gross-profit.webp', alt: '想定粗利' },
       items: [
-        '意思決定時期（見込み月）が対象期間に入る選考について、想定紹介料・媒体手数料・想定粗利・平均粗利をフェーズ別に集計します（候補者1人につき最も進んでいる／確度の高い1社で集計）。',
+        '候補者の見込み月が対象期間に入る選考について、想定紹介料・媒体手数料・想定粗利・平均粗利をフェーズ別に集計します（候補者1人につき最も進んでいる／確度の高い1社で集計）。',
         '「前月/次月」、開始日〜終了日の指定、「今四半期」「今期（3月〜翌2月）」「前期」「6月賞与対象」「12月賞与対象」のワンクリック指定ができます。複数月にまたがる期間では月別の内訳も表示されます。',
         '粗利の計算に足りない入力（年収・fee料率など）がある案件には「要入力」と表示されます。「編集」から年収・報酬形態・料率・媒体をその場で修正でき、候補者パイプラインにも反映されます。',
         '「内定承諾一覧（成約月ごと）」で、何月に誰が内定承諾したかを確認できます。成約月は一覧上で変更でき、想定粗利もその月に集計し直されます（非表示にした候補者の内定承諾も含みます）。',
@@ -7746,15 +7755,13 @@ const CandidateModal: React.FC<{
                     )}
                 </div>
                 <div className="form-group">
-                    <label htmlFor="expectedDecisionMonth">見込み月</label>
-                    <input
-                        type="month"
-                        id="expectedDecisionMonth"
-                        name="expectedDecisionMonth"
-                        value={candidate.expectedDecisionMonth || ''}
-                        onChange={(e) => setCandidate(prev => ({ ...prev, expectedDecisionMonth: e.target.value || undefined }))}
+                    <label htmlFor="expectedDecisionMonth-month">見込み月（週は任意）</label>
+                    <DecisionTimingInput
+                        idPrefix="expectedDecisionMonth"
+                        value={getCandidateDecisionTiming(candidate as Candidate)}
+                        onChange={(t) => setCandidate(prev => ({ ...prev, expectedDecisionMonth: t.month, expectedDecisionWeek: t.week, decisionTimingConfirmed: true }))}
                     />
-                    <p className="form-helper-text">選考中の企業がまだ無い場合でも、パイプラインの「見込み月」絞り込みで表示させたい月を設定してください。</p>
+                    <p className="form-helper-text">この候補者がいつ決まりそうか（内定承諾後は成約月）。見込み月の絞り込み・並び替え・想定粗利・内定承諾一覧・BP会レポートはすべてこの月で集計します。選考ごとの「意思決定時期」はメモで、集計には使いません。</p>
                 </div>
                 <div className="form-group">
                     <label htmlFor="source">集客媒体</label>
@@ -7869,14 +7876,15 @@ const CandidateModal: React.FC<{
                           />
                        </div>
                        <div className="form-group">
-                          <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期</label>
+                          <label htmlFor={`expectedDecisionDate-${app.id}`}>意思決定時期（メモ）</label>
                           <input
                             id={`expectedDecisionDate-${app.id}`}
                             type="date"
                             value={app.expectedDecisionDate || ''}
                             onChange={e => handleApplicationChange(index, 'expectedDecisionDate', e.target.value)}
-                            aria-label={`意思決定時期 ${index + 1}`}
+                            aria-label={`意思決定時期（メモ） ${index + 1}`}
                           />
+                          <p className="form-helper-text">集計には使いません（集計は候補者の見込み月）</p>
                        </div>
                        <div className="form-group">
                           <label htmlFor={`feeType-${app.id}`}>報酬形態</label>
@@ -8057,10 +8065,6 @@ const ApplicationModal: React.FC<{
     const [application, setApplication] = useState<CompanyApplication>({
         id: '', companyName: '', stage: '打診', nextAction: '', scheduledDate: '', memo: ''
     });
-    // 選考状況を「内定承諾」に変更して保存しようとした瞬間だけ、この保存内容を一旦ここに
-    // 保持して成約月の確認ポップアップ（DecisionMonthPromptModal）を挟む。ポップアップで
-    // 選ばれた月を反映したexpectedDecisionDateに上書きしてから実際のonSaveを呼ぶ。
-    const [pendingSaveApplication, setPendingSaveApplication] = useState<CompanyApplication | null>(null);
     const [activeTab, setActiveTab] = useState<ApplicationModalTab>('info');
 
     useEffect(() => {
@@ -8117,31 +8121,12 @@ const ApplicationModal: React.FC<{
             alert('企業名は必須です。');
             return;
         }
-        // 選考状況が「内定承諾」に変わった瞬間（既に内定承諾だったものの再保存は対象外）だけ、
-        // 成約月の確認ポップアップを挟む。意思決定時期はそこでの選択で上書きするので、ここでは
-        // まだonSaveを呼ばない。
-        if (application.stage === '内定承諾' && initialData?.stage !== '内定承諾') {
-            setPendingSaveApplication(application);
-            return;
-        }
+        // 内定承諾にしたときの成約月の確認は、App 側の保存処理がどの画面からの保存でも共通で出す。
         onSave(application);
         onClose();
     };
 
     const modalTitle = `${candidateName}さん - ${initialData && initialData.companyName ? '選考情報を編集' : '選考情報を追加'}`;
-
-    if (pendingSaveApplication) {
-        return (
-            <DecisionMonthPromptModal
-                onConfirm={(decisionDateISO) => {
-                    onSave({ ...pendingSaveApplication, expectedDecisionDate: decisionDateISO });
-                    setPendingSaveApplication(null);
-                    onClose();
-                }}
-                onCancel={() => setPendingSaveApplication(null)}
-            />
-        );
-    }
 
     return (
         // 入力途中の内容が消えないよう、外側（背景）クリックでは閉じない。閉じるのは×・キャンセル・保存のみ
@@ -8235,7 +8220,7 @@ const ApplicationModal: React.FC<{
                         />
                     </div>
                     <div className="form-group">
-                        <label htmlFor="expectedDecisionDate">意思決定時期</label>
+                        <label htmlFor="expectedDecisionDate">意思決定時期（メモ）</label>
                         <input
                             type="date"
                             id="expectedDecisionDate"
@@ -8243,6 +8228,7 @@ const ApplicationModal: React.FC<{
                             value={application.expectedDecisionDate || ''}
                             onChange={handleChange}
                         />
+                        <p className="form-helper-text">集計には使いません（集計は候補者の見込み月）</p>
                     </div>
                     </section>
                     <section className="prep-card app-card--fee" hidden={activeTab !== 'info'}>
@@ -10535,51 +10521,58 @@ const MailResultSuggestionsPanel: React.FC<{
 };
 
 /**
- * 選考状況が「内定承諾」に変わった瞬間にApplicationModalから割り込むポップアップ — 想定粗利の
- * 集計は意思決定時期（見込み月）ベースなので、この成約を今月扱いにするか、別の月（過去月も
- * 含む）の成約として計上するかをここで明示的に選んでもらう。選択結果に応じてexpectedDecisionDate
- * を上書きした上で、呼び出し元（ApplicationModal）が実際の保存を行う。
+ * 選考状況が「内定承諾」に変わる保存で、App の保存処理（handleSaveCandidate ほか）が割り込んで出す
+ * ポップアップ — カード・選考情報・登録画面など、どこから内定承諾にしても必ずここを通る。選んだ月・週は
+ * 候補者の見込み月（成約月）に入る。「内定承諾にしない」を選ぶと、その選考だけ元のフェーズに戻して保存する。
  */
 const DecisionMonthPromptModal: React.FC<{
-    onConfirm: (decisionDateISO: string) => void;
+    candidateName?: string;
+    companyNames?: string[];
+    initialTiming?: DecisionTiming;
+    onConfirm: (timing: DecisionTiming) => void;
     onCancel: () => void;
-}> = ({ onConfirm, onCancel }) => {
-    const thisMonthStr = useMemo(() => {
-        const now = new Date();
-        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    }, []);
-    const [choice, setChoice] = useState<'thisMonth' | 'otherMonth'>('thisMonth');
-    const [otherMonth, setOtherMonth] = useState(thisMonthStr);
+}> = ({ candidateName, companyNames, initialTiming, onConfirm, onCancel }) => {
+    const weekStartsOn = React.useContext(WeekStartsOnContext);
+    const today = useMemo(() => new Date().toLocaleDateString('sv-SE'), []);
+    const thisMonthStr = today.slice(0, 7);
+    const thisWeek = useMemo(() => getWeekOfMonth(today, weekStartsOn).week ?? undefined, [today, weekStartsOn]);
+    // 既に別の月の見込みが入っていれば、その月を「別の月」の初期値にする。
+    const hasOtherInitial = !!initialTiming?.month && initialTiming.month !== thisMonthStr;
+    const [choice, setChoice] = useState<'thisMonth' | 'otherMonth'>(hasOtherInitial ? 'otherMonth' : 'thisMonth');
+    const [other, setOther] = useState<DecisionTiming>(hasOtherInitial ? initialTiming! : { month: thisMonthStr });
 
     const handleConfirm = () => {
         if (choice === 'thisMonth') {
-            // 実際に内定承諾を記録した「今日」の日付を使う（月内のどの日でも今月判定は
-            // 変わらないが、いつ記録したかがそのまま残るようにするため月初日には丸めない）。
-            onConfirm(new Date().toLocaleDateString('sv-SE'));
+            onConfirm({ month: thisMonthStr, week: thisWeek });
             return;
         }
-        if (!otherMonth) {
+        if (!other.month) {
             alert('成約月を選択してください。');
             return;
         }
-        onConfirm(`${otherMonth}-01`);
+        onConfirm(other);
     };
 
     return (
-        <div className="modal-overlay" onClick={onCancel} role="dialog" aria-modal="true" aria-labelledby="decision-month-modal-title">
-            <div className="modal-content" style={{ maxWidth: '440px' }} onClick={e => e.stopPropagation()}>
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="decision-month-modal-title">
+            <div className="modal-content" style={{ maxWidth: '460px' }} onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
                     <h3 id="decision-month-modal-title">内定承諾の成約月</h3>
                     <button onClick={onCancel} className="close-button" aria-label="閉じる">&times;</button>
                 </div>
                 <div className="modal-body">
+                    {candidateName && (
+                        <p className="modal-description" style={{ fontWeight: 600 }}>
+                            {candidateName}さん{companyNames && companyNames.length > 0 ? `（${companyNames.join('・')}）` : ''}
+                        </p>
+                    )}
                     <p className="modal-description">
-                        この内定承諾を、想定粗利の集計上どの月の成約として扱いますか？選んだ内容に合わせて、この選考の意思決定時期が上書きされます。
+                        この内定承諾を、どの月の成約として扱いますか？選んだ月は候補者の「見込み月（成約月）」に入り、想定粗利・内定承諾一覧・BP会レポートの集計に使われます。
                     </p>
                     <div className="form-group">
                         <label>
                             <input type="radio" name="decisionMonthChoice" checked={choice === 'thisMonth'} onChange={() => setChoice('thisMonth')} />
-                            {' '}今月の成約として登録
+                            {' '}今月の成約として登録{thisWeek ? `（${thisWeek}週）` : ''}
                         </label>
                     </div>
                     <div className="form-group">
@@ -10588,18 +10581,14 @@ const DecisionMonthPromptModal: React.FC<{
                             {' '}別の月の成約として登録
                         </label>
                         {choice === 'otherMonth' && (
-                            <input
-                                type="month"
-                                value={otherMonth}
-                                onChange={(e) => setOtherMonth(e.target.value)}
-                                aria-label="成約月"
-                                style={{ marginTop: '0.5rem', display: 'block' }}
-                            />
+                            <div style={{ marginTop: '0.5rem' }}>
+                                <DecisionTimingInput value={other} onChange={setOther} idPrefix="decision-month-prompt" monthAriaLabel="成約月" />
+                            </div>
                         )}
                     </div>
                 </div>
                 <div className="modal-footer">
-                    <button type="button" onClick={onCancel} className="cancel-button">キャンセル</button>
+                    <button type="button" onClick={onCancel} className="cancel-button">内定承諾にしない</button>
                     <button type="button" onClick={handleConfirm} className="submit-button">この内容で保存</button>
                 </div>
             </div>
@@ -11777,14 +11766,81 @@ const CSV_EXPORT_PATTERN_LABELS: Record<CsvExportPattern, string> = {
     all: 'すべての候補者（非表示を含む全員）',
 };
 
-/** Soonest 意思決定時期 among a candidate's visible applications, or null if none is set. */
-function getNearestExpectedDecisionDate(candidate: Candidate): string | null {
-    const dates = candidate.applications
-        .filter(app => !app.isHidden && app.expectedDecisionDate)
+/** 見込み月＋週（週は未定なら undefined）。 */
+interface DecisionTiming { month?: string; week?: number }
+
+/**
+ * 見込み月を正本にする前の旧データの読み替え。内定承諾済みならその選考の意思決定時期（無ければ
+ * 内定承諾日）の月、それ以外は進行中の選考の意思決定時期のうち一番早いものの月。日付が「1日」の
+ * ものは月だけ選んだ結果とみなして週未定、それ以外は日付から週を出す（週の始まりは日曜で数える）。
+ */
+function deriveLegacyDecisionTiming(candidate: Candidate): DecisionTiming {
+    const toTiming = (dateISO: string | undefined): DecisionTiming => {
+        if (!dateISO || !/^\d{4}-\d{2}-\d{2}/.test(dateISO)) return {};
+        const day = Number(dateISO.slice(8, 10));
+        return { month: dateISO.slice(0, 7), week: day === 1 ? undefined : (getWeekOfMonth(dateISO.slice(0, 10), 0).week ?? undefined) };
+    };
+    const visible = candidate.applications.filter(app => !app.isHidden);
+    const accepted = visible.find(app => app.stage === '内定承諾');
+    if (accepted) return toTiming(accepted.expectedDecisionDate || getAcceptedOnDate(accepted) || undefined);
+    const dates = visible
+        .filter(app => !EXIT_PIPELINE_STAGES.includes(app.stage) && app.expectedDecisionDate)
         .map(app => app.expectedDecisionDate as string);
-    if (dates.length === 0) return null;
-    return dates.reduce((min, d) => (d < min ? d : min));
+    if (dates.length === 0) return {};
+    return toTiming(dates.reduce((min, d) => (d < min ? d : min)));
 }
+
+/** 候補者の見込み月＋週。集計・絞り込み・表示はすべてこれを通す。 */
+function getCandidateDecisionTiming(candidate: Candidate): DecisionTiming {
+    if (candidate.expectedDecisionMonth || candidate.decisionTimingConfirmed) {
+        return { month: candidate.expectedDecisionMonth, week: candidate.expectedDecisionMonth ? candidate.expectedDecisionWeek : undefined };
+    }
+    return deriveLegacyDecisionTiming(candidate);
+}
+
+/**
+ * 保存直前に、見込み月を正本として確定させる。この保存で見込み月／週を変えたならその値、変えて
+ * いなければ保存前の候補者から読み替えた値（getCandidateDecisionTiming）を書き込み、確定済みにする。
+ * 保存前の値から読み替えるのは、同じ保存で選考のメモ（意思決定時期）を変えても見込み月がずれない
+ * ようにするため。
+ */
+function materializeDecisionTiming(prev: Candidate | undefined, next: Candidate): Candidate {
+    if (next.decisionTimingConfirmed) return next;
+    const changedHere = !prev
+        || (next.expectedDecisionMonth || '') !== (prev.expectedDecisionMonth || '')
+        || (next.expectedDecisionWeek ?? null) !== (prev.expectedDecisionWeek ?? null);
+    const timing = changedHere ? { month: next.expectedDecisionMonth, week: next.expectedDecisionWeek } : getCandidateDecisionTiming(prev!);
+    return { ...next, expectedDecisionMonth: timing.month, expectedDecisionWeek: timing.month ? timing.week : undefined, decisionTimingConfirmed: true };
+}
+
+/** 「2026年11月 2週」「2026年11月（週未定）」「未設定」。 */
+function formatDecisionTiming(timing: DecisionTiming): string {
+    if (!timing.month) return '未設定';
+    const [y, m] = timing.month.split('-').map(Number);
+    return `${y}年${m}月${timing.week ? ` ${timing.week}週` : '（週未定）'}`;
+}
+
+/** この保存で新たに「内定承諾」になった選考（成約月を確認する対象）。 */
+function findNewlyAcceptedApplications(prev: Candidate | undefined, next: Candidate): CompanyApplication[] {
+    return next.applications.filter(app => {
+        if (app.stage !== '内定承諾' || app.isHidden) return false;
+        return prev?.applications.find(p => p.id === app.id)?.stage !== '内定承諾';
+    });
+}
+
+/** 成約月の確認でキャンセルされたとき、この保存で内定承諾にした選考を元のフェーズに戻す。 */
+function revertNewlyAccepted(prev: Candidate | undefined, next: Candidate): Candidate {
+    return {
+        ...next,
+        applications: next.applications.map(app => {
+            const p = prev?.applications.find(x => x.id === app.id);
+            return app.stage === '内定承諾' && p && p.stage !== '内定承諾' ? { ...app, stage: p.stage } : app;
+        }),
+    };
+}
+
+/** 見込み月の週の数え方（週の始まり設定）。App が設定値を流し込む。 */
+const WeekStartsOnContext = React.createContext<0 | 6>(0);
 
 /** True if dateISO (yyyy-mm-dd) falls in the given calendar month, e.g. yyyyMM = '2026-08'. */
 function isDateInMonth(dateISO: string, yyyyMM: string): boolean {
@@ -11826,43 +11882,28 @@ function pickBestApplicationPerCandidate(candidates: Candidate[]): CompanyPipeli
 }
 
 /**
- * Whether an application's expected decision falls within the given period — its own
- * expectedDecisionDate takes priority; falls back to the candidate's manually-set
- * expectedDecisionMonth (見込み月) when the application itself has no date, the same either/or
- * the existing 見込み月 pipeline filter already uses (see getNearestExpectedDecisionDate). With
- * no periodOverride, "the period" is the real current calendar month (same convention as
- * isDateInFunnelPeriod). Returns false when neither timing field is set at all — such an
- * application has no period to scope it to yet, so it's excluded from any period-based view
- * (still visible in the unfiltered パイプライン tab, which doesn't use this).
+ * 候補者の見込み月（getCandidateDecisionTiming）が期間に入るか。選考ごとの意思決定時期はメモ扱いで
+ * 見ない（以前は選考の日付を優先していたため、見込み月の絞り込みと想定粗利で月がずれていた）。
+ * periodOverride が無ければ今月。見込み月が無ければ false（期間で絞る画面には出ない）。
  */
 function isDecisionInPeriod(
     candidate: Candidate,
     application: CompanyApplication,
     periodOverride: { start: Date; end: Date } | null
 ): boolean {
-    if (application.expectedDecisionDate) {
+    const decisionMonth = getCandidateDecisionTiming(candidate).month;
+    if (decisionMonth) {
         if (periodOverride) {
-            const t = new Date(application.expectedDecisionDate + 'T00:00:00').getTime();
-            return t >= periodOverride.start.getTime() && t <= periodOverride.end.getTime();
-        }
-        const now = new Date();
-        const d = new Date(application.expectedDecisionDate + 'T00:00:00');
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-    }
-    if (candidate.expectedDecisionMonth) {
-        if (periodOverride) {
-            const [y, m] = candidate.expectedDecisionMonth.split('-').map(Number);
+            const [y, m] = decisionMonth.split('-').map(Number);
             const monthStart = new Date(y, m - 1, 1);
             const monthEnd = new Date(y, m, 0, 23, 59, 59);
             return monthStart.getTime() <= periodOverride.end.getTime() && monthEnd.getTime() >= periodOverride.start.getTime();
         }
         const now = new Date();
         const nowYYYYMM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-        return candidate.expectedDecisionMonth === nowYYYYMM;
+        return decisionMonth === nowYYYYMM;
     }
-    // 意思決定時期も見込み月も無い内定承諾（成約月の確認ポップアップを経ずに内定承諾にした選考）は、
-    // 選考トラックに記録された内定承諾日で集計する — 以前はここでfalseになり、年収・オファー金額・
-    // 料率が入っていても想定粗利のどの期間にも出なかった。
+    // 見込み月の無い内定承諾（旧データなど）は、選考トラックに記録された内定承諾日で集計する。
     const acceptedOn = application.stage === '内定承諾' ? getAcceptedOnDate(application) : '';
     if (acceptedOn) {
         const t = new Date(acceptedOn + 'T00:00:00');
@@ -12087,7 +12128,7 @@ const GrossProfitEntryEditor: React.FC<{
  * 'fixed') are counted but excluded from the sums, and that gap is surfaced rather than silently
  * under-reporting the total.
  *
- * Scoped to a period by 意思決定時期 (見込み月) — see isDecisionInPeriod — defaulting to the
+ * Scoped to a period by 見込み月 — see isDecisionInPeriod — defaulting to the
  * current calendar month rather than every application anywhere in the pipeline, so the figure
  * reads as "this month's" and is comparable month over month. When the parent already has its
  * own period picker (全ユーザー/チーム別ダッシュボード — periodOverride/periodLabel passed in),
@@ -12215,7 +12256,7 @@ const GrossProfitSummary: React.FC<{
                     </button>
                 </div>
             )}
-            <p className="gross-profit-note">意思決定時期（見込み月）が「{periodLabel}」に該当する選考を集計しています。</p>
+            <p className="gross-profit-note">候補者の見込み月が「{periodLabel}」に該当する選考を集計しています。</p>
             <div className="pipeline-sort-controls">
                 <span>選考フェーズで絞り込み:</span>
                 {PIPELINE_STAGES.map(stage => (
@@ -12366,10 +12407,10 @@ const GrossProfitSummary: React.FC<{
 };
 
 
-// 内定承諾の「成約月」— 想定粗利の集計と同じ基準（選考の意思決定時期を優先し、未入力なら
-// 候補者の見込み月）で、どの月の成約として数えられているかを yyyy-mm で返す。どちらも無ければ空文字。
+// 内定承諾の「成約月」— 想定粗利の集計と同じ基準（候補者の見込み月、無ければ内定承諾日の月）で、
+// どの月の成約として数えられているかを yyyy-mm で返す。どちらも無ければ空文字。
 const getAcceptedDealMonth = (candidate: Candidate, application: CompanyApplication): string =>
-    application.expectedDecisionDate ? application.expectedDecisionDate.slice(0, 7) : (candidate.expectedDecisionMonth || getAcceptedOnDate(application).slice(0, 7));
+    getCandidateDecisionTiming(candidate).month || getAcceptedOnDate(application).slice(0, 7);
 
 // 選考トラック上で最後に「内定承諾」になった日（記録が無ければ空文字）。
 const getAcceptedOnDate = (application: CompanyApplication): string => {
@@ -12388,9 +12429,9 @@ const formatYearMonthLabel = (yyyymm: string): string => {
 
 /**
  * 内定承諾一覧（成約月ごと）— 個人実績タブ・全ユーザー/チーム別タブ共通。内定承諾済みの選考を
- * 成約月（=その選考の意思決定時期、未入力なら候補者の見込み月）ごとにまとめ、件数・想定紹介料・
+ * 成約月（=候補者の見込み月）ごとにまとめ、件数・想定紹介料・
  * 想定粗利の小計を出す。成約月はcanEdit(ownerKey)がtrueの行だけその場で付け替えられる——付け替えると
- * 想定粗利の集計月も同時に変わる（どちらも同じ意思決定時期を見ているため）。非表示（掘り起しリスト・
+ * 想定粗利の集計月も同時に変わる（どちらも同じ見込み月を見ているため）。非表示（掘り起しリスト・
  * アーカイブ）にした候補者も、想定粗利の集計と同じく含める。showOwnerを指定すると担当者列を出す。
  */
 type AcceptedDealSource = { ownerKey: string; ownerLabel: string; candidates: Candidate[] };
@@ -12490,7 +12531,7 @@ const AcceptedDealsList: React.FC<{
                 <button type="button" onClick={() => setShowAllAccepted(true)} className={showAllAccepted ? 'active' : ''}>全期間</button>
             </div>
             <p className="gross-profit-note">
-                成約月を変更すると、その選考の意思決定時期が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
+                成約月を変更すると、その候補者の見込み月（成約月）が書き換わり、想定粗利も変更後の月に集計されます。非表示（掘り起しリスト等）にした候補者の内定承諾も含みます。
                 {onSaveCandidate && ' 「編集」から年収・料率（固定報酬）・媒体を修正でき、候補者パイプラインの同じ項目にも反映されます。'}
                 {hasReadOnlyRows && ' 成約月や年収・料率を変更できるのは、自分の候補者と、ミドルとして代理編集できるメンバーの候補者のみです。'}
             </p>
@@ -12596,8 +12637,8 @@ const AcceptedDealsList: React.FC<{
  * 個人実績タブの「自分の想定粗利・内定承諾一覧」。自分の候補者だけを対象に、全ユーザー/チーム別
  * タブの想定粗利カードと同じ期間指定（今月既定・前月/次月・任意期間・よく使う期間）で想定粗利を
  * 集計し、期間が複数月にまたがる場合は月別の内訳も出す。あわせて内定承諾済みの選考を成約月ごとに
- * 一覧し、成約月（=その選考の意思決定時期）をその場で付け替えられる——付け替えると想定粗利の
- * 集計月も同時に変わる（どちらも同じ意思決定時期を見ているため）。
+ * 一覧し、成約月（=候補者の見込み月）をその場で付け替えられる——付け替えると想定粗利の
+ * 集計月も同時に変わる（どちらも同じ見込み月を見ているため）。
  */
 const PersonalGrossProfitSection: React.FC<{
     candidates: Candidate[];
@@ -12698,12 +12739,9 @@ const PersonalGrossProfitSection: React.FC<{
     };
     const handleChangeDealMonth = (_ownerKey: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
         if (canEditCandidate && !canEditCandidate(candidate)) return;
-        onSaveCandidate({
-            ...candidate,
-            applications: candidate.applications.map(app =>
-                app.id === applicationId ? { ...app, expectedDecisionDate: `${yyyymm}-01` } : app
-            ),
-        });
+        // 成約月＝候補者の見込み月。月を付け替えたら週は未定に戻す。
+        void applicationId;
+        onSaveCandidate({ ...candidate, expectedDecisionMonth: yyyymm, expectedDecisionWeek: undefined, decisionTimingConfirmed: true });
     };
 
     return (
@@ -12856,15 +12894,13 @@ function buildMeetingForecastSourceItems(
             .filter(app => !app.isHidden && !EXIT_PIPELINE_STAGES.includes(app.stage))
             .filter(app => !candidate.isHidden || app.stage === '内定承諾')
             .forEach(app => {
+                // メンバー側の時期＝候補者の見込み月＋週（選考ごとの意思決定時期はメモ扱いで使わない）。
                 let memberTiming: MeetingTiming | null = null;
                 let memberDecisionLabel = '未入力';
-                if (app.expectedDecisionDate) {
-                    memberTiming = getWeekOfMonth(app.expectedDecisionDate, weekStartsOn);
-                    const [, m, d] = app.expectedDecisionDate.split('-').map(Number);
-                    memberDecisionLabel = `${m}/${d}`;
-                } else if (candidate.expectedDecisionMonth) {
-                    memberTiming = { month: candidate.expectedDecisionMonth, week: null };
-                    memberDecisionLabel = formatMonthLabel(candidate.expectedDecisionMonth);
+                const decision = getCandidateDecisionTiming(candidate);
+                if (decision.month) {
+                    memberTiming = { month: decision.month, week: decision.week ?? null };
+                    memberDecisionLabel = formatTimingLabel(memberTiming);
                 }
                 let appFee: MeetingFeeSetting | null = null;
                 if (app.feeType === 'fixed') {
@@ -13975,6 +14011,76 @@ const InlineDateField: React.FC<{
       onBlur={() => setIsEditing(false)}
       aria-label={ariaLabel}
     />
+  );
+};
+
+// 見込み月＋週（任意）の入力。週は「未定」か、その月の第1〜N週（週の始まり設定に従う）から選ぶ。
+// 月を変えて週がその月の週数を超えたら未定に戻す。
+const DecisionTimingInput: React.FC<{
+  value: DecisionTiming;
+  onChange: (value: DecisionTiming) => void;
+  idPrefix?: string;
+  monthAriaLabel?: string;
+  autoFocus?: boolean;
+}> = ({ value, onChange, idPrefix = 'decision-timing', monthAriaLabel = '見込み月', autoFocus }) => {
+  const weekStartsOn = React.useContext(WeekStartsOnContext);
+  const weekCount = value.month ? getWeekCountOfMonth(value.month, weekStartsOn) : 0;
+  return (
+    <span style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      <input
+        id={`${idPrefix}-month`}
+        type="month"
+        value={value.month || ''}
+        autoFocus={autoFocus}
+        onChange={(e) => {
+          const month = e.target.value || undefined;
+          const nextWeekCount = month ? getWeekCountOfMonth(month, weekStartsOn) : 0;
+          onChange({ month, week: month && value.week && value.week <= nextWeekCount ? value.week : undefined });
+        }}
+        aria-label={monthAriaLabel}
+      />
+      <select
+        id={`${idPrefix}-week`}
+        value={value.week ? String(value.week) : ''}
+        disabled={!value.month}
+        onChange={(e) => onChange({ month: value.month, week: e.target.value ? Number(e.target.value) : undefined })}
+        aria-label={`${monthAriaLabel}の週`}
+      >
+        <option value="">週未定</option>
+        {Array.from({ length: weekCount }, (_, i) => i + 1).map(w => (
+          <option key={w} value={w}>{`${w}週（${getWeekRangeLabel(value.month!, w, weekStartsOn)}）`}</option>
+        ))}
+      </select>
+    </span>
+  );
+};
+
+// カード上の見込み月＋週。クリックで編集に切り替わり、月・週の両方からフォーカスが外れた時点で
+// 1回だけ確定する（入力途中の値で毎回保存しないため）。
+const InlineDecisionTimingField: React.FC<{
+  value: DecisionTiming;
+  onCommit: (value: DecisionTiming) => void;
+  ariaLabel?: string;
+}> = ({ value, onCommit, ariaLabel = '見込み月' }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState<DecisionTiming>(value);
+  if (!isEditing) {
+    return (
+      <span {...editableDisplayProps(() => { setDraft(value); setIsEditing(true); }, ariaLabel, !value.month ? 'is-empty' : '')}>
+        {formatDecisionTiming(value)}
+      </span>
+    );
+  }
+  return (
+    <span
+      onBlur={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setIsEditing(false);
+        if ((draft.month || '') !== (value.month || '') || (draft.week ?? null) !== (value.week ?? null)) onCommit(draft);
+      }}
+    >
+      <DecisionTimingInput value={draft} onChange={setDraft} monthAriaLabel={ariaLabel} autoFocus />
+    </span>
   );
 };
 
@@ -15096,6 +15202,9 @@ const PipelineCandidateCard: React.FC<{
   const commitCandidateField = <K extends keyof Candidate>(field: K, value: Candidate[K]) => {
     onSave({ ...c, [field]: value });
   };
+  const commitDecisionTiming = (t: DecisionTiming) => {
+    onSave({ ...c, expectedDecisionMonth: t.month, expectedDecisionWeek: t.month ? t.week : undefined, decisionTimingConfirmed: true });
+  };
 
   const commitApplicationField = (appId: string, patch: Partial<CompanyApplication>) => {
     onSave({ ...c, applications: c.applications.map(a => (a.id === appId ? { ...a, ...patch } : a)) });
@@ -15616,29 +15725,14 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="key-info-item">
-                    <span>見込み月</span>
+                    {/* 内定承諾済みなら同じ見込み月を「成約月」として表示する（中身は同じ項目）。 */}
+                    <span>{acceptedApplication ? '成約月' : '見込み月'}</span>
                     {candidateIsOwn ? (
-                        <InlineDateField type="month" value={c.expectedDecisionMonth} onCommit={(v) => commitCandidateField('expectedDecisionMonth', v)} ariaLabel="見込み月" />
+                        <InlineDecisionTimingField value={getCandidateDecisionTiming(c)} onCommit={commitDecisionTiming} ariaLabel={acceptedApplication ? '成約月' : '見込み月'} />
                     ) : (
-                        c.expectedDecisionMonth || 'N/A'
+                        formatDecisionTiming(getCandidateDecisionTiming(c))
                     )}
                 </div>
-                {acceptedApplication && (
-                    <div className="key-info-item">
-                        <span>内定承諾時期</span>
-                        {candidateIsOwn ? (
-                            <InlineDateField
-                                value={acceptedApplication.expectedDecisionDate}
-                                onCommit={(v) => commitApplicationField(acceptedApplication.id, { expectedDecisionDate: v })}
-                                ariaLabel="内定承諾時期"
-                            />
-                        ) : (
-                            acceptedApplication.expectedDecisionDate
-                                ? new Date(acceptedApplication.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP')
-                                : 'N/A'
-                        )}
-                    </div>
-                )}
                 <div className="key-info-item">
                     <span>電話番号</span>
                     <MaskedContactField
@@ -15770,16 +15864,11 @@ const PipelineCandidateCard: React.FC<{
                     )}
                 </div>
                 <div className="candidate-info-item">
-                    <span className="info-label">見込み月</span>
+                    <span className="info-label">{acceptedApplication ? '成約月（見込み月）' : '見込み月'}</span>
                     {candidateIsOwn ? (
-                        <InlineDateField
-                            type="month"
-                            value={c.expectedDecisionMonth}
-                            onCommit={(v) => commitCandidateField('expectedDecisionMonth', v)}
-                            ariaLabel="見込み月"
-                        />
+                        <InlineDecisionTimingField value={getCandidateDecisionTiming(c)} onCommit={commitDecisionTiming} ariaLabel="見込み月" />
                     ) : (
-                        <span className="info-value">{c.expectedDecisionMonth || '未設定'}</span>
+                        <span className="info-value">{formatDecisionTiming(getCandidateDecisionTiming(c))}</span>
                     )}
                 </div>
                 <div className="candidate-info-item">
@@ -16115,13 +16204,13 @@ const PipelineCandidateCard: React.FC<{
                                         )}
                                     </div>
                                     <div className="detail-card-item">
-                                        <span>意思決定時期:</span>
+                                        <span title="集計には使いません（集計は候補者の見込み月）">意思決定時期（メモ）:</span>
                                         {candidateIsOwn ? (
                                             <InlineDateField
                                                 type="date"
                                                 value={app.expectedDecisionDate}
                                                 onCommit={(v) => commitApplicationField(app.id, { expectedDecisionDate: v })}
-                                                ariaLabel="意思決定時期"
+                                                ariaLabel="意思決定時期（メモ）"
                                             />
                                         ) : (
                                             <span>{app.expectedDecisionDate ? new Date(app.expectedDecisionDate + 'T00:00:00').toLocaleDateString('ja-JP') : '未設定'}</span>
@@ -16655,9 +16744,9 @@ const CandidatePipelineView: React.FC<{
 
         const headers = [
             '氏名', '担当者', '現職企業名', '最終学歴', '現年収(万円)', '希望年収(万円)', '想定年収(万円)',
-            '集客媒体', '年齢', '職種', '電話番号', 'メールアドレス', '他社状況', '入社希望時期',
+            '集客媒体', '年齢', '職種', '電話番号', 'メールアドレス', '他社状況', '入社希望時期', '見込み月', '見込み週',
             '自社面談状況', 'BIZアンケート', 'スカウト返信日', '初回面談日', '他エージェント使用状況', '登録日', '概要',
-            '応募企業名', '進捗状況', '次アクション', '意思決定時期', '内定確度', '入社確度',
+            '応募企業名', '進捗状況', '次アクション', '意思決定時期（メモ）', '内定確度', '入社確度',
             '想定紹介料(万円)', '想定媒体手数料(万円)', '想定粗利(万円)'
         ];
 
@@ -16688,6 +16777,8 @@ const CandidatePipelineView: React.FC<{
                 escapeCSV(candidate.email),
                 escapeCSV(candidate.otherCompanyStatus),
                 escapeCSV(candidate.desiredJoinTiming),
+                escapeCSV(getCandidateDecisionTiming(candidate).month || ''),
+                escapeCSV(getCandidateDecisionTiming(candidate).week ? `${getCandidateDecisionTiming(candidate).week}週` : ''),
                 escapeCSV(candidate.agentInterviewStatus || '未面談'),
                 candidate.bizSurveySent ? '送付済み' : '未送付',
                 escapeCSV(candidate.scoutReplyDate),
@@ -16823,10 +16914,8 @@ const CandidatePipelineView: React.FC<{
             const matchesMember = scope !== 'team' || selectedMemberFilters.length === 0
                 || (!!c.ownerEmail && selectedMemberFilters.includes(c.ownerEmail));
             const matchesDecisionTiming = !decisionMonthFilter || (() => {
-                if (c.expectedDecisionMonth === decisionMonthFilter) return true;
-                const nearest = getNearestExpectedDecisionDate(c);
-                if (!nearest) return false;
-                return isDateInMonth(nearest, decisionMonthFilter);
+                // 見込み月（getCandidateDecisionTiming）だけで判定する。選考ごとの意思決定時期はメモ扱い。
+                return getCandidateDecisionTiming(c).month === decisionMonthFilter;
             })();
             return matchesSearch && matchesVisibility && matchesStage && matchesAgentInterviewStatus && matchesBizSurvey && matchesMember && matchesDecisionTiming;
         });
@@ -16839,10 +16928,14 @@ const CandidatePipelineView: React.FC<{
         if (sortConfig !== null) {
             sortableItems.sort((a, b) => {
                 if (sortConfig.key === 'nearestExpectedDecisionDate') {
-                    const dateA = getNearestExpectedDecisionDate(a);
-                    const dateB = getNearestExpectedDecisionDate(b);
-                    // Candidates with no 意思決定時期 set always sort last, regardless of direction —
-                    // "unknown" isn't meaningfully earlier or later than a known date.
+                    // 見込み月＋週で並べる（週未定はその月の末尾扱い）。見込み月の無い候補者は
+                    // 昇順・降順どちらでも常に最後。
+                    const sortKeyOf = (c: Candidate) => {
+                        const t = getCandidateDecisionTiming(c);
+                        return t.month ? `${t.month}-${String(t.week ?? 9).padStart(2, '0')}` : null;
+                    };
+                    const dateA = sortKeyOf(a);
+                    const dateB = sortKeyOf(b);
                     if (!dateA && !dateB) return 0;
                     if (!dateA) return 1;
                     if (!dateB) return -1;
@@ -16917,7 +17010,7 @@ const CandidatePipelineView: React.FC<{
 
     const sortOptions: { key: PipelineSortKey, label: string }[] = [
       { key: 'createdAt', label: '登録日' },
-      { key: 'nearestExpectedDecisionDate', label: '意思決定時期' },
+      { key: 'nearestExpectedDecisionDate', label: '見込み月' },
       { key: 'confidence', label: '確度' },
     ];
 
@@ -19548,6 +19641,15 @@ const App: React.FC = () => {
   const [isDriveFileIdResolved, setIsDriveFileIdResolved] = useState(false);
   // 自分のデータをドライブから読み込めず再試行中（その間は保存を止めている）。
   const [driveLoadError, setDriveLoadError] = useState(false);
+  // 内定承諾にする保存の途中で出す成約月の確認（DecisionMonthPromptModal）。確定・キャンセルで
+  // それぞれの続きの保存を呼ぶ。
+  const [pendingAcceptance, setPendingAcceptance] = useState<null | {
+    candidateName: string;
+    companyNames: string[];
+    initialTiming: DecisionTiming;
+    onConfirm: (timing: DecisionTiming) => void;
+    onCancel: () => void;
+  }>(null);
   const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
   // Set once the manually-triggered「データ復旧」check (handleCheckBackupForRestore) finds a
   // backup snapshot for the signed-in account, to confirm before overwriting currentUserData
@@ -21641,8 +21743,24 @@ const App: React.FC = () => {
   // entriesである点を除けば、他はhandleSaveCandidateと同じcomputeStageAdvanceUpdateのロジックを
   // 流用する。Googleタスク同期（queueCandidateTasksSync）はサインイン中のミドル自身のGoogle
   // セッションでしか動かせないため、代理編集では意図的に呼ばない（本人が次に編集した際に追従する）。
-  const persistTeammateCandidateEdit = (targetEmail: string, candidateId: string, patch: Partial<Candidate>) => {
+  const persistTeammateCandidateEdit = (targetEmail: string, candidateId: string, patch: Partial<Candidate>, options?: { acceptanceConfirmed?: boolean }) => {
     const todayStr = new Date().toLocaleDateString('sv-SE');
+    const knownCandidate = allUsersData[targetEmail]?.candidates.find(c => c.id === candidateId);
+    if (knownCandidate && !options?.acceptanceConfirmed) {
+      const asked = requestAcceptanceTimingIfNeeded(knownCandidate, { ...knownCandidate, ...patch }, resolved => {
+        // patch に含まれていた項目＋確認で決まった見込み月だけを送る（キャッシュの他の項目で本人の
+        // データを上書きしないため）。キャンセル時は applications の内定承諾が元に戻っている。
+        const resolvedPatch: Partial<Candidate> = { ...patch };
+        if (patch.applications) resolvedPatch.applications = resolved.applications;
+        if (resolved.decisionTimingConfirmed && (resolved.expectedDecisionMonth !== knownCandidate.expectedDecisionMonth || resolved.expectedDecisionWeek !== knownCandidate.expectedDecisionWeek)) {
+          resolvedPatch.expectedDecisionMonth = resolved.expectedDecisionMonth;
+          resolvedPatch.expectedDecisionWeek = resolved.expectedDecisionWeek;
+          resolvedPatch.decisionTimingConfirmed = true;
+        }
+        persistTeammateCandidateEdit(targetEmail, candidateId, resolvedPatch, { acceptanceConfirmed: true });
+      });
+      if (asked) return;
+    }
     setAllUsersData(prev => {
       const target = prev[targetEmail];
       if (!target) return prev;
@@ -21728,17 +21846,18 @@ const App: React.FC = () => {
     if (Object.keys(patch).length === 0) return;
     persistTeammateCandidateEdit(ownerEmail, sanitized.id, patch);
   };
-  const handleChangeAcceptedDealMonth = (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => {
-    const withMonth = (apps: CompanyApplication[]) =>
-      apps.map(app => (app.id === applicationId ? { ...app, expectedDecisionDate: `${yyyymm}-01` } : app));
+  const handleChangeAcceptedDealMonth = (ownerEmail: string, candidate: Candidate, _applicationId: string, yyyymm: string) => {
+    // 成約月＝候補者の見込み月。月を付け替えたら週は未定に戻す。applications は送らない（集約表示の
+    // キャッシュが古いと、本人がその後に変えた選考を上書きしてしまうため）。
+    const timingPatch: Partial<Candidate> = { expectedDecisionMonth: yyyymm, expectedDecisionWeek: undefined, decisionTimingConfirmed: true };
     if (currentIdentity && normalizeEmail(ownerEmail) === normalizeEmail(currentIdentity.email)) {
       // 集約表示側のキャッシュは古い可能性があるため、手元の最新の自分のデータを基準に書き換える
       const latest = currentUserData?.candidates.find(c => c.id === candidate.id) || candidate;
-      handleSaveCandidate({ ...latest, applications: withMonth(latest.applications) });
+      handleSaveCandidate({ ...latest, ...timingPatch });
       return;
     }
     if (!canEditAcceptedDealOwner(ownerEmail)) return;
-    persistTeammateCandidateEdit(ownerEmail, candidate.id, { applications: withMonth(candidate.applications) });
+    persistTeammateCandidateEdit(ownerEmail, candidate.id, timingPatch);
   };
 
   // ミドルによる代理での候補者新規登録 — persistTeammateCandidateEdit と同じ
@@ -21748,7 +21867,11 @@ const App: React.FC = () => {
   // （初期選考企業が既に入力されていればその分のKPI実績も計上）にするため。KPI実績の加算先は
   // 対象メンバー(targetEmail)のentries。Googleタスク同期は代理編集では意図的に呼ばない（本人が
   // 次に編集した際に追従する）。
-  const persistTeammateCandidateAdd = (targetEmail: string, candidateData: Candidate) => {
+  const persistTeammateCandidateAdd = (targetEmail: string, candidateData: Candidate, options?: { acceptanceConfirmed?: boolean }) => {
+    if (!options?.acceptanceConfirmed
+      && requestAcceptanceTimingIfNeeded(undefined, candidateData, resolved => persistTeammateCandidateAdd(targetEmail, resolved, { acceptanceConfirmed: true }))) {
+      return;
+    }
     const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
     const todayStr = new Date().toLocaleDateString('sv-SE');
     const { candidate: finalCandidate, kpiDeltas } = computeStageAdvanceUpdate(undefined, sanitized, todayStr);
@@ -22236,13 +22359,39 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSaveCandidate = (candidateData: Candidate) => {
+  // この保存で新たに内定承諾になる選考があれば、保存を一旦止めて成約月を確認する。確定なら見込み月
+  // （成約月）を入れて、キャンセルならその選考だけ元のフェーズに戻して、proceed で保存を続ける。
+  // 確認が不要なら false を返す（呼び出し元はそのまま保存する）。
+  const requestAcceptanceTimingIfNeeded = (prev: Candidate | undefined, next: Candidate, proceed: (resolved: Candidate) => void): boolean => {
+    const newlyAccepted = findNewlyAcceptedApplications(prev, next);
+    if (newlyAccepted.length === 0) return false;
+    setPendingAcceptance({
+      candidateName: next.name,
+      companyNames: newlyAccepted.map(a => a.companyName).filter(Boolean),
+      initialTiming: getCandidateDecisionTiming(next),
+      onConfirm: (timing) => {
+        setPendingAcceptance(null);
+        proceed({ ...next, expectedDecisionMonth: timing.month, expectedDecisionWeek: timing.week, decisionTimingConfirmed: true });
+      },
+      onCancel: () => {
+        setPendingAcceptance(null);
+        proceed(revertNewlyAccepted(prev, next));
+      },
+    });
+    return true;
+  };
+
+  const handleSaveCandidate = (candidateData: Candidate, options?: { acceptanceConfirmed?: boolean }) => {
     // candidateData may be a copy tagged with ownerEmail/ownerLabel (e.g. edited while viewing
     // an aggregate pipeline scope on one's own candidate) — those tags are presentation-only and
     // must never be written into this account's own stored candidates. See normalize()'s
     // same-shaped strip above for why.
     const { ownerEmail, ownerLabel, ...sanitized } = candidateData;
     const prevCandidate = currentUserData?.candidates.find(c => c.id === sanitized.id);
+    if (!options?.acceptanceConfirmed
+      && requestAcceptanceTimingIfNeeded(prevCandidate, sanitized as Candidate, resolved => handleSaveCandidate(resolved, { acceptanceConfirmed: true }))) {
+      return;
+    }
     const todayStr = new Date().toLocaleDateString('sv-SE');
     // Auto-reflects KPI actuals when an application's stage advances (打診→書類選考 etc., see
     // STAGE_ADVANCE_KPI_KEYS) — finalCandidate carries the dedup bookkeeping this produces
@@ -23033,6 +23182,7 @@ const App: React.FC = () => {
   }
 
   return (
+    <WeekStartsOnContext.Provider value={weekStartsOn}>
     <div className="app-container">
       {legacyMigrationChoices && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="migration-modal-title">
@@ -24244,7 +24394,17 @@ const App: React.FC = () => {
           </>
         )}
       </main>
+      {pendingAcceptance && (
+        <DecisionMonthPromptModal
+          candidateName={pendingAcceptance.candidateName}
+          companyNames={pendingAcceptance.companyNames}
+          initialTiming={pendingAcceptance.initialTiming}
+          onConfirm={pendingAcceptance.onConfirm}
+          onCancel={pendingAcceptance.onCancel}
+        />
+      )}
     </div>
+    </WeekStartsOnContext.Provider>
   );
 };
 
