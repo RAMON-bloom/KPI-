@@ -5054,6 +5054,9 @@ p.memo-content-text {
 .jd-bundle-order { float: right; display: inline-flex; gap: 0.25rem; }
 .jd-bundle-order button { padding: 0.1rem 0.45rem; font-size: 0.85rem; background: var(--card-bg-color); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; color: inherit; }
 .jd-bundle-order button:disabled { opacity: 0.35; cursor: default; }
+.jd-bundle-order button.jd-bundle-edit { font-size: 0.78rem; padding: 0.1rem 0.5rem; color: var(--primary-color, #1a3a5c); }
+.jd-bundle-output-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; clear: both; margin-top: 0.3rem; padding: 0.2rem 0.5rem; border-radius: 4px; background: #fff8e8; color: #7a5410; font-size: 0.75rem; }
+.jd-bundle-output-edit button { padding: 0 0.4rem; font-size: 0.72rem; background: var(--card-bg-color); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; color: inherit; }
 .jd-bundle-recipient { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.88rem; }
 .jd-bundle-status { flex: 1 1 260px; font-size: 0.88rem; }
 .jd-bundle-status.is-error { color: #b42318; }

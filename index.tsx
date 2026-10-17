@@ -33,7 +33,7 @@ import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelin
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
 import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
 import { generateRecommendationDraft } from './services/recommendationDraft';
-import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, JD_GENERATOR_URL, deleteJdEntry, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
+import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, buildJdEditUrl, isJdGeneratorOrigin, JD_GENERATOR_URL, deleteJdEntry, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
 import { buildJdSendText, defaultJdSendTemplate, fillJdSendTemplate, splitEmailSubject, researchCompanyBrief, JD_SEND_CHANNEL_LABELS, JD_SEND_TEMPLATE_FIELDS, type JdSendChannel, type JdSendTemplates, type JdSendParams } from './services/jdSendMessage';
 import { saveJdToGenerator, extractDocumentText } from './services/interviewPrepSubmit';
@@ -4464,6 +4464,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
+      '「求人票出力」で、選んだ求人票を直してから出力できるようにした。選んだ求人票の「編集」を押すと求人票ジェネレーターが開いて、その求人票の内容を直せます。直したあと、ジェネレーターで「原本を上書き保存」（ドライブの求人票が新しい版になり、前の版は「履歴」に残ります）か「この出力にだけ使う」（ドライブの求人票は変えず、今回まとめるPDFだけに直した内容を使います）を選べます',
       '【不具合修正】候補者パイプラインのカード上などで選考状況を「内定承諾」に変えた場合に、年収・オファー金額・料率を入力していても想定粗利に反映されないことがある不具合を修正。成約月（意思決定時期）が空のまま残り、どの月にも集計されていなかったのが原因です。今後はどこから内定承諾にしても、意思決定時期が未変更なら今日の日付が入ります。既に成約月が空になっている内定承諾は、内定承諾にした日の月で集計されます（内定前の見込みの日付が残っている場合は、内定承諾一覧から成約月を変更してください）',
     ],
   },
@@ -8533,18 +8534,52 @@ const JdBundleView: React.FC<{
         ]);
         setMessage({ kind: 'ok', text: `求人票ジェネレーターで保存された求人票を選びました：${fresh.map(e => `${e.company}・${e.position || '企業共通'}`).join('、')}` });
     };
-    const openGenerator = () => {
+    const openGenerator = (url: string = JD_GENERATOR_URL): boolean => {
         if (index.data) baselineRef.current = new Map(bundlableEntries(index.data).map(e => [e.jdId, e.version]));
         else baselineRef.current = baselineRef.current || new Map();
-        const w = window.open(JD_GENERATOR_URL, 'kpiJdGenerator', 'width=1200,height=900');
+        const w = window.open(url, 'kpiJdGenerator', 'width=1200,height=900');
         if (!w) {
             setMessage({ kind: 'error', text: 'ポップアップがブロックされたため、求人票ジェネレーターを開けませんでした。ブラウザでこのサイトのポップアップを許可してください。' });
-            return;
+            return false;
         }
         generatorRef.current = w;
         w.focus();
         setWatching(true);
+        return true;
     };
+
+    // 選んだ求人票をジェネレーターで開いて直す。ジェネレーターで「原本を上書き保存」を選ぶと正本の版が上がり、
+    // 上の見張り（pickFresh）で新しい版に差し替わる。「この出力にだけ使う」を選ぶと、直したPDFが postMessage で
+    // 届くので、この画面の結合にだけ使う（ドライブ・索引は変えない。画面を離れると消える）。
+    const [outputEdits, setOutputEdits] = useState<Map<string, { pdf: Uint8Array; position: string }>>(new Map());
+    const editRequestsRef = useRef<Map<string, string>>(new Map()); // req → jdId
+    const openEditor = (e: JdIndexEntry) => {
+        const req = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+        if (!openGenerator(buildJdEditUrl(e, req))) return;
+        editRequestsRef.current.set(req, e.jdId);
+        setMessage({ kind: 'ok', text: `「${e.company}・${e.position || '企業共通'}」を求人票ジェネレーターで開きました。直したあと、ジェネレーターで「原本を上書き保存」か「この出力にだけ使う」を選んでください。` });
+    };
+    const dropOutputEdit = (jdId: string) => setOutputEdits(prev => { const next = new Map(prev); next.delete(jdId); return next; });
+    useEffect(() => {
+        const onMessage = (ev: MessageEvent) => {
+            const m = ev.data;
+            if (!isJdGeneratorOrigin(ev.origin) || !m || m.source !== 'jd-generator' || typeof m.req !== 'string') return;
+            const jdId = editRequestsRef.current.get(m.req);
+            if (!jdId || m.jdId !== jdId) return; // この画面から開いた編集への返事だけ受け付ける
+            if (m.type === 'jdEdited' && m.mode === 'output' && typeof m.pdfBase64 === 'string') {
+                const bin = atob(m.pdfBase64);
+                const pdf = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) pdf[i] = bin.charCodeAt(i);
+                setOutputEdits(prev => new Map(prev).set(jdId, { pdf, position: String(m.position || '') }));
+                setMessage({ kind: 'ok', text: '直した求人票を、今回の出力にだけ使います（ドライブの原本は変えていません）。' });
+            } else if (m.type === 'jdEdited' && m.mode === 'overwrite') {
+                dropOutputEdit(jdId); // 原本が新しい版になったので、出力だけの差し替えは要らない
+                load(true, true).then(pickFresh);
+            }
+        };
+        window.addEventListener('message', onMessage);
+        return () => window.removeEventListener('message', onMessage);
+    }, []);
     useEffect(() => {
         if (!watching) return;
         const tick = () => {
@@ -8613,7 +8648,8 @@ const JdBundleView: React.FC<{
         setMessage(null);
         setBusy(`PDFを読み込んでいます（0 / ${selected.length}）…`);
         try {
-            const bytes = await mergeJdPdfs(selected, (done, total) => setBusy(`PDFを読み込んでいます（${done} / ${total}）…`));
+            const bytes = await mergeJdPdfs(selected, (done, total) => setBusy(`PDFを読み込んでいます（${done} / ${total}）…`),
+                new Map(Array.from(outputEdits, ([id, v]) => [id, v.pdf] as [string, Uint8Array])));
             const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
             const a = document.createElement('a');
             a.href = url;
@@ -8646,7 +8682,7 @@ const JdBundleView: React.FC<{
                         </button>
                     </div>
                     <div className="jd-bundle-generator">
-                        <button type="button" className="jd-bundle-generator-button" onClick={openGenerator}>
+                        <button type="button" className="jd-bundle-generator-button" onClick={() => openGenerator()}>
                             求人票ジェネレーターで新規作成<PrepIcon name="external" size={14} />
                         </button>
                         <span className="field-hint">
@@ -8696,10 +8732,18 @@ const JdBundleView: React.FC<{
                                     <li key={e.jdId}>
                                         <span className="jd-bundle-name"><strong>{e.company}</strong><span>{e.position || '企業共通'}</span></span>
                                         <span className="jd-bundle-order">
+                                            <button type="button" className="jd-bundle-edit" onClick={() => openEditor(e)} disabled={!!busy}
+                                                title="求人票ジェネレーターで開いて直します。原本を上書きするか、この出力にだけ使うかを選べます">編集</button>
                                             <button type="button" onClick={() => move(i, -1)} disabled={i === 0 || !!busy} aria-label="上へ" title="上へ">↑</button>
                                             <button type="button" onClick={() => move(i, 1)} disabled={i === selected.length - 1 || !!busy} aria-label="下へ" title="下へ">↓</button>
                                             <button type="button" onClick={() => toggle(e)} disabled={!!busy} aria-label="外す" title="外す">×</button>
                                         </span>
+                                        {outputEdits.has(e.jdId) && (
+                                            <span className="jd-bundle-output-edit">
+                                                この出力だけ編集版を使います（原本は変えていません）
+                                                <button type="button" onClick={() => dropOutputEdit(e.jdId)} disabled={!!busy}>元に戻す</button>
+                                            </span>
+                                        )}
                                     </li>
                                 ))}
                             </ol>

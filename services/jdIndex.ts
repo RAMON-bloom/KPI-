@@ -115,8 +115,25 @@ export const samePosition = (a: string, b: string): boolean => {
   return !!x && x === normalizePosition(b);
 };
 
-/** 求人票ジェネレーター（本番）。company / position のURLパラメータはジェネレーター側が今後対応する（今は無視される）。 */
-export const JD_GENERATOR_URL = 'https://script.google.com/a/macros/bloom-firm.com/s/AKfycbzZ_D7gFoUTNZVASr30pCxoi_yFWxPSh8rUBUwsH5i6SehkLXF9hSxePuV6J_ELqbI4fw/exec';
+/** 求人票ジェネレーター（本番）。company / position のURLパラメータはジェネレーター側が今後対応する（今は無視される）。
+ * ローカル開発（npm run dev）のときだけ、VITE_JD_GENERATOR_URL でテスト版（/dev）に向けられる。 */
+const JD_GENERATOR_PROD_URL = 'https://script.google.com/a/macros/bloom-firm.com/s/AKfycbzZ_D7gFoUTNZVASr30pCxoi_yFWxPSh8rUBUwsH5i6SehkLXF9hSxePuV6J_ELqbI4fw/exec';
+const viteEnv = (import.meta as any).env || {};
+export const JD_GENERATOR_URL: string = (viteEnv.DEV && viteEnv.VITE_JD_GENERATOR_URL) || JD_GENERATOR_PROD_URL;
+
+/**
+ * 求人票出力で選んだ正本を、ジェネレーターで開いて直すためのURL。ジェネレーターは jd_id の正本を読み込み、
+ * 直したあと「原本を上書き保存」か「この出力にだけ使う」（PDFを kpi_origin のウィンドウへ postMessage）を選ばせる。
+ * req は、返ってきたメッセージがこの依頼への返事かを確かめるための使い捨ての値。
+ */
+export const buildJdEditUrl = (entry: JdIndexEntry, req: string): string => {
+  const params = new URLSearchParams({ jd_id: entry.jdId, kpi_origin: window.location.origin, req });
+  return `${JD_GENERATOR_URL}?${params.toString()}`;
+};
+
+/** ジェネレーター（GASのiframe）から届いたメッセージの送り元として受け付けるオリジン。 */
+export const isJdGeneratorOrigin = (origin: string): boolean =>
+  /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/.test(origin);
 export const buildJdGeneratorUrl = (companyName: string, position: string): string => {
   const params = new URLSearchParams();
   if (companyName.trim()) params.set('company', companyName.trim());

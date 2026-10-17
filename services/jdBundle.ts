@@ -28,10 +28,14 @@ export const searchJdEntries = (entries: JdIndexEntry[], query: string): JdIndex
   });
 };
 
-/** 選んだ求人票のPDFを、並び順のまま1つのPDFに結合する。読めないPDFがあればどれかを示して止める。 */
+/**
+ * 選んだ求人票のPDFを、並び順のまま1つのPDFに結合する。読めないPDFがあればどれかを示して止める。
+ * overrides に jdId があれば、ドライブのPDFの代わりにそのPDF（ジェネレーターで「この出力にだけ使う」で直したもの）を使う。
+ */
 export const mergeJdPdfs = async (
   entries: JdIndexEntry[],
   onProgress?: (done: number, total: number) => void,
+  overrides?: ReadonlyMap<string, Uint8Array>,
 ): Promise<Uint8Array> => {
   const out = await PDFDocument.create();
   for (let i = 0; i < entries.length; i++) {
@@ -39,7 +43,8 @@ export const mergeJdPdfs = async (
     const label = `${e.company}・${e.position || '企業共通'}`;
     let src: PDFDocument;
     try {
-      src = await PDFDocument.load(await downloadFileBytes(e.pdfFileId), { ignoreEncryption: true });
+      const override = overrides?.get(e.jdId);
+      src = await PDFDocument.load(override ?? await downloadFileBytes(e.pdfFileId), { ignoreEncryption: true });
     } catch (err) {
       throw new Error(`「${label}」：${err instanceof Error ? err.message : 'PDFを読み込めませんでした。'}`);
     }
