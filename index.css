@@ -1325,6 +1325,12 @@ section {
   margin-top: -0.5rem;
   margin-bottom: 0.75rem;
 }
+/* 入力欄の下に置く補足文。上の入力欄（折り返した週の選択を含む）にかぶらないよう、負の余白を使わない。 */
+.form-helper-text.form-helper-text--below {
+  margin-top: 0.35rem;
+  margin-bottom: 0;
+  line-height: 1.5;
+}
 
 .general-kpi-fieldset {
     display: grid;

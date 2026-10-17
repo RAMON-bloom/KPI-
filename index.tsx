@@ -7761,7 +7761,7 @@ const CandidateModal: React.FC<{
                         value={getCandidateDecisionTiming(candidate as Candidate)}
                         onChange={(t) => setCandidate(prev => ({ ...prev, expectedDecisionMonth: t.month, expectedDecisionWeek: t.week, decisionTimingConfirmed: true }))}
                     />
-                    <p className="form-helper-text">この候補者がいつ決まりそうか（内定承諾後は成約月）。見込み月の絞り込み・並び替え・想定粗利・内定承諾一覧・BP会レポートはすべてこの月で集計します。選考ごとの「意思決定時期」はメモで、集計には使いません。</p>
+                    <p className="form-helper-text form-helper-text--below">絞り込み・想定粗利・BP会などの集計はこの月で行います（内定承諾後は成約月）。選考ごとの意思決定時期はメモです。</p>
                 </div>
                 <div className="form-group">
                     <label htmlFor="source">集客媒体</label>
@@ -7884,7 +7884,7 @@ const CandidateModal: React.FC<{
                             onChange={e => handleApplicationChange(index, 'expectedDecisionDate', e.target.value)}
                             aria-label={`意思決定時期（メモ） ${index + 1}`}
                           />
-                          <p className="form-helper-text">集計には使いません（集計は候補者の見込み月）</p>
+                          <p className="form-helper-text form-helper-text--below">集計には使いません（集計は候補者の見込み月）</p>
                        </div>
                        <div className="form-group">
                           <label htmlFor={`feeType-${app.id}`}>報酬形態</label>
@@ -8228,7 +8228,7 @@ const ApplicationModal: React.FC<{
                             value={application.expectedDecisionDate || ''}
                             onChange={handleChange}
                         />
-                        <p className="form-helper-text">集計には使いません（集計は候補者の見込み月）</p>
+                        <p className="form-helper-text form-helper-text--below">集計には使いません（集計は候補者の見込み月）</p>
                     </div>
                     </section>
                     <section className="prep-card app-card--fee" hidden={activeTab !== 'info'}>
