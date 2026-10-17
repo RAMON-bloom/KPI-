@@ -4843,7 +4843,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
-      '候補者パイプラインのカードから、面接振り返りアンケートの案内文をコピーできるようにした。氏名の横の「📝 アンケート案内」を押し、選考と対象の面接を選んで「メール用をコピー」「LINE用をコピー」で、選考情報を開かなくても案内文（短いURL付き）をコピーできます。自分用に編集した案内文があればそれが使われます',
+      '候補者パイプラインのカードから、面接振り返りアンケートの案内文をコピーできるようにした。「選考状況」の各社のバッジの右にある「📝 面接アンケート」を押し、対象の面接を選んで「メール用をコピー」「LINE用をコピー」で、選考情報を開かなくてもその会社の案内文（短いURL付き）をコピーできます（複数社の選考が進んでいる人は会社ごとにボタンが出ます。打診・書類選考だけの選考には出ません）。自分用に編集した案内文があればそれが使われます',
       '期間の切り替え（前月・次月、期間指定、よく使う期間）を、アプリ全体で「‹ 2026年10月 ›」の形にそろえた。‹ ›で前後の期間へ（四半期なら前後の四半期へ）、真ん中を押すとよく使う期間・年度の月グリッド・日付指定から選べます。選んだ時点で反映されるので、「この期間で絞り込む」などのボタンはなくなりました。今月以外を見ているときは「今月に戻る」が出ます',
       '全ユーザー/チーム別タブの期間を、ページ上部の「このページの期間」1か所にまとめた。進捗・想定粗利・曜日別返信率の各カードも既定でこの期間に従います（これまではカードごとに別々でした）。カードだけ別の期間で見たいときは「このカードだけ期間を変える」から指定でき、個別の期間のカードにはバッジが付きます',
       '候補者の詳細表示にある各社の選考カードでも、企業名を面接対策ジェネレーターの企業一覧から選べるようにした。企業名をクリックして入力を始めると登録済みの企業が候補に出て、選ぶとその場で保存されます（↑↓キーで選んでEnterでも確定。Escで取り消し）。一覧に無い企業は候補の一番下の「新規登録」でジェネレーターにも追加できます',
@@ -11402,21 +11402,15 @@ const SingleBlindResumeModal: React.FC<{
 // 選考情報モーダルの「面接振り返りアンケート」欄と同じ文面（自分用に編集した案内文があればそれ）を使う。
 const FeedbackInviteCopyModal: React.FC<{
   candidate: Candidate;
+  application: CompanyApplication;
   feedbackInviteTemplates?: FeedbackInviteTemplates;
   onClose: () => void;
-}> = ({ candidate, feedbackInviteTemplates, onClose }) => {
-  const applications = candidate.applications.filter(a => !a.isHidden && a.companyName?.trim());
-  // 初期値は、面接を受けたことのある選考のうち先頭（無ければ先頭の選考）
-  const [appId, setAppId] = useState(() => (applications.find(a => defaultFeedbackStage(a)) || applications[0])?.id || '');
-  const application = applications.find(a => a.id === appId);
-  const [stageChoice, setStageChoice] = useState<{ appId: string; stage: string } | null>(null);
-  const feedbackStage = application
-    ? (stageChoice?.appId === application.id ? stageChoice.stage : (defaultFeedbackStage(application) || ''))
-    : '';
+}> = ({ candidate, application, feedbackInviteTemplates, onClose }) => {
+  const [feedbackStage, setFeedbackStage] = useState(() => defaultFeedbackStage(application) || '');
   const [message, setMessage] = useState('');
 
   const copyInvite = async (channel: 'email' | 'line') => {
-    if (!application || !feedbackStage) return;
+    if (!feedbackStage) return;
     const text = buildFeedbackInviteText(channel, {
       candidateName: candidate.name, companyName: application.companyName, interviewStage: feedbackStage,
       outcome: feedbackOutcomeOf(application.stage), url: buildShortFeedbackUrl(window.location.origin, application, feedbackStage),
@@ -11433,37 +11427,27 @@ const FeedbackInviteCopyModal: React.FC<{
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content feedback-invite-modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="feedback-invite-title">
         <div className="modal-header">
-          <h3 id="feedback-invite-title">{candidate.name || '（氏名未入力）'}さん - 面接振り返りアンケートの案内</h3>
+          <h3 id="feedback-invite-title">{candidate.name || '（氏名未入力）'}さん - {application.companyName}の面接アンケート</h3>
           <button onClick={onClose} className="close-button" aria-label="閉じる">&times;</button>
         </div>
         <div className="modal-body">
-          {applications.length === 0 ? (
-            <p className="field-hint">企業名が入った選考がまだありません。先に選考を登録してください。</p>
-          ) : (
-            <>
-              <label className="feedback-invite-field">選考
-                <select value={appId} onChange={e => { setAppId(e.target.value); setMessage(''); }} aria-label="案内する選考">
-                  {applications.map(a => <option key={a.id} value={a.id}>{a.companyName}（{a.stage}）</option>)}
-                </select>
-              </label>
-              <label className="feedback-invite-field">対象の面接
-                <select value={feedbackStage} onChange={e => application && setStageChoice({ appId: application.id, stage: e.target.value })} aria-label="アンケートで聞く面接">
-                  <option value="">対象の面接を選択</option>
-                  {FEEDBACK_INTERVIEW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </label>
-              {!feedbackStage && <p className="field-hint">この選考はまだ面接を受けていないため、対象の面接を選んでください。</p>}
-              <div className="prep-copy-buttons feedback-invite-buttons">
-                <button type="button" onClick={() => copyInvite('email')} disabled={!feedbackStage}><PrepIcon name="mail" />メール用をコピー</button>
-                <button type="button" onClick={() => copyInvite('line')} disabled={!feedbackStage}><PrepIcon name="chat" />LINE用をコピー</button>
-              </div>
-              {message && <p className="prep-status is-active">{message}</p>}
-              {application && feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
-                <p className="field-hint">この選考は「{application.stage}」ですが、案内文・アンケートのどちらにも選考の結果は書かれません（アンケートには「{feedbackStage}」だけが入ります）。</p>
-              )}
-              <p className="field-hint">案内文の書き換えは、選考状況のバッジから開く選考情報の「面接振り返りアンケート」欄で行えます。</p>
-            </>
+          <p className="field-hint">選考: {application.companyName}（{application.stage}）</p>
+          <label className="feedback-invite-field">対象の面接
+            <select value={feedbackStage} onChange={e => { setFeedbackStage(e.target.value); setMessage(''); }} aria-label="アンケートで聞く面接">
+              <option value="">対象の面接を選択</option>
+              {FEEDBACK_INTERVIEW_STAGES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </label>
+          {!feedbackStage && <p className="field-hint">この選考はまだ面接を受けていないため、対象の面接を選んでください。</p>}
+          <div className="prep-copy-buttons feedback-invite-buttons">
+            <button type="button" onClick={() => copyInvite('email')} disabled={!feedbackStage}><PrepIcon name="mail" />メール用をコピー</button>
+            <button type="button" onClick={() => copyInvite('line')} disabled={!feedbackStage}><PrepIcon name="chat" />LINE用をコピー</button>
+          </div>
+          {message && <p className="prep-status is-active">{message}</p>}
+          {feedbackStage && feedbackOutcomeOf(application.stage) !== 'in_progress' && (
+            <p className="field-hint">この選考は「{application.stage}」ですが、案内文・アンケートのどちらにも選考の結果は書かれません（アンケートには「{feedbackStage}」だけが入ります）。</p>
           )}
+          <p className="field-hint">案内文の書き換えは、選考状況のバッジから開く選考情報の「面接振り返りアンケート」欄で行えます。</p>
         </div>
         <div className="modal-footer">
           <button type="button" className="cancel-button" onClick={onClose}>閉じる</button>
@@ -14967,6 +14951,10 @@ const SchedulingBallBadgeSuffix: React.FC<{ app: CompanyApplication }> = ({ app 
   );
 };
 
+// 面接振り返りアンケートを案内できる選考か（企業名があり、打診・書類選考だけの選考ではない）。
+const canSendFeedbackInvite = (app: CompanyApplication): boolean =>
+  !!app.companyName?.trim() && (!STAGES_WITHOUT_SCHEDULING.has(app.stage) || !!defaultFeedbackStage(app));
+
 const ApplicationStageBadge: React.FC<{
   app: CompanyApplication;
   onClick: () => void;
@@ -15519,8 +15507,8 @@ const PipelineCandidateCard: React.FC<{
   onOpenSimilarResearch: (candidate: Candidate) => void;
   // 「ブラインドレジュメ」— 親（CandidatePipelineView）がSingleBlindResumeModalを開く。
   onOpenBlindResume: (candidate: Candidate) => void;
-  // 「アンケート案内」— 親（CandidatePipelineView）がFeedbackInviteCopyModalを開く。
-  onOpenFeedbackInvite: (candidate: Candidate) => void;
+  // 選考状況バッジ横の「面接アンケート」— 親（CandidatePipelineView）がその選考のFeedbackInviteCopyModalを開く。
+  onOpenFeedbackInvite: (candidate: Candidate, application: CompanyApplication) => void;
   // 同じ選考でアンケート回収とナレッジ投稿まで済んでいる（hasCompletedInterviewReview）→ 金色調で表示
   reviewCompleted?: boolean;
 }> = ({
@@ -15882,14 +15870,6 @@ const PipelineCandidateCard: React.FC<{
           >
               📄 ブラインドレジュメ
           </button>
-          <button
-              type="button"
-              className="similar-career-launch-button similar-career-launch-inline blind-resume-launch-inline"
-              onClick={() => onOpenFeedbackInvite(c)}
-              title="面接振り返りアンケートの案内文（メール/LINE用）をコピーして候補者に送ります"
-          >
-              📝 アンケート案内
-          </button>
           {c.ownerLabel && <span className="other-agent-tag">登録者: {c.ownerLabel}</span>}
           {c.usingOtherAgents && <span className="other-agent-tag">他エージェント利用中</span>}
           {c.duplicateMatches && c.duplicateMatches.length > 0 && (
@@ -16131,11 +16111,22 @@ const PipelineCandidateCard: React.FC<{
                     {visibleApplications.length > 0 ? (
                         visibleApplications.map(app => (
                             candidateIsOwn ? (
-                                <ApplicationStageBadge
-                                    key={app.id}
-                                    app={app}
-                                    onClick={() => onEditApplication(c, app)}
-                                />
+                                <span key={app.id} className="summary-badge-group">
+                                    <ApplicationStageBadge
+                                        app={app}
+                                        onClick={() => onEditApplication(c, app)}
+                                    />
+                                    {canSendFeedbackInvite(app) && (
+                                        <button
+                                            type="button"
+                                            className="feedback-invite-badge-button"
+                                            onClick={() => onOpenFeedbackInvite(c, app)}
+                                            title={`${app.companyName}の面接振り返りアンケートの案内文（メール/LINE用）をコピーします`}
+                                        >
+                                            📝 面接アンケート
+                                        </button>
+                                    )}
+                                </span>
                             ) : (
                                 <span
                                     key={app.id}
@@ -16808,7 +16799,7 @@ const CandidatePipelineView: React.FC<{
     // 類似経歴リサーチの対象（モーダル表示中）と、新規登録直後にリサーチを促すバナーの対象。
     const [similarResearchCandidate, setSimilarResearchCandidate] = useState<Candidate | null>(null);
     const [blindResumeCandidate, setBlindResumeCandidate] = useState<Candidate | null>(null);
-    const [feedbackInviteCandidate, setFeedbackInviteCandidate] = useState<Candidate | null>(null);
+    const [feedbackInviteTarget, setFeedbackInviteTarget] = useState<{ candidate: Candidate; application: CompanyApplication } | null>(null);
     const [justRegisteredCandidate, setJustRegisteredCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [csvExportPattern, setCsvExportPattern] = useState<CsvExportPattern>('current');
@@ -17400,11 +17391,12 @@ const CandidatePipelineView: React.FC<{
                   onClose={() => setBlindResumeCandidate(null)}
               />
             )}
-            {feedbackInviteCandidate && (
+            {feedbackInviteTarget && (
               <FeedbackInviteCopyModal
-                  candidate={feedbackInviteCandidate}
+                  candidate={feedbackInviteTarget.candidate}
+                  application={feedbackInviteTarget.application}
                   feedbackInviteTemplates={feedbackInviteTemplates}
-                  onClose={() => setFeedbackInviteCandidate(null)}
+                  onClose={() => setFeedbackInviteTarget(null)}
               />
             )}
             {justRegisteredCandidate && (
@@ -17893,7 +17885,7 @@ const CandidatePipelineView: React.FC<{
                         onEditApplication={handleOpenApplicationModal}
                         onOpenSimilarResearch={setSimilarResearchCandidate}
                         onOpenBlindResume={setBlindResumeCandidate}
-                        onOpenFeedbackInvite={setFeedbackInviteCandidate}
+                        onOpenFeedbackInvite={(candidate, application) => setFeedbackInviteTarget({ candidate, application })}
                         reviewCompleted={hasCompletedInterviewReview(c, reviewPrep.data?.submittedApplicationIds)}
                     />
                 )) : (

@@ -5278,3 +5278,20 @@ p.memo-content-text {
 .feedback-invite-modal .modal-body { display: flex; flex-direction: column; gap: 0.75rem; }
 .feedback-invite-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; font-weight: 600; }
 .feedback-invite-field select { padding: 0.45rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; font-size: 0.9rem; }
+/* 選考状況バッジの右にくっつけた「面接アンケート」ボタン（会社ごと） */
+.summary-badge-group { display: inline-flex; align-items: stretch; }
+.summary-badge-group .status-badge:has(+ .feedback-invite-badge-button) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.feedback-invite-badge-button {
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #c9cedb;
+  border-left: none;
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: #fff;
+  color: #1f2a44;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.feedback-invite-badge-button:hover,
+.feedback-invite-badge-button:focus-visible { background: #eef0f4; }
