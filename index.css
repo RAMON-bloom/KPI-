@@ -5419,7 +5419,19 @@ p.memo-content-text {
   padding: 0 0.15rem;
 }
 .expandable-text-edit:hover { text-decoration: underline; }
-.expandable-text-editor { width: 100%; box-sizing: border-box; font: inherit; }
+/* 編集中は、カードの項目の並び（グリッド）の1行を丸ごと使い、大きめの入力欄にする */
+.key-info-item:has(.expandable-text-editor),
+.candidate-info-item:has(.expandable-text-editor) { grid-column: 1 / -1; }
+.expandable-text-editor {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  min-height: 9rem;
+  padding: 0.6rem 0.75rem;
+  resize: vertical;
+}
 .expandable-text-popover {
   position: fixed;
   z-index: 3000;
