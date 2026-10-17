@@ -380,6 +380,14 @@ export const getSavedJd = (data: InterviewPrepData, companyName: string, positio
   return data.jds.find(j => ids.includes(j.companyId) && j.position === position.trim()) || null;
 };
 
+/** その企業でジェネレーターに保存されている、本文のある求人票（ポジション名順。空欄ポジション＝企業共通）。 */
+export const listCompanyJds = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): PrepJd[] => {
+  const ids = companyIdsFor(data, companyName, gasCompanyId);
+  return data.jds
+    .filter(j => ids.includes(j.companyId) && j.content.trim())
+    .sort((a, b) => a.position.localeCompare(b.position, 'ja'));
+};
+
 const companyIdsFor = (data: InterviewPrepData, companyName: string, gasCompanyId?: string): string[] => {
   const valid = validGasCompanyId(data, companyName, gasCompanyId);
   if (valid) return [valid];

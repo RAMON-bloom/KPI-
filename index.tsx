@@ -31,7 +31,7 @@ import { matchCandidates, generateBlindResume, researchCompany, estimateSearchPl
 import { SimilarResearchCancelled, findSimilarCandidates, findSimilarCandidatesQuick, aggregateByCompany, analyzeSimilarOutcomes, classifyApplication, usableApplications, hasEnoughProfile, similarKey, type SimilarPoolEntry, type SimilarMatch, type CompanyStat, type SimilarAnalysis, type OutcomeKind } from './services/similarCareer';
 import { createPipelineTask, updatePipelineTask, deletePipelineTask, listPipelineTasks, GoogleTasksPermissionError, type ExistingPipelineTask } from './services/googleTasks';
 import { buildGeneratorUrl, buildInterviewMemoText, isInterviewPrepStage, computeResultEvents, sendResultEvents } from './services/interviewPrep';
-import { getCompanyPositions, getSavedJd, resolveGeneratorCompanyId } from './services/interviewPrepData';
+import { getCompanyPositions, getSavedJd, listCompanyJds, resolveGeneratorCompanyId, type PrepJd } from './services/interviewPrepData';
 import { generateRecommendationDraft } from './services/recommendationDraft';
 import { loadJdIndex, findMasterJds, listCompanyMasters, samePosition, buildJdText, buildJdGeneratorUrl, buildJdEditUrl, isJdGeneratorOrigin, JD_GENERATOR_URL, deleteJdEntry, jdPdfUrl, jdDocUrl, jdFolderUrl, type JdIndexData, type JdIndexEntry } from './services/jdIndex';
 import { bundlableEntries, searchJdEntries, mergeJdPdfs } from './services/jdBundle';
@@ -4877,6 +4877,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '月次目標を月ごとに記録するようにした。今月の目標は変えるたびに記録を更新し、月が終わるとその月の目標として残ります。個人実績の「媒体別 月次進捗」で過去の月を表示すると当時の目標で達成率を出し、全ユーザー/チーム別の「全ユーザーの進捗」も、期間をちょうど1か月にした時はその月の目標・達成率を表示するようになりました（これまでは今月以外は目標を出していませんでした）。記録はこの更新以降の月から残るため、それより前の月は現在の目標で代用します',
       '全ユーザー/チーム別タブの一番下に「1on1スコアカード」を追加した。メンバーと月を選ぶと、主な指標（スカウト数・返信率・書類回収・初回面談・推薦〜内定など）について、本人の値・画面で選択中のメンバーの中央値・過去3か月の推移を並べ、中央値より2割以上低い指標を赤、高い指標を緑で表示します。14日以上動いていない選考（先の予定日が入っているものは除く）の一覧も出ます。「1on1で話すべき点をAIに聞く」では、数字と停滞中の選考の段階・日数だけをAIに送ります（候補者名・企業名は送りません）',
       'ミドル向けに「チーム一括入力（表）」を追加した。個人実績タブの「実績カレンダー」にある代理入力の欄から開き、日付と媒体を選ぶと、自分と代理入力できるメンバー全員分の実績（スカウト送信数〜有効初回面談数）を1つの表でまとめて入力できます。すでに値が入っているマスは色付きで表示し、保存するのは値を変えたマスだけです（本人がその日に入れた他の項目は変わりません）',
+      'ブラインドレジュメ作成（候補者カードからの1件作成・「ブラインドレジュメ収集」）の推薦先の企業名とポジション名で、面接対策ジェネレーターに登録されている企業・ポジションを候補に出すようにした。企業とポジションを選ぶと、ジェネレーターにそのポジションの求人票が保存されていれば求人内容に自動で入ります（求人内容をすでに入力している時は上書きせず、「面接対策ジェネレーターの求人票から選ぶ」から追加できます）。ジェネレーターに無い企業・ポジションは、これまでどおり自由に入力できます',
     ],
   },
   {
@@ -8982,6 +8983,61 @@ const DriveJdPicker: React.FC<{ companyName: string; disabled?: boolean; onPick:
 };
 
 /**
+ * 面接対策ジェネレーターに保存されている、その企業の求人票（jds シート）から求人内容に追加する。
+ * DriveJdPicker と同じ形。企業がジェネレーターの企業一覧に無い・求人票が無い時は何も出さない。
+ */
+const GeneratorJdPicker: React.FC<{ companyName: string; gasCompanyId?: string; disabled?: boolean; onPick: (text: string, jd: PrepJd) => void }> = ({ companyName, gasCompanyId, disabled, onPick }) => {
+    const prep = useInterviewPrepData();
+    const [added, setAdded] = useState<Set<string>>(new Set());
+    useEffect(() => { setAdded(new Set()); }, [companyName, gasCompanyId]);
+    const jds = prep.data && companyName.trim() ? listCompanyJds(prep.data, companyName.trim(), gasCompanyId) : [];
+    if (jds.length === 0) return null;
+    return (
+        <details className="drive-jd-picker">
+            <summary>面接対策ジェネレーターの求人票から選ぶ（{jds.length}件）</summary>
+            <ul className="drive-jd-picker-list">
+                {jds.map(j => (
+                    <li key={j.id}>
+                        <button type="button" className="secondary-action-button" disabled={disabled || added.has(j.id)}
+                            onClick={() => { onPick(j.content.trim(), j); setAdded(prev => new Set(prev).add(j.id)); }}>
+                            {added.has(j.id) ? '追加済み' : '求人内容に追加'}
+                        </button>
+                        <span>{j.position || '企業共通'}</span>
+                    </li>
+                ))}
+            </ul>
+        </details>
+    );
+};
+
+/**
+ * 企業とポジションを選んだ時、そのポジションの求人票がジェネレーターにあれば求人内容に入れる。
+ * 求人内容がすでに入力されている時は上書きせず、案内だけ返す（GeneratorJdPicker から追加できる）。
+ */
+const useGeneratorJdAutoFill = (companyName: string, gasCompanyId: string | undefined, position: string, jobText: string, setJobText: (text: string) => void): string => {
+    const prep = useInterviewPrepData();
+    const [notice, setNotice] = useState('');
+    const lastFilledRef = useRef('');
+    const jd = prep.data && companyName.trim() && position.trim() ? getSavedJd(prep.data, companyName.trim(), position.trim(), gasCompanyId) : null;
+    const jdContent = jd?.content.trim() || '';
+    useEffect(() => {
+        if (!jdContent) { setNotice(''); return; }
+        const key = `${jd!.id}`;
+        if (lastFilledRef.current === key) return;
+        lastFilledRef.current = key;
+        if (!jobText.trim()) {
+            setJobText(jdContent);
+            setNotice(`面接対策ジェネレーターに保存されている「${position.trim()}」の求人票を求人内容に入れました（必要に応じて直してください）。`);
+        } else {
+            setNotice(`「${position.trim()}」の求人票が面接対策ジェネレーターにあります。下の「面接対策ジェネレーターの求人票から選ぶ」から求人内容に追加できます。`);
+        }
+        // jobText は入れるかどうかの判定にだけ使う（入力のたびに走らせない）
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [jdContent, jd?.id]);
+    return notice;
+};
+
+/**
  * 「求人票出力」画面。求人票ジェネレーターがドライブに保存した求人票PDFを検索して複数選び、
  * 選んだ順に結合して1つのPDFとしてダウンロードする（候補者に複数の求人をまとめて渡す用）。
  * ロジック本体は services/jdBundle.ts。ドライブには保存しない。
@@ -9571,7 +9627,11 @@ const PositionInput: React.FC<{
     gasCompanyId?: string;
     value: string;
     onChange: (position: string) => void;
-}> = ({ id, companyName, gasCompanyId, value, onChange }) => {
+    // false なら候補を出すだけで、未登録のポジションの「新規登録」は出さない（ブラインドレジュメなど）
+    allowRegister?: boolean;
+    disabled?: boolean;
+    placeholder?: string;
+}> = ({ id, companyName, gasCompanyId, value, onChange, allowRegister = true, disabled, placeholder }) => {
     const prep = useInterviewPrepData();
     const [busy, setBusy] = useState(false);
     const [message, setMessage] = useState('');
@@ -9614,13 +9674,14 @@ const PositionInput: React.FC<{
                 value={value}
                 onChange={e => { onChange(e.target.value); setMessage(''); }}
                 onKeyDown={e => { if (e.key === 'Enter') e.preventDefault(); }}
-                placeholder={options.length ? '候補から選ぶか入力（例: アクイジション、AM）' : '例: アクイジション、AM、PM'}
+                placeholder={options.length ? '候補から選ぶか入力（例: アクイジション、AM）' : (placeholder || '例: アクイジション、AM、PM')}
+                disabled={disabled}
             />
             <datalist id={`${id}-list`}>
                 {positions.map(p => <option key={p} value={p} />)}
                 {masterPositions.map(p => <option key={`jd:${p}`} value={p} label={`${p}（ドライブの求人票）`} />)}
             </datalist>
-            {name && prep.data && !companyId && (
+            {allowRegister && name && prep.data && !companyId && (
                 <p className="interview-prep-hint">企業を面接対策ジェネレーターの企業一覧から選ぶと、登録済みのポジションが候補に出ます。</p>
             )}
             {companyId && positions.length > 0 && !trimmed && (
@@ -9629,7 +9690,7 @@ const PositionInput: React.FC<{
             {masterPositions.length > 0 && !trimmed && (
                 <p className="interview-prep-hint">ドライブの求人票: {masterPositions.join('、')}</p>
             )}
-            {companyId && isNew && (
+            {allowRegister && companyId && isNew && (
                 <p className="interview-prep-hint company-name-unregistered">
                     「{trimmed}」はジェネレーターに未登録のポジションです{masterForValue ? '（登録するとドライブの求人票の内容が求人票として入ります）' : ''}。
                     <button type="button" className="interview-prep-link-button" onClick={handleRegister} disabled={busy}>
@@ -9662,7 +9723,11 @@ const CompanyNameInput: React.FC<{
     onPick?: (name: string, gasCompanyId: string) => void;
     // 新規登録の確認ダイアログ〜登録中の間 true（その間のフォーカス外れで編集を閉じないため）。
     onBusyChange?: (busy: boolean) => void;
-}> = ({ id, value, onChange, autoFocus, required, ariaLabel, placeholder, onPick, onBusyChange }) => {
+    // false なら候補を出すだけ：一覧に無い企業も自由入力のまま使え、「新規登録」や未登録の注意を出さない
+    // （ブラインドレジュメの推薦先など、ジェネレーターに登録する必要がない欄）。
+    allowRegister?: boolean;
+    disabled?: boolean;
+}> = ({ id, value, onChange, autoFocus, required, ariaLabel, placeholder, onPick, onBusyChange, allowRegister = true, disabled }) => {
     const prep = useInterviewPrepData();
     const [open, setOpen] = useState(false);
     const [highlight, setHighlight] = useState(0);
@@ -9698,7 +9763,7 @@ const CompanyNameInput: React.FC<{
     }, [options, query]);
     const exact = options.find(o => o.norm === query);
     // 候補の最後に出す「新規登録」（マスタに完全一致が無い時だけ）。
-    const canRegister = masterAvailable && !!value.trim() && !exact;
+    const canRegister = allowRegister && masterAvailable && !!value.trim() && !exact;
     const itemCount = suggestions.length + (canRegister ? 1 : 0);
 
     const choose = (o: CompanyOption) => {
@@ -9775,7 +9840,7 @@ const CompanyNameInput: React.FC<{
                 onKeyDown={handleKeyDown}
                 autoFocus={autoFocus}
                 required={required}
-                disabled={registering}
+                disabled={registering || disabled}
                 aria-label={ariaLabel}
                 placeholder={placeholder}
                 autoComplete="off"
@@ -9813,7 +9878,7 @@ const CompanyNameInput: React.FC<{
             )}
             {registering && <p className="interview-prep-hint">面接対策ジェネレーターに登録しています...</p>}
             {message && <p className="interview-prep-hint">{message}</p>}
-            {!registering && !message && !open && (
+            {allowRegister && !registering && !message && !open && (
                 prep.loading && !prep.data ? null
                 : !masterAvailable ? (
                     <p className="interview-prep-hint">面接対策ジェネレーターの企業一覧を読み込めないため、企業名は自由入力になります。</p>
@@ -11678,6 +11743,9 @@ const SingleBlindResumeModal: React.FC<{
   const [companyName, setCompanyName] = useState('');
   const [positionTitle, setPositionTitle] = useState('');
   const [jobText, setJobText] = useState('');
+  // 推薦先を面接対策ジェネレーターの企業一覧から選んだ時の企業ID（ポジション・求人票の候補に使う）
+  const [gasCompanyId, setGasCompanyId] = useState<string | undefined>(undefined);
+  const generatorJdNotice = useGeneratorJdAutoFill(companyName, gasCompanyId, positionTitle, jobText, setJobText);
   const [displayOptions, setDisplayOptions] = useState<BlindDisplayOptions>({ showCurrentSalary: true, showDesiredSalary: true, showJoinTiming: true });
   const [content, setContent] = useState<BlindResumeContent | null>(null);
   const [isBusy, setIsBusy] = useState(false);
@@ -11759,15 +11827,20 @@ const SingleBlindResumeModal: React.FC<{
           <div className="blind-resume-form">
             <div className="blind-resume-row">
               <label>推薦先の企業名（任意）
-                <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="例: 株式会社〇〇" disabled={isBusy} />
+                <CompanyNameInput id="single-blind-resume-company" value={companyName} allowRegister={false} disabled={isBusy}
+                  onChange={(name, id) => { setCompanyName(name); setGasCompanyId(id); }} placeholder="例: 株式会社〇〇" />
               </label>
               <label>ポジション名（任意）
-                <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
+                <PositionInput id="single-blind-resume-position" companyName={companyName} gasCompanyId={gasCompanyId} value={positionTitle}
+                  onChange={setPositionTitle} allowRegister={false} disabled={isBusy} placeholder="例: 法人営業（リーダー候補）" />
               </label>
             </div>
+            {generatorJdNotice && <p className="field-hint">{generatorJdNotice}</p>}
             <label>求人内容（任意 — 貼り付けると推薦ポイントを求人要件に合わせて書きます）
               <textarea rows={content ? 2 : 5} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件 など" disabled={isBusy} />
             </label>
+            <GeneratorJdPicker companyName={companyName} gasCompanyId={gasCompanyId} disabled={isBusy}
+              onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
             <DriveJdPicker companyName={companyName} disabled={isBusy}
               onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
             <fieldset className="blind-resume-options">
@@ -11992,6 +12065,9 @@ const BlindResumeView: React.FC<{
   const [companyName, setCompanyName] = useState('');
   const [positionTitle, setPositionTitle] = useState('');
   const [jobText, setJobText] = useState('');
+  // 推薦先を面接対策ジェネレーターの企業一覧から選んだ時の企業ID（ポジション・求人票の候補に使う）
+  const [gasCompanyId, setGasCompanyId] = useState<string | undefined>(undefined);
+  const generatorJdNotice = useGeneratorJdAutoFill(companyName, gasCompanyId, positionTitle, jobText, setJobText);
   const [jobFiles, setJobFiles] = useState<File[]>([]);
   const [extraConditions, setExtraConditions] = useState('');
   const [wantedCount, setWantedCount] = useState(3);
@@ -12380,12 +12456,15 @@ const BlindResumeView: React.FC<{
             <div className="blind-resume-form">
               <div className="blind-resume-row">
                 <label><span>推薦先の企業名<span className="required-mark">*</span></span>
-                  <input type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="例: 株式会社〇〇" disabled={isBusy} />
+                  <CompanyNameInput id="blind-resume-company" value={companyName} allowRegister={false} disabled={isBusy}
+                    onChange={(name, id) => { setCompanyName(name); setGasCompanyId(id); }} placeholder="例: 株式会社〇〇" />
                 </label>
                 <label>ポジション名（任意 — 求人内容が無い場合は検索の手がかりにも使います）
-                  <input type="text" value={positionTitle} onChange={e => setPositionTitle(e.target.value)} placeholder="例: 法人営業（リーダー候補）" disabled={isBusy} />
+                  <PositionInput id="blind-resume-position" companyName={companyName} gasCompanyId={gasCompanyId} value={positionTitle}
+                    onChange={setPositionTitle} allowRegister={false} disabled={isBusy} placeholder="例: 法人営業（リーダー候補）" />
                 </label>
               </div>
+              {generatorJdNotice && <p className="field-hint">{generatorJdNotice}</p>}
               <div
                 className={`blind-resume-job-input ${jobDragActive ? 'is-drag-active' : ''}`}
                 onDragEnter={handleJobDragEnter}
@@ -12396,6 +12475,8 @@ const BlindResumeView: React.FC<{
                 <label><span>求人内容（任意 — 求人票のテキストを貼り付け、またはファイルをドラッグ＆ドロップ／選択）</span>
                   <textarea rows={8} value={jobText} onChange={e => setJobText(e.target.value)} placeholder="仕事内容・必須要件・歓迎要件・想定年収・勤務地 など。空欄の場合は、企業名（とポジション名）からWeb検索で企業情報を調べ、一般的にマッチしそうな候補者と推奨ポジションを提案します" disabled={isBusy} />
                 </label>
+                <GeneratorJdPicker companyName={companyName} gasCompanyId={gasCompanyId} disabled={isBusy}
+                  onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
                 <DriveJdPicker companyName={companyName} disabled={isBusy}
                   onPick={text => setJobText(prev => [prev.trim(), text].filter(Boolean).join('\n\n'))} />
                 <div
