@@ -8521,10 +8521,13 @@ const JdBundleView: React.FC<{
     const [watching, setWatching] = useState(false);
     const generatorRef = useRef<Window | null>(null);
     const baselineRef = useRef<Map<string, number> | null>(null);
+    // 「編集」から開いたときは、直している求人票だけを差し替える（その間にほかの人が保存した求人票は選ばない）。null は新規作成（すべて対象）
+    const watchOnlyIdsRef = useRef<Set<string> | null>(null);
     const pickFresh = (data: JdIndexData | null) => {
         const base = baselineRef.current;
         if (!data || !base) return;
-        const fresh = bundlableEntries(data).filter(e => (base.get(e.jdId) ?? 0) < e.version);
+        const only = watchOnlyIdsRef.current;
+        const fresh = bundlableEntries(data).filter(e => (base.get(e.jdId) ?? 0) < e.version && (!only || only.has(e.jdId)));
         if (fresh.length === 0) return;
         fresh.forEach(e => base.set(e.jdId, e.version));
         setFreshIds(prev => { const next = new Set(prev); fresh.forEach(e => next.add(e.jdId)); return next; });
@@ -8532,9 +8535,10 @@ const JdBundleView: React.FC<{
             ...prev.map(s => fresh.find(f => f.jdId === s.jdId) || s),
             ...fresh.filter(f => !prev.some(s => s.jdId === f.jdId)),
         ]);
-        setMessage({ kind: 'ok', text: `求人票ジェネレーターで保存された求人票を選びました：${fresh.map(e => `${e.company}・${e.position || '企業共通'}`).join('、')}` });
+        const names = fresh.map(e => `${e.company}・${e.position || '企業共通'}`).join('、');
+        setMessage({ kind: 'ok', text: only ? `原本を上書きした求人票（新しい版）に差し替えました：${names}` : `求人票ジェネレーターで保存された求人票を選びました：${names}` });
     };
-    const openGenerator = (url: string = JD_GENERATOR_URL): boolean => {
+    const openGenerator = (url: string = JD_GENERATOR_URL, onlyJdId?: string): boolean => {
         if (index.data) baselineRef.current = new Map(bundlableEntries(index.data).map(e => [e.jdId, e.version]));
         else baselineRef.current = baselineRef.current || new Map();
         const w = window.open(url, 'kpiJdGenerator', 'width=1200,height=900');
@@ -8543,6 +8547,7 @@ const JdBundleView: React.FC<{
             return false;
         }
         generatorRef.current = w;
+        watchOnlyIdsRef.current = onlyJdId ? new Set([onlyJdId]) : null;
         w.focus();
         setWatching(true);
         return true;
@@ -8555,7 +8560,7 @@ const JdBundleView: React.FC<{
     const editRequestsRef = useRef<Map<string, string>>(new Map()); // req → jdId
     const openEditor = (e: JdIndexEntry) => {
         const req = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-        if (!openGenerator(buildJdEditUrl(e, req))) return;
+        if (!openGenerator(buildJdEditUrl(e, req), e.jdId)) return;
         editRequestsRef.current.set(req, e.jdId);
         setMessage({ kind: 'ok', text: `「${e.company}・${e.position || '企業共通'}」を求人票ジェネレーターで開きました。直したあと、ジェネレーターで「原本を上書き保存」か「この出力にだけ使う」を選んでください。` });
     };
