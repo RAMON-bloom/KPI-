@@ -5278,20 +5278,49 @@ p.memo-content-text {
 .feedback-invite-modal .modal-body { display: flex; flex-direction: column; gap: 0.75rem; }
 .feedback-invite-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; font-weight: 600; }
 .feedback-invite-field select { padding: 0.45rem 0.6rem; border: 1px solid #ced4da; border-radius: 0.375rem; font-size: 0.9rem; }
-/* 選考状況バッジの右にくっつけた「面接アンケート」ボタン（会社ごと） */
-.summary-badge-group { display: inline-flex; align-items: stretch; }
-.summary-badge-group .status-badge:has(+ .feedback-invite-badge-button) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.feedback-invite-badge-button {
-  padding: 0.2rem 0.55rem;
+/* 選考状況の行の右端の「面接アンケート」ボタンと、企業を選ぶドロップダウン */
+.feedback-invite-menu { position: relative; margin-left: auto; }
+.feedback-invite-menu-button {
+  padding: 0.35rem 0.75rem;
   border: 1px solid #c9cedb;
-  border-left: none;
-  border-radius: 0 0.5rem 0.5rem 0;
+  border-radius: 0.5rem;
   background: #fff;
   color: #1f2a44;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
-.feedback-invite-badge-button:hover,
-.feedback-invite-badge-button:focus-visible { background: #eef0f4; }
+.feedback-invite-menu-button:hover,
+.feedback-invite-menu-button:focus-visible,
+.feedback-invite-menu-button[aria-expanded="true"] { background: #eef0f4; }
+.feedback-invite-menu-list {
+  z-index: 1000;
+  min-width: 14rem;
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #dee2e6;
+  border-radius: 0.5rem;
+  box-shadow: 0 6px 18px rgba(31, 42, 68, 0.15);
+}
+.feedback-invite-menu-heading { padding: 0.25rem 0.5rem 0.35rem; font-size: 0.75rem; color: var(--text-muted-color); }
+.feedback-invite-menu-list button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: none;
+  border-radius: 0.375rem;
+  background: none;
+  color: var(--text-color);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.feedback-invite-menu-list button:hover,
+.feedback-invite-menu-list button:focus-visible { background: #eef0f4; }
+.feedback-invite-menu-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; flex-shrink: 0; background-color: var(--badge-color, var(--secondary-color)); }
+.feedback-invite-menu-stage { margin-left: auto; padding-left: 0.75rem; font-size: 0.75rem; color: var(--text-muted-color); }

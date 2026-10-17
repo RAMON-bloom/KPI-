@@ -4843,7 +4843,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
-      '候補者パイプラインのカードから、面接振り返りアンケートの案内文をコピーできるようにした。「選考状況」の各社のバッジの右にある「📝 面接アンケート」を押し、対象の面接を選んで「メール用をコピー」「LINE用をコピー」で、選考情報を開かなくてもその会社の案内文（短いURL付き）をコピーできます（複数社の選考が進んでいる人は会社ごとにボタンが出ます。打診・書類選考だけの選考には出ません）。自分用に編集した案内文があればそれが使われます',
+      '候補者パイプラインのカードから、面接振り返りアンケートの案内文をコピーできるようにした。「選考状況」の右端の「📝 面接アンケート」を押し（複数社の選考が進んでいる人は、出てくる一覧から企業を選び）、対象の面接を選んで「メール用をコピー」「LINE用をコピー」で、選考情報を開かなくてもその企業の案内文（短いURL付き）をコピーできます（打診・書類選考だけの選考は一覧に出ません）。自分用に編集した案内文があればそれが使われます',
       '期間の切り替え（前月・次月、期間指定、よく使う期間）を、アプリ全体で「‹ 2026年10月 ›」の形にそろえた。‹ ›で前後の期間へ（四半期なら前後の四半期へ）、真ん中を押すとよく使う期間・年度の月グリッド・日付指定から選べます。選んだ時点で反映されるので、「この期間で絞り込む」などのボタンはなくなりました。今月以外を見ているときは「今月に戻る」が出ます',
       '全ユーザー/チーム別タブの期間を、ページ上部の「このページの期間」1か所にまとめた。進捗・想定粗利・曜日別返信率の各カードも既定でこの期間に従います（これまではカードごとに別々でした）。カードだけ別の期間で見たいときは「このカードだけ期間を変える」から指定でき、個別の期間のカードにはバッジが付きます',
       '候補者の詳細表示にある各社の選考カードでも、企業名を面接対策ジェネレーターの企業一覧から選べるようにした。企業名をクリックして入力を始めると登録済みの企業が候補に出て、選ぶとその場で保存されます（↑↓キーで選んでEnterでも確定。Escで取り消し）。一覧に無い企業は候補の一番下の「新規登録」でジェネレーターにも追加できます',
@@ -14955,6 +14955,79 @@ const SchedulingBallBadgeSuffix: React.FC<{ app: CompanyApplication }> = ({ app 
 const canSendFeedbackInvite = (app: CompanyApplication): boolean =>
   !!app.companyName?.trim() && (!STAGES_WITHOUT_SCHEDULING.has(app.stage) || !!defaultFeedbackStage(app));
 
+// 選考状況の行の「面接アンケート」ボタン。案内できる選考が1社ならそのまま開き、
+// 複数社ならドロップダウンで会社を選んでから開く。
+const FeedbackInviteMenu: React.FC<{
+  applications: CompanyApplication[];
+  onPick: (app: CompanyApplication) => void;
+}> = ({ applications, onPick }) => {
+  // 候補者カードは overflow: hidden（詳細の開閉用）なので、一覧はカードの外にはみ出せるよう
+  // 画面基準（position: fixed）でボタンの下に出す。下に入りきらなければ上に出す。
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null);
+  const isOpen = menuStyle !== null;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const close = () => setMenuStyle(null);
+  const open = () => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const estimatedHeight = 40 + applications.length * 36;
+    const openUp = rect.bottom + 4 + estimatedHeight > window.innerHeight && rect.top > estimatedHeight;
+    setMenuStyle({
+      position: 'fixed',
+      right: Math.max(8, window.innerWidth - rect.right),
+      ...(openUp ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
+    });
+  };
+  useEffect(() => {
+    if (!isOpen) return;
+    const onPointer = (e: MouseEvent) => { if (rootRef.current && !rootRef.current.contains(e.target as Node)) close(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    // 画面基準で出しているので、スクロール・リサイズでボタンとずれる前に閉じる
+    const onMove = () => close();
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onMove, true);
+    window.addEventListener('resize', onMove);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [isOpen]);
+  if (applications.length === 0) return null;
+  const single = applications.length === 1;
+  return (
+    <div className="feedback-invite-menu" ref={rootRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="feedback-invite-menu-button"
+        onClick={() => (single ? onPick(applications[0]) : isOpen ? close() : open())}
+        aria-haspopup={single ? undefined : 'menu'}
+        aria-expanded={single ? undefined : isOpen}
+        title="面接振り返りアンケートの案内文（メール/LINE用）をコピーします"
+      >
+        📝 面接アンケート{single ? '' : ' ▾'}
+      </button>
+      {menuStyle && (
+        <ul className="feedback-invite-menu-list" style={menuStyle} role="menu" aria-label="アンケートを送る企業">
+          <li className="feedback-invite-menu-heading" role="presentation">どの企業の面接？</li>
+          {applications.map(app => (
+            <li key={app.id} role="presentation">
+              <button type="button" role="menuitem" onClick={() => { close(); onPick(app); }}>
+                <span className="feedback-invite-menu-dot" style={getStageBadgeStyle(app.stage)} aria-hidden="true" />
+                {app.companyName}<span className="feedback-invite-menu-stage">{app.stage}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 const ApplicationStageBadge: React.FC<{
   app: CompanyApplication;
   onClick: () => void;
@@ -15507,7 +15580,7 @@ const PipelineCandidateCard: React.FC<{
   onOpenSimilarResearch: (candidate: Candidate) => void;
   // 「ブラインドレジュメ」— 親（CandidatePipelineView）がSingleBlindResumeModalを開く。
   onOpenBlindResume: (candidate: Candidate) => void;
-  // 選考状況バッジ横の「面接アンケート」— 親（CandidatePipelineView）がその選考のFeedbackInviteCopyModalを開く。
+  // 選考状況の「面接アンケート」で選んだ選考 — 親（CandidatePipelineView）がその選考のFeedbackInviteCopyModalを開く。
   onOpenFeedbackInvite: (candidate: Candidate, application: CompanyApplication) => void;
   // 同じ選考でアンケート回収とナレッジ投稿まで済んでいる（hasCompletedInterviewReview）→ 金色調で表示
   reviewCompleted?: boolean;
@@ -16111,22 +16184,11 @@ const PipelineCandidateCard: React.FC<{
                     {visibleApplications.length > 0 ? (
                         visibleApplications.map(app => (
                             candidateIsOwn ? (
-                                <span key={app.id} className="summary-badge-group">
-                                    <ApplicationStageBadge
-                                        app={app}
-                                        onClick={() => onEditApplication(c, app)}
-                                    />
-                                    {canSendFeedbackInvite(app) && (
-                                        <button
-                                            type="button"
-                                            className="feedback-invite-badge-button"
-                                            onClick={() => onOpenFeedbackInvite(c, app)}
-                                            title={`${app.companyName}の面接振り返りアンケートの案内文（メール/LINE用）をコピーします`}
-                                        >
-                                            📝 面接アンケート
-                                        </button>
-                                    )}
-                                </span>
+                                <ApplicationStageBadge
+                                    key={app.id}
+                                    app={app}
+                                    onClick={() => onEditApplication(c, app)}
+                                />
                             ) : (
                                 <span
                                     key={app.id}
@@ -16143,6 +16205,12 @@ const PipelineCandidateCard: React.FC<{
                         <span className="no-status">未登録</span>
                     )}
                 </div>
+                {candidateIsOwn && (
+                    <FeedbackInviteMenu
+                        applications={visibleApplications.filter(canSendFeedbackInvite)}
+                        onPick={app => onOpenFeedbackInvite(c, app)}
+                    />
+                )}
             </div>
         </div>
          <div
