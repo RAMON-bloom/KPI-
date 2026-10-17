@@ -5377,3 +5377,14 @@ p.memo-content-text {
 .scorecard-stalled-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; }
 .scorecard-ai { margin-top: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: 0.4rem; }
 .scorecard-ai-result { white-space: pre-wrap; background: var(--light-gray-color, #f6f8fa); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; width: 100%; box-sizing: border-box; }
+
+/* ミドル用：チーム一括入力 */
+.team-bulk-entry-open { margin-top: 0.5rem; }
+.modal-content.team-bulk-entry-modal { max-width: min(1100px, 96vw); width: 96vw; }
+.team-bulk-entry-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+.team-bulk-entry-media { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.team-bulk-entry-media button { padding: 0.25rem 0.7rem; border: 1px solid var(--border-color, #d0d7de); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; font-size: 0.85rem; }
+.team-bulk-entry-media button.is-active { background: var(--primary-color, #007bff); border-color: var(--primary-color, #007bff); color: #fff; }
+.team-bulk-entry-table input { width: 4.5rem; padding: 0.25rem 0.35rem; text-align: right; }
+.team-bulk-entry-table td.has-existing { background: #eef6ff; }
+.team-bulk-entry-table td.is-changed { background: #fff4d6; }

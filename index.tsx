@@ -4876,6 +4876,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '全ユーザータブの「全ユーザーの進捗」に「メンバー別／チーム別」の切り替えを追加した。チーム別にすると、選択中のメンバーをチームごとに合計した行（チーム未所属の人がいればその行も）と、全体の合計行を表示します。返信率などの率はチームの合計から計算し、返信数・有効面談数には1人あたりの数も添えます',
       '月次目標を月ごとに記録するようにした。今月の目標は変えるたびに記録を更新し、月が終わるとその月の目標として残ります。個人実績の「媒体別 月次進捗」で過去の月を表示すると当時の目標で達成率を出し、全ユーザー/チーム別の「全ユーザーの進捗」も、期間をちょうど1か月にした時はその月の目標・達成率を表示するようになりました（これまでは今月以外は目標を出していませんでした）。記録はこの更新以降の月から残るため、それより前の月は現在の目標で代用します',
       '全ユーザー/チーム別タブの一番下に「1on1スコアカード」を追加した。メンバーと月を選ぶと、主な指標（スカウト数・返信率・書類回収・初回面談・推薦〜内定など）について、本人の値・画面で選択中のメンバーの中央値・過去3か月の推移を並べ、中央値より2割以上低い指標を赤、高い指標を緑で表示します。14日以上動いていない選考（先の予定日が入っているものは除く）の一覧も出ます。「1on1で話すべき点をAIに聞く」では、数字と停滞中の選考の段階・日数だけをAIに送ります（候補者名・企業名は送りません）',
+      'ミドル向けに「チーム一括入力（表）」を追加した。個人実績タブの「実績カレンダー」にある代理入力の欄から開き、日付と媒体を選ぶと、自分と代理入力できるメンバー全員分の実績（スカウト送信数〜有効初回面談数）を1つの表でまとめて入力できます。すでに値が入っているマスは色付きで表示し、保存するのは値を変えたマスだけです（本人がその日に入れた他の項目は変わりません）',
     ],
   },
   {
@@ -11817,6 +11818,118 @@ const FeedbackInviteCopyModal: React.FC<{
         </div>
         <div className="modal-footer">
           <button type="button" className="cancel-button" onClick={onClose}>閉じる</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- ミドル用：チーム一括入力 ---
+// 日付と媒体を1つずつ選ぶと「メンバー × 媒体別の項目」の表が開き、チーム全員分の実績をまとめて入力できる。
+// すでに入っている値は表に出し、色を変える。保存するのは、この表で値を変えたマスだけ（本人がその後に
+// 入れた別の項目を古い値で上書きしないように）。書き込みは対象の最新のファイルを読み直してから行う。
+const TeamBulkEntryModal: React.FC<{
+  members: { email: string; label: string; entries: KpiEntry[] }[];
+  media: MediaEntry[];
+  onApply: (countsByTarget: Record<string, Record<string, Record<string, number>>>) => void;
+  onClose: () => void;
+}> = ({ members, media, onApply, onClose }) => {
+  const toDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [date, setDate] = useState(() => toDateStr(new Date()));
+  const [mediaId, setMediaId] = useState(() => media[0]?.id || '');
+  // 入力中の値（キーは `${email}|${kpiKey}`）。未入力のマスは既存の値をそのまま表示する。
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const existingValue = (m: { entries: KpiEntry[] }, key: string): number | undefined =>
+    (m.entries.find(e => e.date === date)?.values as Record<string, number> | undefined)?.[key];
+  const keyOf = (suffix: string) => `${mediaId}_${suffix}`;
+  const changed = useMemo(() => {
+    const result: Record<string, Record<string, Record<string, number>>> = {};
+    let count = 0;
+    Object.entries(edits).forEach(([cellKey, raw]: [string, string]) => {
+      const [email, kpiKey] = cellKey.split('|');
+      const member = members.find(m => m.email === email);
+      if (!member || raw.trim() === '') return;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0) return;
+      if ((existingValue(member, kpiKey) || 0) === value) return;
+      ((result[email] ||= {})[date] ||= {})[kpiKey] = Math.round(value);
+      count++;
+    });
+    return { result, count };
+  }, [edits, members, date]);
+  const changeDate = (next: string) => {
+    if (changed.count > 0 && !window.confirm('入力中の内容は保存されていません。日付を変えると入力中の内容は消えます。よろしいですか？')) return;
+    setEdits({});
+    setDate(next);
+  };
+  const save = () => {
+    if (changed.count === 0) return;
+    onApply(changed.result);
+    setEdits({});
+  };
+  const close = () => {
+    if (changed.count > 0 && !window.confirm('保存していない入力があります。閉じてよろしいですか？')) return;
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content team-bulk-entry-modal" role="dialog" aria-modal="true" aria-labelledby="team-bulk-entry-title">
+        <div className="modal-header">
+          <h3 id="team-bulk-entry-title">チーム一括入力</h3>
+          <button onClick={close} className="close-button" aria-label="閉じる">&times;</button>
+        </div>
+        <div className="modal-body">
+          <div className="team-bulk-entry-controls">
+            <label>日付 <input type="date" value={date} onChange={e => e.target.value && changeDate(e.target.value)} /></label>
+            <div className="team-bulk-entry-media" role="group" aria-label="媒体">
+              {media.map(m => (
+                <button key={m.id} type="button" className={m.id === mediaId ? 'is-active' : ''} aria-pressed={m.id === mediaId} onClick={() => setMediaId(m.id)}>{m.name}</button>
+              ))}
+            </div>
+          </div>
+          <p className="field-hint">各メンバーの実績として保存されます（本人がその日に入力した値も、ここで変えたマスは上書きします）。色の付いたマスはすでに値が入っている項目です。保存するのは値を変えたマスだけで、媒体を切り替えても入力中の内容は残ります。</p>
+          <div className="all-users-table-container">
+            <table className="all-users-table team-bulk-entry-table">
+              <thead>
+                <tr>
+                  <th>メンバー</th>
+                  {MEDIA_KPI_SUFFIXES.map(suffix => <th key={suffix}>{MEDIA_KPI_SUFFIX_LABELS[suffix]}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {members.map(member => (
+                  <tr key={member.email}>
+                    <td className="team-progress-name-cell">{member.label}</td>
+                    {MEDIA_KPI_SUFFIXES.map(suffix => {
+                      const kpiKey = keyOf(suffix);
+                      const cellKey = `${member.email}|${kpiKey}`;
+                      const existing = existingValue(member, kpiKey);
+                      const editing = edits[cellKey];
+                      const value = editing !== undefined ? editing : (existing !== undefined ? String(existing) : '');
+                      const isChanged = editing !== undefined && editing.trim() !== '' && Number(editing) !== (existing || 0);
+                      return (
+                        <td key={suffix} className={isChanged ? 'is-changed' : existing ? 'has-existing' : undefined}>
+                          <input
+                            type="number" min={0} inputMode="numeric"
+                            value={value}
+                            aria-label={`${member.label} ${MEDIA_KPI_SUFFIX_LABELS[suffix]}`}
+                            onChange={e => setEdits(prev => ({ ...prev, [cellKey]: e.target.value }))}
+                          />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="cancel-button" onClick={close}>閉じる</button>
+          <button type="button" className="submit-button" onClick={save} disabled={changed.count === 0}>
+            {changed.count > 0 ? `変更した${changed.count}か所を保存` : '保存'}
+          </button>
         </div>
       </div>
     </div>
@@ -20650,6 +20763,7 @@ const App: React.FC = () => {
   // teammate the signed-in ミドル is currently proxy-entering actuals for — selected via the
   // dropdown above 実績カレンダー (personal_kpi tab only).
   const [middleEntryTargetEmail, setMiddleEntryTargetEmail] = useState('');
+  const [isTeamBulkEntryOpen, setIsTeamBulkEntryOpen] = useState(false);
   const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
   const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
   const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
@@ -22848,7 +22962,9 @@ const App: React.FC = () => {
   // スプレッドシート取込みモーダルからの反映本体 — 対象ごと(自分＋選んだチームメンバー)に
   // 分かれたcountsByTargetを、自分の分は上のapplySpreadsheetKpiCountsToSelfへ、それ以外は
   // persistTeammateEntriesBulkへ振り分ける。
-  const handleApplySpreadsheetKpiImport = (countsByTarget: Record<string, Record<string, Record<string, number>>>) => {
+  // 自分＋チームメンバーへの実績の一括反映（対象ごとに、自分は applySpreadsheetKpiCountsToSelf、
+  // それ以外は persistTeammateEntriesBulk へ振り分ける）。スプレッドシート取込みとチーム一括入力で使う。
+  const applyKpiCountsByTarget = (countsByTarget: Record<string, Record<string, Record<string, number>>>) => {
     Object.entries(countsByTarget).forEach(([targetEmail, countsByDate]) => {
       if (currentIdentity && normalizeEmail(targetEmail) === normalizeEmail(currentIdentity.email)) {
         applySpreadsheetKpiCountsToSelf(countsByDate);
@@ -22856,6 +22972,9 @@ const App: React.FC = () => {
         persistTeammateEntriesBulk(targetEmail, countsByDate);
       }
     });
+  };
+  const handleApplySpreadsheetKpiImport = (countsByTarget: Record<string, Record<string, Record<string, number>>>) => {
+    applyKpiCountsByTarget(countsByTarget);
     setIsSpreadsheetKpiModalOpen(false);
   };
 
@@ -24215,6 +24334,21 @@ const App: React.FC = () => {
           onClose={() => setIsMediaCsvModalOpen(false)}
         />
       )}
+      {isTeamBulkEntryOpen && currentIdentity && (
+        <TeamBulkEntryModal
+          members={[
+            { email: currentIdentity.email, label: `${currentUserData?.displayName || currentIdentity.name || '自分'}（自分）`, entries: currentUserData?.entries || [] },
+            ...middleManagedMemberEmails.map(email => ({
+              email,
+              label: pipelineUserOptions.find(o => o.email === email)?.label || displayedAllUsersData[email]?.displayName || email,
+              entries: displayedAllUsersData[email]?.entries || [],
+            })),
+          ]}
+          media={activeMedia}
+          onApply={applyKpiCountsByTarget}
+          onClose={() => setIsTeamBulkEntryOpen(false)}
+        />
+      )}
       {isSpreadsheetKpiModalOpen && (
         <SpreadsheetKpiImportModal
           allMedia={allMedia}
@@ -24445,6 +24579,9 @@ const App: React.FC = () => {
                         .filter(o => middleManagedMemberEmails.includes(o.email))
                         .map(o => <option key={o.email} value={o.email}>{o.label}</option>)}
                     </select>
+                    <button type="button" className="secondary-action-button team-bulk-entry-open" onClick={() => setIsTeamBulkEntryOpen(true)}>
+                      チーム一括入力（表）
+                    </button>
                     {middleEntryTargetEmail && (
                       <p className="modal-description" style={{ marginTop: '0.25rem' }}>
                         {pipelineUserOptions.find(o => o.email === middleEntryTargetEmail)?.label || middleEntryTargetEmail}さんのカレンダーを表示しています。日付をクリックすると、その日の実績を代理入力できます（本人のその日の実績として上書き保存されます）。
