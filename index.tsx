@@ -4875,6 +4875,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       '候補者パイプラインの上部に「まだ取り込んでいない面談ログ」を追加した。直近14日に更新されたGoogleドキュメント（Meetの議事録など）のうち、自分の候補者の名前が入っていて、まだ面談ログに取り込んでいないものを自動で探して一覧にします。「取り込む」でAIが要約して面談ログに追加し、「対象外」にした文書は次から出しません。面接対策資料・求人票・応募書類など、名前に「面接対策」「求人票」「履歴書」などが入った文書は対象にしません。画面を開いた時と、10分以上たってからタブに戻った時に探し直します',
       '全ユーザータブの「全ユーザーの進捗」に「メンバー別／チーム別」の切り替えを追加した。チーム別にすると、選択中のメンバーをチームごとに合計した行（チーム未所属の人がいればその行も）と、全体の合計行を表示します。返信率などの率はチームの合計から計算し、返信数・有効面談数には1人あたりの数も添えます',
       '月次目標を月ごとに記録するようにした。今月の目標は変えるたびに記録を更新し、月が終わるとその月の目標として残ります。個人実績の「媒体別 月次進捗」で過去の月を表示すると当時の目標で達成率を出し、全ユーザー/チーム別の「全ユーザーの進捗」も、期間をちょうど1か月にした時はその月の目標・達成率を表示するようになりました（これまでは今月以外は目標を出していませんでした）。記録はこの更新以降の月から残るため、それより前の月は現在の目標で代用します',
+      '全ユーザー/チーム別タブの一番下に「1on1スコアカード」を追加した。メンバーと月を選ぶと、主な指標（スカウト数・返信率・書類回収・初回面談・推薦〜内定など）について、本人の値・画面で選択中のメンバーの中央値・過去3か月の推移を並べ、中央値より2割以上低い指標を赤、高い指標を緑で表示します。14日以上動いていない選考（先の予定日が入っているものは除く）の一覧も出ます。「1on1で話すべき点をAIに聞く」では、数字と停滞中の選考の段階・日数だけをAIに送ります（候補者名・企業名は送りません）',
     ],
   },
   {
@@ -18456,6 +18457,187 @@ const findBottleneckIndex = (rates: (number | null)[]): number => {
   return minIdx;
 };
 
+// --- 1on1スコアカード ---
+// メンバーを1人選ぶと、主な指標の「本人・表示中メンバーの中央値・過去3か月の推移」と、動いていない
+// 選考の一覧を並べる。1on1の前の準備用。AIへの相談では、そのメンバーの数字だけを送る（候補者名は送らない）。
+const SCORECARD_STALL_DAYS = 14;
+type ScorecardMetric = { key: string; label: string; isRate?: boolean; calc: (t: KpiTotals, media: MediaEntry[]) => number | null };
+const SCORECARD_METRICS: ScorecardMetric[] = [
+  { key: 'sent', label: 'スカウト数', calc: (t, m) => getTotalFromLump(t, '_scoutsSent', m) },
+  { key: 'replies', label: '返信数', calc: (t, m) => getTotalFromLump(t, '_scoutReplies', m) },
+  { key: 'replyRate', label: '返信率', isRate: true, calc: (t, m) => { const s = getTotalFromLump(t, '_scoutsSent', m); return s > 0 ? getTotalFromLump(t, '_scoutReplies', m) / s * 100 : null; } },
+  { key: 'effectiveReplyRate', label: '有効返信率', isRate: true, calc: (t, m) => { const r = getTotalFromLump(t, '_scoutReplies', m); return r > 0 ? getTotalFromLump(t, '_effectiveReplies', m) / r * 100 : null; } },
+  { key: 'documents', label: '書類回収数', calc: (t, m) => getTotalFromLump(t, '_documentsCollected', m) },
+  { key: 'interviews', label: '初回面談数', calc: (t, m) => getTotalFromLump(t, '_initialInterviews', m) },
+  { key: 'effectiveInterviewRate', label: '有効面談率', isRate: true, calc: (t, m) => { const i = getTotalFromLump(t, '_initialInterviews', m); return i > 0 ? getTotalFromLump(t, '_effectiveInitialInterviews', m) / i * 100 : null; } },
+  ...(Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(k => ({ key: k, label: GENERAL_KPIS[k].label, calc: (t: KpiTotals) => t[k] || 0 })),
+];
+const medianOf = (values: number[]): number | null => {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+const formatScorecardValue = (v: number | null, isRate?: boolean) => (v === null ? '—' : isRate ? `${v.toFixed(1)}%` : Number.isInteger(v) ? String(v) : v.toFixed(1));
+
+/** 選考中（終了していない）の選考のうち、最後にステージが動いてから SCORECARD_STALL_DAYS 日以上たったもの。 */
+const findStalledApplications = (candidates: Candidate[], now: Date = new Date()) => {
+  const limit = now.getTime() - SCORECARD_STALL_DAYS * 24 * 60 * 60 * 1000;
+  return candidates.flatMap(c => c.isHidden ? [] : c.applications.flatMap(app => {
+    if (app.isHidden || !ACTIVE_PIPELINE_STAGES.includes(app.stage)) return [];
+    // 先の予定日が入っている選考は、動いていなくても待ちなので対象外
+    if (app.scheduledDate && new Date(app.scheduledDate).getTime() >= now.getTime() - 24 * 60 * 60 * 1000) return [];
+    const dates = (app.stageHistory || []).map(h => h.date).filter((d): d is string => !!d).sort();
+    const last = dates[dates.length - 1] || c.createdAt;
+    const lastTime = last ? new Date(last).getTime() : NaN;
+    if (!Number.isFinite(lastTime) || lastTime > limit) return [];
+    return [{ candidate: c, app, days: Math.floor((now.getTime() - lastTime) / (24 * 60 * 60 * 1000)) }];
+  })).sort((a, b) => b.days - a.days);
+};
+
+const OneOnOneScorecard: React.FC<{
+  users: string[];
+  allUsersData: Record<string, UserData>;
+  allMedia: MediaEntry[];
+}> = ({ users, allUsersData, allMedia }) => {
+  const [open, setOpen] = useState(false);
+  const [member, setMember] = useState('');
+  const [month, setMonth] = useState(() => new Date());
+  const [aiText, setAiText] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const memberOptions = useMemo(
+    () => users.filter(u => allUsersData[u]).map(u => ({ email: u, label: allUsersData[u]?.displayName || u })),
+    [users, allUsersData],
+  );
+  const selected = memberOptions.some(o => o.email === member) ? member : (memberOptions[0]?.email || '');
+  useEffect(() => { setAiText(''); setAiError(''); }, [selected, month]);
+
+  const months = useMemo(() => [2, 1, 0].map(back => new Date(month.getFullYear(), month.getMonth() - back, 1)), [month]);
+  const totalsOf = (email: string, m: Date) => {
+    const range = monthRangeOf(m);
+    return calculateTotalsForRange(allUsersData[email]?.entries || [], allMedia, range.start, range.end);
+  };
+  const rows = useMemo(() => {
+    if (!selected) return [];
+    const memberTotals = months.map(m => totalsOf(selected, m));
+    const peerTotals = memberOptions.map(o => totalsOf(o.email, month));
+    return SCORECARD_METRICS.map(metric => {
+      const trend = memberTotals.map(t => metric.calc(t, allMedia));
+      const value = trend[trend.length - 1];
+      const median = medianOf(peerTotals.map(t => metric.calc(t, allMedia)).filter((v): v is number => v !== null));
+      // 中央値より2割以上低い指標を目立たせる（中央値が0の指標は判定しない）
+      const isLow = value !== null && median !== null && median > 0 && value < median * 0.8;
+      const isHigh = value !== null && median !== null && median > 0 && value > median * 1.2;
+      return { metric, value, median, trend, isLow, isHigh };
+    })
+      // 本人の3か月もメンバーの中央値もすべて0（または計算できない）の指標は、表が長くなるだけなので出さない
+      .filter(r => r.trend.some(v => v) || !!r.median);
+  }, [selected, months, memberOptions, allMedia, allUsersData, month]);
+  const stalled = useMemo(() => (selected ? findStalledApplications(allUsersData[selected]?.candidates || []) : []), [selected, allUsersData]);
+  const isCurrentMonth = isSameCalendarMonth(month, new Date());
+  const monthLabel = (m: Date) => `${m.getMonth() + 1}月`;
+  const selectedLabel = memberOptions.find(o => o.email === selected)?.label || '';
+
+  const askAi = async () => {
+    setAiLoading(true);
+    setAiError('');
+    try {
+      const lines = rows.map(r => `- ${r.metric.label}：本人 ${formatScorecardValue(r.value, r.metric.isRate)}／中央値 ${formatScorecardValue(r.median, r.metric.isRate)}／推移 ${r.trend.map((v, i) => `${monthLabel(months[i])} ${formatScorecardValue(v, r.metric.isRate)}`).join('→')}`);
+      const stalledLines = stalled.slice(0, 10).map(s => `- ${s.app.stage}のまま${s.days}日`);
+      const prompt = [
+        'あなたは人材紹介会社（転職エージェント）のマネージャーの相談相手です。',
+        `以下はキャリアアドバイザー1名の${month.getFullYear()}年${monthLabel(month)}${isCurrentMonth ? '（月の途中）' : ''}の実績と、同じ画面に表示しているメンバー全員の中央値、過去3か月の推移です。`,
+        'この数字から読み取れる強み・課題と、1on1で話すべき論点を3〜5個、具体的な問いかけの例を添えて日本語で簡潔に挙げてください。数字に無いことは推測だと分かるように書いてください。',
+        '',
+        '■実績',
+        ...lines,
+        '',
+        `■最後の動きから${SCORECARD_STALL_DAYS}日以上動いていない選考（${stalled.length}件）`,
+        ...(stalledLines.length ? stalledLines : ['- なし']),
+      ].join('\n');
+      const response = await gemini.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
+      setAiText(response.text.trim());
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'AIへの相談に失敗しました。');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  return (
+    <section aria-labelledby="one-on-one-scorecard-title" className="one-on-one-scorecard">
+      <h2
+        id="one-on-one-scorecard-title"
+        className="section-title collapsible-header"
+        onClick={() => setOpen(o => !o)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}
+        role="button" tabIndex={0} aria-expanded={open} aria-controls="one-on-one-scorecard-content"
+      >
+        <span className="section-title-label"><span>1on1スコアカード</span></span>
+        <span className={`toggle-icon ${open ? 'open' : ''}`}>▼</span>
+      </h2>
+      <div id="one-on-one-scorecard-content" className={`collapsible-content ${open ? 'open' : ''}`}>
+        {memberOptions.length === 0 ? <p className="interview-prep-hint">表示できるメンバーがいません。</p> : (
+          <>
+            <div className="scorecard-controls">
+              <label>
+                メンバー
+                <select value={selected} onChange={e => setMember(e.target.value)}>
+                  {memberOptions.map(o => <option key={o.email} value={o.email}>{o.label}</option>)}
+                </select>
+              </label>
+              <MonthPicker month={month} onChange={setMonth} ariaLabel="スコアカードの月" />
+            </div>
+            <p className="interview-prep-hint">
+              {selectedLabel}さんの{monthLabel(month)}{isCurrentMonth ? '（月の途中）' : ''}の実績を、この画面で選択中のメンバー{memberOptions.length}人の中央値と比べています。中央値より2割以上低い指標は赤、2割以上高い指標は緑で表示します。
+            </p>
+            <div className="all-users-table-container">
+              <table className="all-users-table scorecard-table">
+                <thead>
+                  <tr>
+                    <th>指標</th>
+                    <th>本人</th>
+                    <th>中央値</th>
+                    {months.map(m => <th key={m.toISOString()}>{monthLabel(m)}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.metric.key} className={r.isLow ? 'scorecard-low' : r.isHigh ? 'scorecard-high' : undefined}>
+                      <td>{r.metric.label}</td>
+                      <td className="scorecard-value">{formatScorecardValue(r.value, r.metric.isRate)}</td>
+                      <td>{formatScorecardValue(r.median, r.metric.isRate)}</td>
+                      {r.trend.map((v, i) => <td key={i} className="scorecard-trend">{formatScorecardValue(v, r.metric.isRate)}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <h3 className="scorecard-subtitle">{SCORECARD_STALL_DAYS}日以上動いていない選考（{stalled.length}件）</h3>
+            {stalled.length === 0 ? <p className="interview-prep-hint">ありません。</p> : (
+              <ul className="scorecard-stalled-list">
+                {stalled.slice(0, 20).map(s => (
+                  <li key={`${s.candidate.id}_${s.app.id}`}>{s.candidate.name}さん／{s.app.companyName}：{s.app.stage}のまま{s.days}日</li>
+                ))}
+                {stalled.length > 20 && <li>ほか{stalled.length - 20}件</li>}
+              </ul>
+            )}
+            <div className="scorecard-ai">
+              <button type="button" className="secondary-action-button" onClick={() => void askAi()} disabled={aiLoading}>
+                {aiLoading ? 'AIが考えています...' : '1on1で話すべき点をAIに聞く'}
+              </button>
+              <span className="interview-prep-hint">AIには上の数字と、動いていない選考の段階・日数だけを送ります（候補者名・企業名は送りません）。</span>
+              {aiError && <p className="interview-prep-hint" style={{ color: 'var(--danger-color, #c0392b)' }}>{aiError}</p>}
+              {aiText && <div className="scorecard-ai-result">{aiText}</div>}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+};
+
 const FunnelAnalysisSection: React.FC<{
   users: string[];
   allUsersData: Record<string, UserData>;
@@ -24867,6 +25049,7 @@ const App: React.FC = () => {
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
                   onSaveAggregateCandidate={handleSaveAggregateCandidate}
               />
+              <OneOnOneScorecard users={comparisonUsers} allUsersData={displayedAllUsersData} allMedia={allMedia} />
             </>
           )
         )}
@@ -24952,6 +25135,7 @@ const App: React.FC = () => {
             ) : isLoadingAllUsers ? (
               <div className="loading-container">チームメンバーのデータをGoogleドライブから読み込み中...</div>
             ) : (
+              <>
               <AllUsersDashboard
                   users={teamComparisonUsers}
                   allUsersData={displayedAllUsersData}
@@ -24982,6 +25166,8 @@ const App: React.FC = () => {
                   onChangeAcceptedDealMonth={handleChangeAcceptedDealMonth}
                   onSaveAggregateCandidate={handleSaveAggregateCandidate}
               />
+              <OneOnOneScorecard users={teamComparisonUsers} allUsersData={displayedAllUsersData} allMedia={teamScopedMedia} />
+              </>
             )}
           </div>
         )}

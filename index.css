@@ -5364,3 +5364,16 @@ p.memo-content-text {
 .all-users-table .team-progress-name-cell {
   white-space: nowrap;
 }
+
+/* 1on1スコアカード */
+.one-on-one-scorecard { margin-top: 1.5rem; }
+.scorecard-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+.scorecard-controls label { display: flex; align-items: center; gap: 0.4rem; }
+.scorecard-table td.scorecard-value { font-weight: 600; }
+.scorecard-table td.scorecard-trend { color: var(--text-secondary-color, #6b7280); }
+.scorecard-table tr.scorecard-low td.scorecard-value { color: #c0392b; }
+.scorecard-table tr.scorecard-high td.scorecard-value { color: #1e8e3e; }
+.scorecard-subtitle { font-size: 1rem; margin: 1rem 0 0.4rem; }
+.scorecard-stalled-list { margin: 0; padding-left: 1.2rem; font-size: 0.9rem; }
+.scorecard-ai { margin-top: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: 0.4rem; }
+.scorecard-ai-result { white-space: pre-wrap; background: var(--light-gray-color, #f6f8fa); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; width: 100%; box-sizing: border-box; }
