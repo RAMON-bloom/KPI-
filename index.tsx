@@ -190,6 +190,52 @@ const buildDefaultKpiTargets = (media: MediaEntry[]): Record<KpiKey, number> => 
 };
 
 
+// 週次・日次目標の土台。月次と違い既定値は入れず、全キー0（＝未設定）にする。以前は週次・日次にも
+// 月次の既定値（スカウト200・返信20…）を流し込んでいたため、未設定の媒体でも「週200通・日200通」が
+// 目標として表示・達成判定に使われ、そのままDriveにも保存されていた。
+const buildZeroKpiTargets = (media: MediaEntry[]): Record<KpiKey, number> =>
+  buildAllKpiKeys(media).reduce((acc, key) => { acc[key] = 0; return acc; }, {} as Record<KpiKey, number>);
+
+// 上記の不具合で週次・日次目標に保存されてしまった「月次の既定値そのまま」の値を0（未設定）に戻す。
+// 媒体ごとに7項目すべて（一般KPIは全項目）が月次の既定値と完全に一致するときだけ、未編集と判断して
+// 消す——週や日の目標としてこの組み合わせを意図して入力することはまず無いため。1項目でも違えば
+// ユーザーが編集したものとしてそのまま残す。
+const stripUntouchedMonthlyDefaults = (
+  targets: Record<string, number> | undefined,
+  media: MediaEntry[],
+): Record<KpiKey, number> => {
+  const result = { ...buildZeroKpiTargets(media), ...(targets || {}) } as Record<KpiKey, number>;
+  // 媒体KPIの月次既定値は媒体によらず項目ごとに同じなので、仮の媒体id "__probe" で引く。
+  const defaults = buildDefaultKpiTargets([{ id: '__probe' } as MediaEntry]);
+  // 媒体の一覧（media）は読み込み前だと空のことがあるため、媒体のまとまりは保存済みの目標のキー自体
+  // （"<媒体id>_<項目>"）から作る。
+  const mediaIds = new Set<string>();
+  Object.keys(result).forEach(key => {
+    const suffix = MEDIA_KPI_SUFFIXES.find(sf => key.endsWith(`_${sf}`));
+    if (suffix) mediaIds.add(key.slice(0, -(suffix.length + 1)));
+  });
+  const groups: KpiKey[][] = [
+    Object.keys(GENERAL_KPIS).filter(k => GENERAL_KPIS[k as keyof typeof GENERAL_KPIS].target > 0) as KpiKey[],
+    ...Array.from(mediaIds).map(id => MEDIA_KPI_SUFFIXES.map(suffix => `${id}_${suffix}` as KpiKey)),
+  ];
+  const monthlyDefaultFor = (key: KpiKey): number | undefined => {
+    if (key in GENERAL_KPIS) return GENERAL_KPIS[key as keyof typeof GENERAL_KPIS].target;
+    const suffix = MEDIA_KPI_SUFFIXES.find(sf => key.endsWith(`_${sf}`));
+    return suffix ? defaults[`__probe_${suffix}` as KpiKey] : undefined;
+  };
+  groups.forEach(keys => {
+    if (keys.length > 0 && keys.every(k => result[k] === monthlyDefaultFor(k))) keys.forEach(k => { result[k] = 0; });
+  });
+  return result;
+};
+
+// 取り込み（Gmail一括・媒体CSV・スプレッドシート）で既存の日の実績を書き換えるときの新しいid。
+// 保存時のマージ（dataSync の mergeEntriesByLatestId）は同じ日付なら id が大きい方を残し、同点なら
+// ドライブ側が勝つため、既存の id を使い回すとドライブ上の古い値に戻ってしまっていた。必ず既存より
+// 大きい id にする（offset は同じ取り込み内で id を重複させないためのずらし）。
+const nextEntryId = (existing: { id?: number } | undefined, offset: number): number =>
+  Math.max(Date.now() + offset, (existing?.id ?? 0) + 1);
+
 interface KpiEntry {
   id: number;
   date: string;
@@ -1108,7 +1154,11 @@ function computeStageAdvanceUpdate(
     }
   }
 
-  if (Object.keys(kpiDeltas).length === 0) return { candidate: { ...nextCandidate, lastModifiedAt: Date.now() }, kpiDeltas };
+  // KPIの加算が無い保存（2社目が同じ関門を通過・他社が選考中のままのお見送り・後戻りの修正など）でも、
+  // Pass 1 で作った選考ごとの更新（前ステージの日程のクリア／先の日程の昇格・exitedFromStage・
+  // 内定承諾時の意思決定時期の補完・選考トラックへの追記）は必ず残す。以前はここで nextCandidate を
+  // そのまま返していたため、これらがまとめて捨てられていた。
+  if (Object.keys(kpiDeltas).length === 0) return { candidate: { ...nextCandidate, applications: updatedApplications, lastModifiedAt: Date.now() }, kpiDeltas };
   return {
     candidate: {
       ...nextCandidate,
@@ -2007,7 +2057,12 @@ function computeAggregateWeeklyData(
   weekStartDate: Date
 ): { data: WeeklyData; weeklyKpiTargets: Record<KpiKey, number> } {
   const weekStart = weekStartDate.getTime();
-  const weekEnd = new Date(weekStartDate).setDate(weekStartDate.getDate() + 6);
+  // 7日目の 23:59:59.999 まで含める（entry.date は new Date('YYYY-MM-DD') で UTC 0時＝JST 9時として
+  // 解釈されるため、7日目の 0:00 で区切ると最終日の実績がまるごと集計から漏れていた）。
+  const weekEndDate = new Date(weekStartDate);
+  weekEndDate.setDate(weekStartDate.getDate() + 6);
+  weekEndDate.setHours(23, 59, 59, 999);
+  const weekEnd = weekEndDate.getTime();
   const allKeys = buildAllKpiKeys(activeMedia);
 
   const weeklyTotals = {} as KpiTotals;
@@ -4464,6 +4519,12 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
+      '【不具合修正】選考状況を変えても、実績の加算が発生しない変更（同じ候補者の2社目が同じ段階を通過した、他社がまだ選考中のままお見送りにした、ステータスを前に戻した等）では、前の段階の予定日が消えない・先の日程が次の予定に繰り上がらない・選考トラックに記録されない・お見送り/辞退の発生フェーズが歩留まり分析に入らない、といった不具合を修正',
+      '【不具合修正】週間サマリー（個人・チーム別・全ユーザー・CSV）で、週の最終日（日曜始まりなら土曜）の実績が集計に入っていなかった不具合を修正',
+      '【不具合修正】週次・日次の目標が未設定の媒体に、月次の既定値（スカウト200通など）が目標として入っていた不具合を修正。未設定なら0（未設定）として扱います。これまでに自動で入っていた既定値のままの目標も、未設定に戻ります（自分で編集した目標はそのまま残ります）',
+      '【不具合修正】ページを読み込み直すたびに選考とGoogleタスクの対応が失われ、タスクが重複して作られたり、お見送り・削除にしてもタスクが残ったりすることがある不具合を修正',
+      '【不具合修正】Googleドライブからの読み込みが通信エラーなどで一時的に失敗したとき、自分のデータファイルが二重に作られる（端末によっては空のファイルになる）ことがある不具合を修正。読み込みに失敗した場合は画面上部にお知らせを出し、成功するまで保存を止めて自動で再試行します',
+      '【不具合修正】Gmailからの一括取得・媒体CSV・スプレッドシートの取り込みで、既に実績が入っている日の値を書き換えた場合、保存後に読み込み直すと取り込み前の値に戻っていた不具合を修正',
       '「求人票出力」で、選んだ求人票を直してから出力できるようにした。選んだ求人票の「編集」を押すと求人票ジェネレーターが開いて、その求人票の内容を直せます。直したあと、ジェネレーターで「原本を上書き保存」（ドライブの求人票が新しい版になり、前の版は「履歴」に残ります）か「この出力にだけ使う」（ドライブの求人票は変えず、今回まとめるPDFだけに直した内容を使います）を選べます',
       '【不具合修正】候補者パイプラインのカード上などで選考状況を「内定承諾」に変えた場合に、年収・オファー金額・料率を入力していても想定粗利に反映されないことがある不具合を修正。成約月（意思決定時期）が空のまま残り、どの月にも集計されていなかったのが原因です。今後はどこから内定承諾にしても、意思決定時期が未変更なら今日の日付が入ります。既に成約月が空になっている内定承諾は、内定承諾にした日の月で集計されます（内定前の見込みの日付が残っている場合は、内定承諾一覧から成約月を変更してください）',
     ],
@@ -19485,6 +19546,8 @@ const App: React.FC = () => {
   // （そのユーザー以後の編集が重複ファイル側にだけ保存され、他ユーザーからは古い方の
   // ファイルしか見えなくなる — 「他ユーザーの更新が反映されない」不具合の実際の原因）。
   const [isDriveFileIdResolved, setIsDriveFileIdResolved] = useState(false);
+  // 自分のデータをドライブから読み込めず再試行中（その間は保存を止めている）。
+  const [driveLoadError, setDriveLoadError] = useState(false);
   const [legacyMigrationChoices, setLegacyMigrationChoices] = useState<string[] | null>(null);
   // Set once the manually-triggered「データ復旧」check (handleCheckBackupForRestore) finds a
   // backup snapshot for the signed-in account, to confirm before overwriting currentUserData
@@ -19943,12 +20006,12 @@ const App: React.FC = () => {
     // 旧コピーから候補者が復活してしまう（UserData.deletedCandidateIds参照）。
     deletedCandidateIds: d.deletedCandidateIds,
     kpiTargets: { ...defaultKpiTargets, ...(d.kpiTargets || {}) },
-    weeklyKpiTargets: { ...defaultKpiTargets, ...(d.weeklyKpiTargets || {}) },
+    weeklyKpiTargets: stripUntouchedMonthlyDefaults(d.weeklyKpiTargets, allMedia),
     // 同じ理由: 週次目標の最終変更日時も許可リストに無いと保存直後は効いていても再読み込みで
     // 消え、「今週すでに目標を変更済み」の表示（WeeklyTargetChangeNotice）が再読み込みのたびに
     // リセットされてしまう。
     weeklyKpiTargetsUpdatedAt: d.weeklyKpiTargetsUpdatedAt,
-    dailyKpiTargets: { ...defaultKpiTargets, ...(d.dailyKpiTargets || {}) },
+    dailyKpiTargets: stripUntouchedMonthlyDefaults(d.dailyKpiTargets, allMedia),
     displayName: d.displayName || currentIdentity?.name || '',
     feedbackPosts: d.feedbackPosts || [],
     // 抜けていた不具合修正: このフィールドが無いと「現在の開閉状態をデフォルトとして保存」が
@@ -19985,6 +20048,9 @@ const App: React.FC = () => {
     jdSendTemplates: d.jdSendTemplates,
     // 同じ理由: チーム設定の控えも許可リストに無いと再読み込みのたびに消え、復元に使えない。
     teamsConfigBackups: d.teamsConfigBackups,
+    // 同じ理由: 選考とGoogleタスクの対応表も許可リストに無いと再読み込みのたびに消え、次の同期で
+    // 既存のタスクを見つけられずに重複作成したり、お見送り・削除時に消すべきタスクが残ったりしていた。
+    googleTaskIdsByApplicationId: d.googleTaskIdsByApplicationId,
   }), [currentIdentity]);
 
   // Load the signed-in user's data. Drive is the source of truth, but if we have a local
@@ -20011,9 +20077,25 @@ const App: React.FC = () => {
       setIsLoadingUserData(true);
     }
 
-    (async () => {
+    // ドライブの読み込みが一時的に失敗したときの再試行間隔（ミリ秒）。使い切った後も最後の間隔で
+    // 続ける——失敗中は保存を止めているので、成功するまで待つしかない。
+    const RETRY_DELAYS_MS = [3000, 10000, 30000, 60000];
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const attemptLoad = async (attempt: number) => {
       const result = await loadOwnData<UserData>(email);
       if (cancelled) return;
+
+      if (result.source === 'error') {
+        // ファイルが無いと確定したわけではないので、ここで driveFileId を null のまま「解決済み」に
+        // すると、次の保存で2つ目のデータファイルが作られてしまう。キャッシュがあれば表示だけして、
+        // 保存は止めたまま（isDriveFileIdResolved=false）読み込みを再試行する。この間の編集は state に
+        // 残り、読み込みに成功した時点で下の分岐（prev を優先）を通ってから保存される。
+        // キャッシュが無い端末では空の画面で編集させないよう、読み込み中の表示のまま待つ。
+        setDriveLoadError(true);
+        retryTimer = setTimeout(() => { attemptLoad(attempt + 1); }, RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);
+        return;
+      }
+      setDriveLoadError(false);
 
       if (result.data) {
         setDriveFileId(result.driveFileId);
@@ -20057,8 +20139,9 @@ const App: React.FC = () => {
       // 既存ファイルが見つかった／本当に存在しないと確認できた、いずれの場合もこれで
       // driveFileIdは信頼できる状態になった — debounce保存エフェクトが動いてよい。
       setIsDriveFileIdResolved(true);
-    })();
-    return () => { cancelled = true; };
+    };
+    attemptLoad(0);
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [currentIdentity, normalizeUserData]);
 
   const handleClaimLegacyData = (legacyName: string | null) => {
@@ -20071,8 +20154,8 @@ const App: React.FC = () => {
       entries: legacyUserData.entries || [],
       candidates: legacyUserData.candidates || [],
       kpiTargets: { ...defaultKpiTargets, ...(legacyUserData.kpiTargets || {}) },
-      weeklyKpiTargets: { ...defaultKpiTargets, ...(legacyUserData.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...defaultKpiTargets, ...(legacyUserData.dailyKpiTargets || {}) },
+      weeklyKpiTargets: stripUntouchedMonthlyDefaults(legacyUserData.weeklyKpiTargets, allMedia),
+      dailyKpiTargets: stripUntouchedMonthlyDefaults(legacyUserData.dailyKpiTargets, allMedia),
       displayName: legacyName,
     });
   };
@@ -20136,8 +20219,8 @@ const App: React.FC = () => {
           entries: data.entries || [],
           candidates: data.candidates || [],
           kpiTargets: { ...defaultKpiTargets, ...(data.kpiTargets || {}) },
-          weeklyKpiTargets: { ...defaultKpiTargets, ...(data.weeklyKpiTargets || {}) },
-          dailyKpiTargets: { ...defaultKpiTargets, ...(data.dailyKpiTargets || {}) },
+          weeklyKpiTargets: stripUntouchedMonthlyDefaults(data.weeklyKpiTargets, allMedia),
+          dailyKpiTargets: stripUntouchedMonthlyDefaults(data.dailyKpiTargets, allMedia),
           displayName: data.displayName,
           feedbackPosts: data.feedbackPosts || [],
           scoutAchievementLog: data.scoutAchievementLog,
@@ -21472,7 +21555,7 @@ const App: React.FC = () => {
       Object.entries(mediaCounts).forEach(([mediaId, count]) => {
         values[`${mediaId}_scoutReplies` as KpiKey] = count;
       });
-      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+      entriesByDateMap.set(dateStr, { id: nextEntryId(existing, idOffset++), date: dateStr, values });
     });
     const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
     const updatedData = { ...currentUserData, entries: updatedEntries };
@@ -21706,7 +21789,7 @@ const App: React.FC = () => {
       const values: KpiTotals = existing ? { ...existing.values } : ({} as KpiTotals);
       values[`${mediaId}_scoutsSent` as KpiKey] = counts.scoutsSent;
       values[`${mediaId}_scoutReplies` as KpiKey] = counts.scoutReplies;
-      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+      entriesByDateMap.set(dateStr, { id: nextEntryId(existing, idOffset++), date: dateStr, values });
     });
     const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
     const updatedData = { ...currentUserData, entries: updatedEntries };
@@ -21731,7 +21814,7 @@ const App: React.FC = () => {
       Object.entries(counts).forEach(([kpiKey, count]) => {
         values[kpiKey as KpiKey] = count;
       });
-      entriesByDateMap.set(dateStr, { id: existing?.id ?? Date.now() + (idOffset++), date: dateStr, values });
+      entriesByDateMap.set(dateStr, { id: nextEntryId(existing, idOffset++), date: dateStr, values });
     });
     const updatedEntries = Array.from(entriesByDateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
     const updatedData = { ...currentUserData, entries: updatedEntries };
@@ -22230,8 +22313,8 @@ const App: React.FC = () => {
     const { entries, kpiTargets, weeklyKpiTargets, dailyKpiTargets, candidates } = useMemo(() => ({
       entries: currentUserData?.entries || [],
       kpiTargets: { ...defaultKpiTargets, ...(currentUserData?.kpiTargets || {}) },
-      weeklyKpiTargets: { ...defaultKpiTargets, ...(currentUserData?.weeklyKpiTargets || {}) },
-      dailyKpiTargets: { ...defaultKpiTargets, ...(currentUserData?.dailyKpiTargets || {}) },
+      weeklyKpiTargets: stripUntouchedMonthlyDefaults(currentUserData?.weeklyKpiTargets, allMedia),
+      dailyKpiTargets: stripUntouchedMonthlyDefaults(currentUserData?.dailyKpiTargets, allMedia),
       candidates: currentUserData?.candidates || [],
     }), [currentUserData]);
 
@@ -22621,7 +22704,11 @@ const App: React.FC = () => {
 
   const weeklySummaryData = useMemo<WeeklyData>(() => {
       const weekStart = viewWeekStartDate.getTime();
-      const weekEnd = new Date(viewWeekStartDate).setDate(viewWeekStartDate.getDate() + 6);
+      // 7日目の終わりまで含める（computeAggregateWeeklyData と同じ理由）。
+      const weekEndDate = new Date(viewWeekStartDate);
+      weekEndDate.setDate(viewWeekStartDate.getDate() + 6);
+      weekEndDate.setHours(23, 59, 59, 999);
+      const weekEnd = weekEndDate.getTime();
 
       const weeklyEntries = entries.filter(entry => {
           const entryTime = new Date(entry.date).getTime();
@@ -22929,7 +23016,16 @@ const App: React.FC = () => {
   }
 
   if (isLoadingUserData) {
-      return <div className="loading-container">Googleドライブからデータを読み込み中...</div>;
+      return (
+        <div className="loading-container">
+          Googleドライブからデータを読み込み中...
+          {driveLoadError && (
+            <p style={{ marginTop: '0.75rem', fontSize: '0.9rem' }}>
+              読み込みに失敗したため、自動で再試行しています。ネットワーク接続を確認してください（データが消えたわけではありません）。
+            </p>
+          )}
+        </div>
+      );
   }
 
   if (isLoadingMediaConfig) {
@@ -23101,6 +23197,14 @@ const App: React.FC = () => {
 
       <WeeklyAchievementCelebrationPopup show={selfWeeklyIsNew} />
       <MonthlyAchievementJackpotPopup show={selfMonthlyIsNew} />
+      {driveLoadError && (
+        <div className="sync-error-banner">
+          <strong>⚠️ Googleドライブから最新のデータを読み込めていません。</strong>
+          <p style={{ margin: '0.5rem 0 0' }}>
+            この端末に残っている前回のデータを表示しています。データが二重にならないよう、読み込みに成功するまで保存を止めて自動で再試行しています（この間の入力は消えず、読み込み後に保存されます）。ネットワーク接続を確認してください。
+          </p>
+        </div>
+      )}
       {hasSyncError && (
         <div className="sync-error-banner">
           <strong>⚠️ 一部の変更がまだGoogleドライブに保存されていません。</strong>

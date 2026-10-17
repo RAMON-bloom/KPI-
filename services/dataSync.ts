@@ -154,7 +154,12 @@ export function readLegacyAppData(): { users: string[]; userData: Record<string,
 export interface LoadResult<T> {
   data: T | null;
   driveFileId: string | null;
-  source: 'drive' | 'cache' | 'new';
+  // 'error' = ドライブの読み込み自体が失敗した（通信断・429/5xx・トークン更新失敗など）。ファイルが
+  // 「存在しない」と確定したわけではないので、呼び出し側はこの結果で新しいファイルを作ってはいけない
+  // （以前は 'cache'/'new' + driveFileId:null を返していたため、一時的な失敗のたびに2つ目のデータ
+  // ファイル——キャッシュが無い端末では空のファイル——が作られていた）。data はローカルキャッシュ
+  // （あれば）、driveFileId は以前の読み込みで分かっているファイルid（あれば）。
+  source: 'drive' | 'cache' | 'new' | 'error';
 }
 
 /**
@@ -187,8 +192,7 @@ export async function loadOwnData<T = any>(email: string): Promise<LoadResult<T>
     }
   } catch (err) {
     console.error('Failed to load from Drive, falling back to local cache', err);
-    const cached = readLocalCache<T>(email);
-    if (cached) return { data: cached, driveFileId: null, source: 'cache' };
+    return { data: readLocalCache<T>(email), driveFileId: getCachedDriveFileId(email), source: 'error' };
   }
   return { data: null, driveFileId: null, source: 'new' };
 }
