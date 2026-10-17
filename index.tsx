@@ -4880,6 +4880,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'ミドル向けに「チーム一括入力（表）」を追加した。個人実績タブの「実績カレンダー」にある代理入力の欄から開き、日付と媒体を選ぶと、自分と代理入力できるメンバー全員分の実績（スカウト送信数〜有効初回面談数）を1つの表でまとめて入力できます。すでに値が入っているマスは色付きで表示し、保存するのは値を変えたマスだけです（本人がその日に入れた他の項目は変わりません）',
       'ブラインドレジュメ作成（候補者カードからの1件作成・「ブラインドレジュメ収集」）の推薦先の企業名とポジション名で、面接対策ジェネレーターに登録されている企業・ポジションを候補に出すようにした。企業とポジションを選ぶと、ジェネレーターにそのポジションの求人票が保存されていれば求人内容に自動で入ります（求人内容をすでに入力している時は上書きせず、「面接対策ジェネレーターの求人票から選ぶ」から追加できます）。ジェネレーターに無い企業・ポジションは、これまでどおり自由に入力できます',
       '候補者パイプラインのカードで、長い「他社状況」でカードが縦に長くなりすぎないようにした。2行を超える分は「…」で省略し、マウスを合わせると全文を吹き出しで表示、クリックすると全文を広げて表示します（もう一度クリックで折りたたみ）。編集は右の「編集」から行えます（空欄の時はこれまでどおりクリックで入力できます）',
+      '面談ログから「他社状況」を自動で取り込むとき、その候補者の選考状況に載っている企業（自分たち経由で選考中の企業）は書かないようにした。AIに除外する企業を伝えたうえで、取り込んだ文章からも、選考状況の企業名（「株式会社」の有無などの表記ゆれを含む）が入った文を取り除きます',
     ],
   },
   {
@@ -7174,7 +7175,7 @@ const CANDIDATE_BASIC_INFO_SCHEMA = {
         jobType: { type: Type.STRING, description: '候補者の現在の職種（例: 法人営業、経営企画、Webエンジニア）。短い名詞で。言及がなければ省略する。' },
         desiredJoinTiming: { type: Type.STRING, description: '候補者の入社可能時期・入社希望時期を yyyy-MM 形式で（例: 2027-01）。「3か月後」など相対的な表現は面談日から計算する。特定できなければ省略する。' },
         usingOtherAgents: { type: Type.BOOLEAN, description: '他の転職エージェントを利用しているならtrue、利用していないと明言していればfalse。言及がなければ省略する。' },
-        otherCompanyStatus: { type: Type.STRING, description: '他社（他エージェント経由・直接応募を含む）での選考状況を1〜3行で。企業名・段階が分かれば入れる。言及がなければ省略する。' },
+        otherCompanyStatus: { type: Type.STRING, description: '他社（他エージェント経由・直接応募を含む）での選考状況。1社ごとに「企業名：状況。」の形で、句点「。」で区切って書く。企業名・段階が分かれば入れる。言及がなければ省略する。' },
     },
 };
 
@@ -7197,11 +7198,14 @@ type ExtractedCandidateInfo = {
 };
 
 const extractCandidateBasicInfo = async (
-    contents: any
+    contents: any,
+    // 当社（担当）経由で選考に進んでいる企業。他社の選考状況には含めない（選考状況として別に管理しているため）。
+    ownApplicationCompanies: string[] = [],
 ): Promise<ExtractedCandidateInfo> => {
     const ai = gemini;
+    const ownCompanies = Array.from(new Set(ownApplicationCompanies.map(n => n.trim()).filter(Boolean)));
     const instructionPart = {
-        text: `上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレス、現年収、現職の企業名、職種、入社可能時期、他エージェントの利用有無、他社の選考状況が読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。（参考：今日は${new Date().toLocaleDateString('sv-SE')}です）`,
+        text: `上記の資料から、候補者の年齢、希望年収、電話番号、メールアドレス、現年収、現職の企業名、職種、入社可能時期、他エージェントの利用有無、他社の選考状況が読み取れる場合は抽出してください。他の指示（要約フォーマット等）があっても無視し、この抽出結果のみをJSONで返してください。言及がない項目は省略してください。${ownCompanies.length > 0 ? `他社の選考状況には、当社経由で選考に進んでいる次の企業は含めないでください（別に管理しています）：${ownCompanies.join('、')}。` : ''}（参考：今日は${new Date().toLocaleDateString('sv-SE')}です）`,
     };
     try {
         const response = await ai.models.generateContent({
@@ -7212,12 +7216,32 @@ const extractCandidateBasicInfo = async (
                 responseSchema: CANDIDATE_BASIC_INFO_SCHEMA,
             },
         });
-        return JSON.parse(response.text.trim());
+        const info: ExtractedCandidateInfo = JSON.parse(response.text.trim());
+        if (info.otherCompanyStatus) info.otherCompanyStatus = removeOwnApplicationCompanies(info.otherCompanyStatus, ownCompanies);
+        return info;
     } catch (error) {
         console.error('Error extracting candidate basic info:', error);
         return {};
     }
 };
+
+/**
+ * 他社の選考状況から、当社経由で選考中の企業について書いた文を取り除く（AIへの指示に加えた念のための後処理）。
+ * 句点・改行で区切った1文ごとに、選考状況にある企業名（表記ゆれを吸収して比較）が入っていればその文を落とす。
+ */
+const removeOwnApplicationCompanies = (text: string, companyNames: string[]): string => {
+    const keys = companyNames.map(normalizeCompanyName).filter(k => k.length >= 2);
+    if (keys.length === 0) return text.trim();
+    const kept = text
+        .split(/(?<=。)|\n/)
+        .map(seg => seg.trim())
+        .filter(seg => seg && !keys.some(k => normalizeCompanyName(seg).includes(k)));
+    return kept.join(text.includes('\n') ? '\n' : '').trim();
+};
+
+/** 候補者の選考状況（当社経由の選考）に載っている企業名。 */
+const ownApplicationCompanyNames = (candidate: Pick<Candidate, 'applications'> | null | undefined): string[] =>
+    (candidate?.applications || []).map(a => a.companyName).filter(Boolean);
 
 // 面談ログから読み取った項目を、候補者のどの欄に入れるか（表示名・表示の形）。
 const EXTRACTED_CANDIDATE_FIELDS: { key: keyof ExtractedCandidateInfo; label: string; format: (v: any) => string }[] = [
@@ -7687,7 +7711,7 @@ const CandidateModal: React.FC<{
                     model: 'gemini-2.5-flash',
                     contents: { parts: [audioPart, textPart] },
                 }),
-                extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
+                extractCandidateBasicInfo({ parts: [audioPart, textPart] }, ownApplicationCompanyNames(candidate)),
             ]);
 
             // 面談ごとに分けて保存する — memosに1件ずつ追加するので、複数の音声を取り込んでも
@@ -7781,7 +7805,7 @@ const CandidateModal: React.FC<{
             const ai = gemini;
             const [response, basicInfo] = await Promise.all([
                 ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
-                extractCandidateBasicInfo(contents),
+                extractCandidateBasicInfo(contents, ownApplicationCompanyNames(candidate)),
             ]);
             const newMemo: MemoEntry = {
                 id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -11251,7 +11275,7 @@ const NewInterviewLogsPanel: React.FC<{
             const contents = buildInterviewSummaryTranscriptPrompt(text);
             const [response, info] = await Promise.all([
                 gemini.models.generateContent({ model: 'gemini-2.5-flash', contents }),
-                extractCandidateBasicInfo(contents),
+                extractCandidateBasicInfo(contents, ownApplicationCompanyNames(candidatesRef.current.find(c => c.id === candidateId))),
             ]);
             // AIの処理中に候補者が更新されているかもしれないので、最新の状態に書き足す
             const latest = candidatesRef.current.find(c => c.id === candidateId);
@@ -16362,7 +16386,7 @@ const PipelineCandidateCard: React.FC<{
       const textPart = { text: INTERVIEW_SUMMARY_AUDIO_PROMPT };
       const [response, basicInfo] = await Promise.all([
         ai.models.generateContent({ model: 'gemini-2.5-flash', contents: { parts: [audioPart, textPart] } }),
-        extractCandidateBasicInfo({ parts: [audioPart, textPart] }),
+        extractCandidateBasicInfo({ parts: [audioPart, textPart] }, ownApplicationCompanyNames(c)),
       ]);
       // 面談ごとに分けて保存する — 以前は毎回interviewSummaryを丸ごと上書きしていたため、
       // 新しい音声をアップロードすると前回分の要約が消えてしまっていた。今はmemosに1件ずつ
@@ -16456,7 +16480,7 @@ const PipelineCandidateCard: React.FC<{
       const ai = gemini;
       const [response, basicInfo] = await Promise.all([
         ai.models.generateContent({ model: 'gemini-2.5-flash', contents }),
-        extractCandidateBasicInfo(contents),
+        extractCandidateBasicInfo(contents, ownApplicationCompanyNames(c)),
       ]);
       const newMemo: MemoEntry = {
         id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
