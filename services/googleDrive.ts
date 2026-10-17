@@ -477,6 +477,31 @@ export async function searchInterviewLogsByName(candidateName: string): Promise<
   return data.files ?? [];
 }
 
+/**
+ * 最近（since以降）に更新されたGoogleドキュメントのうち、名前か本文にいずれかの候補者名を含むものを探す。
+ * 候補者パイプラインの「まだ取り込んでいない面談ログ」の自動検出に使う。1回の検索に入れる名前は数人分
+ * ずつにして（検索式が長くなりすぎないように）、結果をまとめて返す。どの候補者に当たったかは呼び出し側で判定する。
+ */
+export async function searchRecentDocsMentioningNames(names: string[], sinceIso: string): Promise<InterviewLogFile[]> {
+  const variants = Array.from(new Set(names.flatMap(n => [n, n.replace(/[\s　]+/g, '')]).filter(v => v.length >= 2)));
+  const CHUNK = 8;
+  const found = new Map<string, InterviewLogFile>();
+  for (let i = 0; i < variants.length; i += CHUNK) {
+    const clause = variants.slice(i, i + CHUNK)
+      .map(escapeDriveQueryValue)
+      .map(v => `name contains '${v}' or fullText contains '${v}'`)
+      .join(' or ');
+    const q = `mimeType='application/vnd.google-apps.document' and trashed=false and modifiedTime > '${sinceIso}' and (${clause})`;
+    const res = await authorizedFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=50&spaces=drive`
+    );
+    if (!res.ok) throw new Error('面談ログの検索に失敗しました。');
+    const data = await res.json();
+    for (const f of (data.files ?? []) as InterviewLogFile[]) found.set(f.id, f);
+  }
+  return [...found.values()].sort((a, b) => b.modifiedTime.localeCompare(a.modifiedTime));
+}
+
 /** Exports a native Google Doc's content as plain text (Meet transcripts/notes are Google Docs). */
 export async function exportGoogleDocAsText(fileId: string): Promise<string> {
   const res = await authorizedFetch(`https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/plain`);

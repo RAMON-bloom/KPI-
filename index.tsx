@@ -17,7 +17,7 @@ import {
 import { Line, Bar } from 'react-chartjs-2';
 import { signIn, signOut, getCurrentSession, getLastKnownEmail, reauthorizeWithConsent, refreshTokenSilently, getSessionExpiresAt, hasGrantedScope, GMAIL_READONLY_SCOPE, GoogleIdentity } from './services/googleAuth';
 import { loadOwnData, saveOwnDataDebounced, flushPendingSave, forceSyncNow, hasPendingSync, retryPendingSyncIfNeeded, onSyncStatusChange, getLastSyncedAt, readLegacyAppData, loadAllTeammatesData, loadTeamsConfig, saveTeamsConfig, readLocalCache, loadMediaConfig, saveMediaConfig, readMediaConfigCache, syncIndividualWriterPermissions, overwriteTeammateEntry, overwriteTeammateEntries, overwriteTeammateCandidateVisibility, overwriteTeammateCandidatePatch, deleteTeammateCandidate, addTeammateCandidate, overwriteTeammateFeedbackPost, appendTeammateFeedbackMessage, appendOwnFeedbackPost, restoreFromBackup, loadAnnouncements, saveAnnouncements } from './services/dataSync';
-import { searchInterviewLogsByName, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
+import { searchInterviewLogsByName, searchRecentDocsMentioningNames, exportGoogleDocAsText, InterviewLogFile, DrivePermissionError } from './services/googleDrive';
 import { fetchScoutReplyCounts, fetchScoutReplyCountsForRange, GmailPermissionError, ScoutReplyRangeResult } from './services/gmailScout';
 
 // Googleの許可画面は項目ごとのチェックボックス形式のため、「続行」を押してもGmailにチェックが
@@ -4847,6 +4847,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
     items: [
       'AI（Gemini）の呼び出しを、KPI管理くんのサーバーを経由する形に変えた（APIキーをブラウザに渡さないようにするため）。使い方は変わりません。音声やPDFなど大きいファイルは、いったん自分のドライブに一時ファイル（kpi-mgr-ai-temp-…）として置いてAIに渡し、終わったら自動で削除します。AIのエラーも日本語で表示するようにしました（クレジット不足・混雑・一時的な上限など）',
       '面談ログ（議事録・ファイル・音声）を取り込んだときに自動で入る項目を増やした。これまでの年齢・希望年収・電話番号・メールアドレスに加えて、現職・職種・現年収・入社希望時期・他社の選考状況・他エージェントの利用も読み取ります。空欄の項目はそのまま入り、すでに入力済みで内容が違う項目は「上書きしますか？」と一覧で確認します（キャンセルすると登録済みの内容を残します）',
+      '候補者パイプラインの上部に「まだ取り込んでいない面談ログ」を追加した。直近14日に更新されたGoogleドキュメント（Meetの議事録など）のうち、自分の候補者の名前が入っていて、まだ面談ログに取り込んでいないものを自動で探して一覧にします。「取り込む」でAIが要約して面談ログに追加し、「対象外」にした文書は次から出しません。面接対策資料・求人票・応募書類など、名前に「面接対策」「求人票」「履歴書」などが入った文書は対象にしません。画面を開いた時と、10分以上たってからタブに戻った時に探し直します',
     ],
   },
   {
@@ -11003,6 +11004,198 @@ const FeedbackResponsesPanel: React.FC<{
                         </span>
                     </li>
                 ))}
+            </ul>
+        </div>
+    );
+};
+
+// --- まだ取り込んでいない面談ログ（Meetの議事録など）の自動検出 ---
+// 直近2週間に更新されたGoogleドキュメントのうち、自分の候補者の名前が名前か本文に入っているものを探し、
+// その候補者の面談ログにまだ取り込んでいないものを一覧にする。「対象外」にしたものは候補者の
+// dismissedFeedbackKeys に `meetlog:<ファイルID>` として残し、他の端末でも再表示しない。
+const MEET_LOG_DISMISS_PREFIX = 'meetlog:';
+const NEW_INTERVIEW_LOG_LOOKBACK_DAYS = 14;
+const NEW_INTERVIEW_LOG_RESCAN_MS = 10 * 60 * 1000;
+// 本文を読んでどの候補者の文書かを確かめるのは、1回の検索でこの件数まで（読み込みの量を抑えるため）
+const NEW_INTERVIEW_LOG_MAX_TEXT_CHECKS = 15;
+// 面談ログではない、候補者名が入った文書（面接対策資料・求人票・応募書類など）は除く
+const NON_INTERVIEW_LOG_DOC_NAME = /面接対策|求人票|職務経歴書|履歴書|レジュメ|推薦/;
+const compactName = (s: string) => s.replace(/[\s　]+/g, '');
+
+const NewInterviewLogsPanel: React.FC<{
+    candidates: Candidate[];
+    onSaveCandidate: (candidate: Candidate) => void;
+}> = ({ candidates, onSaveCandidate }) => {
+    const candidatesRef = useRef(candidates);
+    candidatesRef.current = candidates;
+    const [matches, setMatches] = useState<{ file: InterviewLogFile; candidateId: string }[]>([]);
+    const [scanning, setScanning] = useState(false);
+    const [scanError, setScanError] = useState('');
+    const [busyKeys, setBusyKeys] = useState<Set<string>>(new Set());
+    const [notices, setNotices] = useState<{ id: string; text: string; isError?: boolean }[]>([]);
+    const addNotice = (text: string, isError?: boolean) =>
+        setNotices(prev => [...prev, { id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, text, isError }]);
+    const textCacheRef = useRef(new Map<string, string>());
+    const lastScanRef = useRef(0);
+
+    const scan = useCallback(async () => {
+        const active = candidatesRef.current.filter(c => !c.isHidden && compactName(c.name || '').length >= 2);
+        if (active.length === 0) return;
+        lastScanRef.current = Date.now();
+        setScanning(true);
+        setScanError('');
+        try {
+            const since = new Date(Date.now() - NEW_INTERVIEW_LOG_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+            const files = await searchRecentDocsMentioningNames(active.map(c => c.name), since);
+            const found: { file: InterviewLogFile; candidateId: string }[] = [];
+            let textChecks = 0;
+            for (const file of files) {
+                if (NON_INTERVIEW_LOG_DOC_NAME.test(file.name)) continue;
+                // 取り込み済みの文書は、どの候補者に取り込んだものでも出さない
+                if (candidatesRef.current.some(c => (c.memos || []).some(m => m.sourceFileId === file.id))) continue;
+                let hits = active.filter(c => compactName(file.name).includes(compactName(c.name)));
+                if (hits.length === 0) {
+                    let text = textCacheRef.current.get(file.id);
+                    if (text === undefined) {
+                        if (textChecks >= NEW_INTERVIEW_LOG_MAX_TEXT_CHECKS) continue;
+                        textChecks++;
+                        text = await exportGoogleDocAsText(file.id).catch(() => '');
+                        textCacheRef.current.set(file.id, text);
+                    }
+                    const compactText = compactName(text);
+                    hits = active.filter(c => compactText.includes(compactName(c.name)));
+                }
+                hits.forEach(c => found.push({ file, candidateId: c.id }));
+            }
+            setMatches(found);
+        } catch (err) {
+            console.warn('面談ログの自動検出に失敗しました', err);
+            setScanError(err instanceof Error ? err.message : '面談ログの検索に失敗しました。');
+        } finally {
+            setScanning(false);
+        }
+    }, []);
+
+    // 画面を開いた時と、タブに戻ってきた時（前回から10分以上たっていれば）に探す
+    useEffect(() => {
+        void scan();
+        const rescanIfStale = () => {
+            if (document.visibilityState === 'visible' && Date.now() - lastScanRef.current > NEW_INTERVIEW_LOG_RESCAN_MS) void scan();
+        };
+        document.addEventListener('visibilitychange', rescanIfStale);
+        window.addEventListener('focus', rescanIfStale);
+        return () => {
+            document.removeEventListener('visibilitychange', rescanIfStale);
+            window.removeEventListener('focus', rescanIfStale);
+        };
+    }, [scan]);
+
+    const pending = useMemo(() => {
+        const byId = new Map<string, Candidate>(candidates.map(c => [c.id, c]));
+        const importedIds = new Set(candidates.flatMap(c => (c.memos || []).map(m => m.sourceFileId).filter(Boolean)));
+        return matches.flatMap(({ file, candidateId }) => {
+            const candidate = byId.get(candidateId);
+            if (!candidate || candidate.isHidden || importedIds.has(file.id)) return [];
+            if ((candidate.dismissedFeedbackKeys || []).includes(MEET_LOG_DISMISS_PREFIX + file.id)) return [];
+            if (candidate.applications.some(a => (a.interviewPrepDocs || []).some(d => d.fileId === file.id))) return [];
+            // 候補者を登録するより前（3日以上前）の文書は、同姓同名の別人の可能性が高いので出さない
+            if (candidate.createdAt && new Date(file.modifiedTime).getTime() < new Date(candidate.createdAt).getTime() - 3 * 24 * 60 * 60 * 1000) return [];
+            return [{ file, candidate }];
+        });
+    }, [matches, candidates]);
+
+    if (pending.length === 0 && notices.length === 0 && !scanError) return null;
+
+    const keyOf = (fileId: string, candidateId: string) => `${fileId}_${candidateId}`;
+    const setBusy = (key: string, on: boolean) => setBusyKeys(prev => {
+        const next = new Set(prev);
+        if (on) next.add(key); else next.delete(key);
+        return next;
+    });
+
+    const importLog = async (file: InterviewLogFile, candidateId: string) => {
+        const key = keyOf(file.id, candidateId);
+        setBusy(key, true);
+        try {
+            const text = textCacheRef.current.get(file.id) || await exportGoogleDocAsText(file.id);
+            const contents = buildInterviewSummaryTranscriptPrompt(text);
+            const [response, info] = await Promise.all([
+                gemini.models.generateContent({ model: 'gemini-2.5-flash', contents }),
+                extractCandidateBasicInfo(contents),
+            ]);
+            // AIの処理中に候補者が更新されているかもしれないので、最新の状態に書き足す
+            const latest = candidatesRef.current.find(c => c.id === candidateId);
+            if (!latest) return;
+            const base: MemoEntry[] = latest.memos && latest.memos.length > 0 ? latest.memos : [
+                ...(latest.interviewMemo ? [{ id: 'legacy-interview-memo', title: '面談メモ', content: latest.interviewMemo, updatedAt: '' }] : []),
+                ...(latest.interviewSummary ? [{ id: 'legacy-interview-summary', title: '面談要約（旧形式・統合済み）', content: latest.interviewSummary, updatedAt: '' }] : []),
+            ];
+            const memo: MemoEntry = {
+                id: `memo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                title: `面談ログ（${file.name}・${new Date(file.modifiedTime).toLocaleDateString('ja-JP')}）`,
+                content: response.text.trim(),
+                updatedAt: new Date().toISOString(),
+                logDate: new Date(file.modifiedTime).toISOString(),
+                sourceFileId: file.id,
+            };
+            onSaveCandidate({
+                ...latest,
+                memos: [...base, memo],
+                interviewMemo: undefined,
+                interviewSummary: undefined,
+                ...resolveExtractedCandidateInfo(latest, info),
+            });
+            addNotice(`${latest.name}さんの面談ログに「${file.name}」を取り込みました。`);
+        } catch (err) {
+            console.error('面談ログの取り込みに失敗しました', err);
+            addNotice(`「${file.name}」を取り込めませんでした（${err instanceof Error ? err.message : '時間をおいて再度お試しください'}）。`, true);
+        } finally {
+            setBusy(key, false);
+        }
+    };
+
+    const dismiss = (file: InterviewLogFile, candidateId: string) => {
+        const latest = candidatesRef.current.find(c => c.id === candidateId);
+        if (!latest) return;
+        onSaveCandidate({
+            ...latest,
+            dismissedFeedbackKeys: Array.from(new Set([...(latest.dismissedFeedbackKeys || []), MEET_LOG_DISMISS_PREFIX + file.id])),
+        });
+    };
+
+    return (
+        <div className="mail-result-suggestions new-interview-logs">
+            <div className="mail-result-suggestions-header">
+                <strong>まだ取り込んでいない面談ログ（{pending.length}件）</strong>
+                <span className="interview-prep-hint">直近{NEW_INTERVIEW_LOG_LOOKBACK_DAYS}日に更新されたGoogleドキュメント（Meetの議事録など）のうち、候補者の名前が入っていて、まだ面談ログに取り込んでいないものです。「取り込む」とAIで要約して面談ログに追加します（カードの「候補者名でGoogleドライブを検索」と同じ処理）。</span>
+                <button type="button" className="interview-prep-link-button" onClick={() => void scan()} disabled={scanning}>{scanning ? '検索中...' : '再検索'}</button>
+            </div>
+            {scanError && <p className="interview-prep-hint" style={{ color: 'var(--danger-color, #c0392b)' }}>{scanError}</p>}
+            {notices.length > 0 && (
+                <ul className="feedback-submit-notices">
+                    {notices.map(n => (
+                        <li key={n.id} className={n.isError ? 'is-error' : undefined}>
+                            <span>{n.text}</span>
+                            <button type="button" className="interview-prep-link-button" onClick={() => setNotices(prev => prev.filter(x => x.id !== n.id))}>閉じる</button>
+                        </li>
+                    ))}
+                </ul>
+            )}
+            <ul>
+                {pending.map(({ file, candidate }) => {
+                    const busy = busyKeys.has(keyOf(file.id, candidate.id));
+                    return (
+                        <li key={keyOf(file.id, candidate.id)}>
+                            <span className="mail-result-text">
+                                {candidate.name}さん：{file.webViewLink ? <a href={file.webViewLink} target="_blank" rel="noopener noreferrer">{file.name}</a> : file.name}（{new Date(file.modifiedTime).toLocaleDateString('ja-JP')}更新）
+                            </span>
+                            <span className="mail-result-actions">
+                                <button type="button" className="interview-prep-link-button" onClick={() => void importLog(file, candidate.id)} disabled={busy}>{busy ? '要約中...' : '取り込む'}</button>
+                                <button type="button" className="interview-prep-link-button" onClick={() => dismiss(file, candidate.id)} disabled={busy} title="この候補者の面談ログではない文書として、今後は表示しません">対象外</button>
+                            </span>
+                        </li>
+                    );
+                })}
             </ul>
         </div>
     );
@@ -17699,6 +17892,7 @@ const CandidatePipelineView: React.FC<{
             </div>
 
             <FeedbackResponsesPanel candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
+            <NewInterviewLogsPanel candidates={ownCandidatesForSuggestions} onSaveCandidate={saveCandidate} />
             <GeneratedPrepDocsCollector candidates={candidates.filter(c => isOwn(c) || isManagedByMiddle(c))} onSaveCandidate={saveCandidate} />
 
             <MailResultSuggestionsPanel
