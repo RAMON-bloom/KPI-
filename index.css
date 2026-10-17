@@ -5101,3 +5101,6 @@ p.memo-content-text {
 .jd-bundle-row-actions { display: inline-flex; align-items: center; gap: 0.6rem; flex: none; }
 .jd-bundle-delete { background: none; border: none; padding: 0; color: #b42318; font-size: 0.82rem; cursor: pointer; text-decoration: underline; }
 .jd-bundle-delete:disabled { color: var(--text-muted-color); cursor: default; }
+
+/* 候補者詳細の選考カード：企業名の直接編集（InlineCompanyNameField） */
+.detail-card-header .inline-company-name-field { flex: 1; min-width: 0; margin-right: 0.75rem; font-size: 0.95rem; }

@@ -4526,6 +4526,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-10-17',
     items: [
+      '候補者の詳細表示にある各社の選考カードでも、企業名を面接対策ジェネレーターの企業一覧から選べるようにした。企業名をクリックして入力を始めると登録済みの企業が候補に出て、選ぶとその場で保存されます（↑↓キーで選んでEnterでも確定。Escで取り消し）。一覧に無い企業は候補の一番下の「新規登録」でジェネレーターにも追加できます',
       '見込み月・意思決定時期など、似た日付の項目を整理した。集計に使うのは候補者の「見込み月」だけになり、見込み月の絞り込み・並び替え・想定粗利・内定承諾一覧（成約月）・BP会レポートはすべて見込み月で集計します（以前は選考ごとの意思決定時期を優先していたため、画面によって月がずれることがありました）。見込み月には「週」も任意で入れられ、BP会レポートのメンバー側の時期に使われます。選考ごとの「意思決定時期」は集計に使わないメモになりました。見込み月が未入力の候補者は、これまでの選考の日付から自動で読み替えています（「◯月1日」になっていたものは週未定として扱います）',
       'カード上の選考状況の変更など、どの画面から「内定承諾」にしても成約月（何月・何週の成約か）を確認するようにした（以前は選考情報の画面から変えたときだけ確認していました）。選んだ月は見込み月（成約月）に入ります。「内定承諾にしない」を選ぶと、その選考は元のフェーズのまま保存されます',
       '【不具合修正】選考状況を変えても、実績の加算が発生しない変更（同じ候補者の2社目が同じ段階を通過した、他社がまだ選考中のままお見送りにした、ステータスを前に戻した等）では、前の段階の予定日が消えない・先の日程が次の予定に繰り上がらない・選考トラックに記録されない・お見送り/辞退の発生フェーズが歩留まり分析に入らない、といった不具合を修正',
@@ -9127,7 +9128,11 @@ const CompanyNameInput: React.FC<{
     required?: boolean;
     ariaLabel?: string;
     placeholder?: string;
-}> = ({ id, value, onChange, autoFocus, required, ariaLabel, placeholder }) => {
+    // 候補から選んだ・新規登録した時だけ呼ぶ（カード上の直接編集で、その場で確定させるため）。
+    onPick?: (name: string, gasCompanyId: string) => void;
+    // 新規登録の確認ダイアログ〜登録中の間 true（その間のフォーカス外れで編集を閉じないため）。
+    onBusyChange?: (busy: boolean) => void;
+}> = ({ id, value, onChange, autoFocus, required, ariaLabel, placeholder, onPick, onBusyChange }) => {
     const prep = useInterviewPrepData();
     const [open, setOpen] = useState(false);
     const [highlight, setHighlight] = useState(0);
@@ -9170,11 +9175,13 @@ const CompanyNameInput: React.FC<{
         onChange(o.name, o.gasCompanyId);
         setOpen(false);
         setMessage('');
+        onPick?.(o.name, o.gasCompanyId);
     };
     const register = async () => {
         const name = cleanCompanyName(value);
         if (!name) return;
         setOpen(false);
+        onBusyChange?.(true);
         const similarNames = suggestions.slice(0, 5).map(o => o.name);
         const ok = window.confirm(
             `「${name}」を面接対策ジェネレーターの企業一覧に新規登録します。` +
@@ -9183,12 +9190,14 @@ const CompanyNameInput: React.FC<{
                 : '') +
             '\n\n新規登録してよろしいですか？',
         );
-        if (!ok) return;
+        if (!ok) { onBusyChange?.(false); return; }
         setRegistering(true);
         setMessage('');
+        let picked: { name: string; id: string } | null = null;
         try {
             const result = await registerCompany(name);
             onChange(result.name, result.id);
+            picked = { name: result.name, id: result.id };
             invalidateInterviewPrepData();
             prep.reload();
             setMessage(result.created
@@ -9199,7 +9208,9 @@ const CompanyNameInput: React.FC<{
             setMessage(err instanceof InterviewPrepAccessError ? err.message : '企業の新規登録に失敗しました。時間をおいて再度お試しください。');
         } finally {
             setRegistering(false);
+            onBusyChange?.(false);
         }
+        if (picked) onPick?.(picked.name, picked.id);
     };
     const activate = (index: number) => {
         if (index < suggestions.length) choose(suggestions[index]);
@@ -9282,6 +9293,66 @@ const CompanyNameInput: React.FC<{
                     </p>
                 ) : null
             )}
+        </div>
+    );
+};
+
+/**
+ * 候補者詳細の選考カード用：企業名の直接編集（InlineTextField と同じ「クリックで編集」）に、
+ * CompanyNameInput の候補（面接対策ジェネレーターの企業一覧）と新規登録を付けたもの。
+ * 候補を選ぶ／新規登録するとその場で確定。手入力のままフォーカスを外すかEnterでも確定し
+ * （一覧と一致すれば企業IDも付く）、Escで取り消す。
+ */
+const InlineCompanyNameField: React.FC<{
+    id: string;
+    value: string;
+    gasCompanyId?: string;
+    onCommit: (name: string, gasCompanyId: string | undefined) => void;
+}> = ({ id, value, gasCompanyId, onCommit }) => {
+    const [isEditing, setIsEditing] = useState(false);
+    const [draft, setDraft] = useState<{ name: string; gasCompanyId?: string }>({ name: value, gasCompanyId });
+    const busyRef = useRef(false);
+    // 候補を選んだ直後のフォーカス外れで、古い下書きをもう一度確定しないための印。
+    const doneRef = useRef(false);
+    const wrapperRef = useRef<HTMLDivElement>(null);
+    const startEditing = () => { setDraft({ name: value, gasCompanyId }); doneRef.current = false; setIsEditing(true); };
+    const commit = (name: string, companyId: string | undefined) => {
+        if (doneRef.current) return;
+        doneRef.current = true;
+        setIsEditing(false);
+        const trimmed = name.trim();
+        if (!trimmed) return; // 空にはしない（元の企業名のまま）
+        if (trimmed !== value || companyId !== gasCompanyId) onCommit(trimmed, companyId);
+    };
+    if (!isEditing) {
+        const displayProps = editableDisplayProps(startEditing, '企業名', !value ? 'is-empty' : '');
+        return <span {...displayProps}>{value || '企業名'}</span>;
+    }
+    return (
+        <div
+            ref={wrapperRef}
+            className="inline-company-name-field"
+            onBlur={e => {
+                if (busyRef.current) return;
+                if (wrapperRef.current?.contains(e.relatedTarget as Node | null)) return;
+                commit(draft.name, draft.gasCompanyId);
+            }}
+            onKeyDown={e => {
+                if (e.defaultPrevented) return; // 候補リストの操作（↑↓・Enter）は CompanyNameInput 側で処理済み
+                if (e.key === 'Escape') { e.preventDefault(); doneRef.current = true; setIsEditing(false); }
+                else if (e.key === 'Enter') { e.preventDefault(); commit(draft.name, draft.gasCompanyId); }
+            }}
+        >
+            <CompanyNameInput
+                id={id}
+                value={draft.name}
+                onChange={(name, companyId) => setDraft({ name, gasCompanyId: companyId })}
+                onPick={(name, companyId) => commit(name, companyId)}
+                onBusyChange={busy => { busyRef.current = busy; }}
+                autoFocus
+                ariaLabel="企業名"
+                placeholder="企業名（ジェネレーターの企業一覧から選ぶ）"
+            />
         </div>
     );
 };
@@ -16165,11 +16236,11 @@ const PipelineCandidateCard: React.FC<{
                             <div key={app.id} className={`detail-application-card ${app.isHidden ? 'is-hidden' : ''}`}>
                                 <div className="detail-card-header">
                                     {candidateIsOwn ? (
-                                        <InlineTextField
+                                        <InlineCompanyNameField
+                                            id={`detail-company-${app.id}`}
                                             value={app.companyName}
-                                            onCommit={(v) => commitApplicationField(app.id, { companyName: v })}
-                                            placeholder="企業名"
-                                            ariaLabel="企業名"
+                                            gasCompanyId={app.gasCompanyId}
+                                            onCommit={(companyName, gasCompanyId) => commitApplicationField(app.id, { companyName, gasCompanyId })}
                                         />
                                     ) : (
                                         <strong>{app.companyName}</strong>
