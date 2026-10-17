@@ -4848,6 +4848,7 @@ const APP_CHANGELOG: ChangelogEntry[] = [
       'AI（Gemini）の呼び出しを、KPI管理くんのサーバーを経由する形に変えた（APIキーをブラウザに渡さないようにするため）。使い方は変わりません。音声やPDFなど大きいファイルは、いったん自分のドライブに一時ファイル（kpi-mgr-ai-temp-…）として置いてAIに渡し、終わったら自動で削除します。AIのエラーも日本語で表示するようにしました（クレジット不足・混雑・一時的な上限など）',
       '面談ログ（議事録・ファイル・音声）を取り込んだときに自動で入る項目を増やした。これまでの年齢・希望年収・電話番号・メールアドレスに加えて、現職・職種・現年収・入社希望時期・他社の選考状況・他エージェントの利用も読み取ります。空欄の項目はそのまま入り、すでに入力済みで内容が違う項目は「上書きしますか？」と一覧で確認します（キャンセルすると登録済みの内容を残します）',
       '候補者パイプラインの上部に「まだ取り込んでいない面談ログ」を追加した。直近14日に更新されたGoogleドキュメント（Meetの議事録など）のうち、自分の候補者の名前が入っていて、まだ面談ログに取り込んでいないものを自動で探して一覧にします。「取り込む」でAIが要約して面談ログに追加し、「対象外」にした文書は次から出しません。面接対策資料・求人票・応募書類など、名前に「面接対策」「求人票」「履歴書」などが入った文書は対象にしません。画面を開いた時と、10分以上たってからタブに戻った時に探し直します',
+      '全ユーザータブの「全ユーザーの進捗」に「メンバー別／チーム別」の切り替えを追加した。チーム別にすると、選択中のメンバーをチームごとに合計した行（チーム未所属の人がいればその行も）と、全体の合計行を表示します。返信率などの率はチームの合計から計算し、返信数・有効面談数には1人あたりの数も添えます',
     ],
   },
   {
@@ -19336,6 +19337,9 @@ const AllUsersDashboard: React.FC<{
   onChangeAcceptedDealMonth?: (ownerEmail: string, candidate: Candidate, applicationId: string, yyyymm: string) => void;
   // 想定粗利の一覧から候補者（ownerEmail付き）の年収・料率・媒体などを修正した時の保存処理。
   onSaveAggregateCandidate?: (candidate: Candidate) => void;
+  // 「全ユーザーの進捗」をチームごとにまとめて見るためのチーム構成（全ユーザータブだけで渡す）。
+  // 未指定・空ならチーム別の表示切り替えを出さない。
+  teamGroups?: { id: string; name: string; memberEmails: string[] }[];
 }> = ({
   users, allUsersData, allMedia, dayOfWeekReplyRateData, weekStartDate, onPrevWeek, onNextWeek, memberWeekStartDate, onPrevMemberWeek, onNextMemberWeek, weekStartsOn, visibility, toggleSection, onSaveSectionDefaults,
   sectionOrder = DEFAULT_ALL_USERS_SECTION_ORDER, onMoveSection,
@@ -19346,6 +19350,7 @@ const AllUsersDashboard: React.FC<{
   dowOwnPeriod, onChangeDowOwnPeriod,
   onThisWeek, onThisMemberWeek,
   canEditAcceptedDealOwner, onChangeAcceptedDealMonth, onSaveAggregateCandidate,
+  teamGroups,
 }) => {
   const [justSavedSectionDefaults, setJustSavedSectionDefaults] = useState(false);
   const handleSaveSectionDefaultsClick = () => {
@@ -19474,6 +19479,138 @@ const AllUsersDashboard: React.FC<{
     };
   }), [users, allUsersData, allMedia, activeMedia, progressPeriodOverride]);
 
+  // 「全ユーザーの進捗」のチーム別表示。表示中のユーザーをチームごとに合計し、率は合計から計算し直す
+  // （メンバーの率の平均ではない）。複数チームに所属する人はそれぞれのチームに数える。最後に全体の合計行。
+  const [progressGrouping, setProgressGrouping] = useState<'member' | 'team'>('member');
+  type ProgressRowStat = Exclude<(typeof perUserProgressStats)[number], { userData: null }>;
+  const teamProgressRows = useMemo(() => {
+    if (!teamGroups || teamGroups.length === 0) return [];
+    const statByUser = new Map<string, ProgressRowStat>();
+    perUserProgressStats.forEach(stat => { if (stat.userData) statByUser.set(normalizeEmail(stat.user), stat as ProgressRowStat); });
+    const build = (key: string, label: string, stats: ProgressRowStat[], isTotal = false) => {
+      const sum = (pick: (s: ProgressRowStat) => number) => stats.reduce((acc, st) => acc + pick(st), 0);
+      const sent = sum(st => st.sent);
+      const replies = sum(st => st.replies);
+      const effectiveReplies = sum(st => st.effectiveReplies);
+      const initialInterviews = sum(st => st.initialInterviews);
+      const effectiveInitialInterviews = sum(st => st.effectiveInitialInterviews);
+      return {
+        key, label, isTotal, memberCount: stats.length,
+        sent, replies, effectiveReplies,
+        replyRate: sent > 0 ? (replies / sent) * 100 : 0,
+        effectiveReplyRate: replies > 0 ? (effectiveReplies / replies) * 100 : 0,
+        documentsCollected: sum(st => st.documentsCollected), documentsCollectedTarget: sum(st => st.documentsCollectedTarget),
+        effectiveDocumentsCollected: sum(st => st.effectiveDocumentsCollected), effectiveDocumentsCollectedTarget: sum(st => st.effectiveDocumentsCollectedTarget),
+        initialInterviews, effectiveInitialInterviews, initialInterviewsTarget: sum(st => st.initialInterviewsTarget),
+        effectiveInterviewRate: initialInterviews > 0 ? (effectiveInitialInterviews / initialInterviews) * 100 : 0,
+        generalKpis: (Object.keys(GENERAL_KPIS) as Array<keyof typeof GENERAL_KPIS>).map(k => ({
+          key: k, label: GENERAL_KPIS[k].label,
+          value: sum(st => st.generalKpis.find(g => g.key === k)?.value || 0),
+          target: sum(st => st.generalKpis.find(g => g.key === k)?.target || 0),
+        })),
+      };
+    };
+    const assigned = new Set<string>();
+    const rows = teamGroups.map(team => {
+      const stats = Array.from(new Set<string>(team.memberEmails.map(normalizeEmail)))
+        .map(email => statByUser.get(email))
+        .filter((st): st is ProgressRowStat => !!st);
+      stats.forEach(st => assigned.add(normalizeEmail(st.user)));
+      return build(`team:${team.id}`, team.name, stats);
+    }).filter(row => row.memberCount > 0);
+    const unassigned = [...statByUser.values()].filter(st => !assigned.has(normalizeEmail(st.user)));
+    if (unassigned.length > 0) rows.push(build('team:__none', 'チーム未所属', unassigned));
+    if (rows.length > 0) rows.push(build('team:__total', '全体', [...statByUser.values()], true));
+    return rows;
+  }, [teamGroups, perUserProgressStats]);
+  const showTeamProgress = progressGrouping === 'team' && teamProgressRows.length > 0;
+
+  // 「全ユーザーの進捗」の1行（メンバー1人分、またはチーム別表示のチーム1つ分）。memberCountを渡すと
+  // 返信数・初回面談数の下に1人あたりの数を添える（チーム別表示用）。
+  const renderProgressRow = (rowKey: string, label: React.ReactNode, stat: {
+    sent: number; replies: number; effectiveReplies: number; replyRate: number; effectiveReplyRate: number;
+    documentsCollected: number; documentsCollectedTarget: number; effectiveDocumentsCollected: number; effectiveDocumentsCollectedTarget: number;
+    initialInterviews: number; effectiveInitialInterviews: number; effectiveInterviewRate: number; initialInterviewsTarget: number;
+    generalKpis: { key: string; value: number; target: number }[];
+  }, rowClassName?: string, memberCount?: number) => {
+    const {
+      sent, replies, effectiveReplies, replyRate, effectiveReplyRate,
+      documentsCollected, documentsCollectedTarget, effectiveDocumentsCollected, effectiveDocumentsCollectedTarget,
+      initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
+      generalKpis,
+    } = stat;
+    const documentsCollectedProgress = documentsCollectedTarget > 0 ? Math.min((documentsCollected / documentsCollectedTarget) * 100, 100) : 0;
+    const effectiveDocumentsCollectedProgress = effectiveDocumentsCollectedTarget > 0 ? Math.min((effectiveDocumentsCollected / effectiveDocumentsCollectedTarget) * 100, 100) : 0;
+    const initialInterviewsProgress = initialInterviewsTarget > 0 ? Math.min((initialInterviews / initialInterviewsTarget) * 100, 100) : 0;
+
+    return (
+      <tr key={rowKey} className={rowClassName}>
+        <td className={memberCount ? 'team-progress-name-cell' : undefined}>{label}</td>
+        <td>{replies}{memberCount ? <small className="team-progress-avg">1人 {(replies / memberCount).toFixed(1)}</small> : null}</td>
+        <td className="progress-cell">
+          <span>{replyRate.toFixed(1)}%</span>
+          <div className="mini-progress-bar">
+            <div className="progress-bar-fill" style={{ width: `${Math.min(replyRate, 100)}%` }}></div>
+          </div>
+          <small>({replies}/{sent})</small>
+        </td>
+        <td>{effectiveReplies}</td>
+        <td className="progress-cell">
+          <span>{effectiveReplyRate.toFixed(1)}%</span>
+          <div className="mini-progress-bar">
+            <div className="progress-bar-fill" style={{ width: `${Math.min(effectiveReplyRate, 100)}%`, backgroundColor: 'var(--info-color)' }}></div>
+          </div>
+          <small>({effectiveReplies}/{replies})</small>
+        </td>
+        <td className="progress-cell">
+            <span>{documentsCollected}{!progressPeriodOverride && ` / ${documentsCollectedTarget}`}</span>
+            {!progressPeriodOverride && (
+              <div className="mini-progress-bar">
+                  <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
+              </div>
+            )}
+        </td>
+         <td className="progress-cell">
+            <span>{effectiveDocumentsCollected}{!progressPeriodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
+            {!progressPeriodOverride && (
+              <div className="mini-progress-bar">
+                  <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
+              </div>
+            )}
+        </td>
+        <td className="progress-cell">
+            <span>{initialInterviews}{!progressPeriodOverride && ` / ${initialInterviewsTarget}`}</span>
+            {!progressPeriodOverride && (
+              <div className="mini-progress-bar">
+                  <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
+              </div>
+            )}
+        </td>
+        <td>{effectiveInitialInterviews}{memberCount ? <small className="team-progress-avg">1人 {(effectiveInitialInterviews / memberCount).toFixed(1)}</small> : null}</td>
+        <td className="progress-cell">
+          <span>{effectiveInterviewRate.toFixed(1)}%</span>
+          <div className="mini-progress-bar">
+            <div className="progress-bar-fill" style={{ width: `${Math.min(effectiveInterviewRate, 100)}%`, backgroundColor: 'var(--info-color)' }}></div>
+          </div>
+          <small>({effectiveInitialInterviews}/{initialInterviews})</small>
+        </td>
+        {generalKpis.map(({ key, value, target }) => {
+            const progress = target > 0 ? Math.min((value / target) * 100, 100) : 0;
+            return (
+                <td key={key} className="progress-cell">
+                    <span>{value}{!progressPeriodOverride && ` / ${target}`}</span>
+                    {!progressPeriodOverride && (
+                      <div className="mini-progress-bar">
+                          <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
+                      </div>
+                    )}
+                </td>
+            );
+        })}
+      </tr>
+    );
+  };
+
   // このカードが実際に表示されるか（showGrossProfit=falseの文脈のgrossProfit、集計対象データが
   // 無いときのdowRateは非表示）。並び替えボタンは「今実際に表示されているカード同士」の間だけで
   // 前後に動かせればよいため、移動先の判定にはこの表示中一覧だけを使う。
@@ -19551,6 +19688,13 @@ const AllUsersDashboard: React.FC<{
         </h2>
         <div id="all-users-progress-content" className={`collapsible-content ${visibility.progress ? 'open' : ''}`}>
           <CardPeriodControl pagePeriod={funnelPeriodOverride} ownPeriod={progressOwnPeriod} onChangeOwn={onChangeProgressOwnPeriod} />
+          {teamProgressRows.length > 0 && (
+            <div className="progress-grouping-toggle" role="group" aria-label="進捗のまとめ方">
+              <button type="button" className={progressGrouping === 'member' ? 'is-active' : ''} aria-pressed={progressGrouping === 'member'} onClick={() => setProgressGrouping('member')}>メンバー別</button>
+              <button type="button" className={progressGrouping === 'team' ? 'is-active' : ''} aria-pressed={progressGrouping === 'team'} onClick={() => setProgressGrouping('team')}>チーム別</button>
+              {showTeamProgress && <span className="interview-prep-hint">選択中のメンバーをチームごとに合計しています（率は合計から計算。複数チームに所属する人はそれぞれに数えます）。「1人」は1人あたりの数です。</span>}
+            </div>
+          )}
           {progressPeriodOverride && (
             <p className="gmail-scout-message">指定期間の実績を表示しています。目標は月次で設定されているため、この表示では目標・達成率は表示していません。</p>
           )}
@@ -19558,7 +19702,7 @@ const AllUsersDashboard: React.FC<{
             <table className="all-users-table">
               <thead>
                 <tr>
-                  <th>ユーザー</th>
+                  <th className={showTeamProgress ? 'team-progress-name-cell' : undefined}>{showTeamProgress ? 'チーム' : 'ユーザー'}</th>
                   <th>返信数</th>
                   <th>スカウト返信率</th>
                   <th>有効返信数</th>
@@ -19574,86 +19718,14 @@ const AllUsersDashboard: React.FC<{
                 </tr>
               </thead>
               <tbody>
-                {perUserProgressStats.map(stat => {
+                {showTeamProgress && teamProgressRows.map(row => renderProgressRow(row.key, (
+                  <>{row.label}<small className="team-progress-member-count">（{row.memberCount}人）</small></>
+                ), row, row.isTotal ? 'team-progress-total-row' : 'team-progress-row', row.memberCount))}
+                {!showTeamProgress && perUserProgressStats.map(stat => {
                   if (!stat.userData) {
                     return <tr key={stat.user}><td colSpan={Object.keys(GENERAL_KPIS).length + 10}>{stat.displayName}のデータがありません。</td></tr>;
                   }
-                  const {
-                    user, displayName, sent, replies, effectiveReplies, replyRate, effectiveReplyRate,
-                    documentsCollected, documentsCollectedTarget, effectiveDocumentsCollected, effectiveDocumentsCollectedTarget,
-                    initialInterviews, effectiveInitialInterviews, effectiveInterviewRate, initialInterviewsTarget,
-                    generalKpis,
-                  } = stat;
-                  const documentsCollectedProgress = documentsCollectedTarget > 0 ? Math.min((documentsCollected / documentsCollectedTarget) * 100, 100) : 0;
-                  const effectiveDocumentsCollectedProgress = effectiveDocumentsCollectedTarget > 0 ? Math.min((effectiveDocumentsCollected / effectiveDocumentsCollectedTarget) * 100, 100) : 0;
-                  const initialInterviewsProgress = initialInterviewsTarget > 0 ? Math.min((initialInterviews / initialInterviewsTarget) * 100, 100) : 0;
-
-                  return (
-                    <tr key={user}>
-                      <td>{displayName}</td>
-                      <td>{replies}</td>
-                      <td className="progress-cell">
-                        <span>{replyRate.toFixed(1)}%</span>
-                        <div className="mini-progress-bar">
-                          <div className="progress-bar-fill" style={{ width: `${Math.min(replyRate, 100)}%` }}></div>
-                        </div>
-                        <small>({replies}/{sent})</small>
-                      </td>
-                      <td>{effectiveReplies}</td>
-                      <td className="progress-cell">
-                        <span>{effectiveReplyRate.toFixed(1)}%</span>
-                        <div className="mini-progress-bar">
-                          <div className="progress-bar-fill" style={{ width: `${Math.min(effectiveReplyRate, 100)}%`, backgroundColor: 'var(--info-color)' }}></div>
-                        </div>
-                        <small>({effectiveReplies}/{replies})</small>
-                      </td>
-                      <td className="progress-cell">
-                          <span>{documentsCollected}{!progressPeriodOverride && ` / ${documentsCollectedTarget}`}</span>
-                          {!progressPeriodOverride && (
-                            <div className="mini-progress-bar">
-                                <div className="progress-bar-fill" style={{ width: `${documentsCollectedProgress}%` }}></div>
-                            </div>
-                          )}
-                      </td>
-                       <td className="progress-cell">
-                          <span>{effectiveDocumentsCollected}{!progressPeriodOverride && ` / ${effectiveDocumentsCollectedTarget}`}</span>
-                          {!progressPeriodOverride && (
-                            <div className="mini-progress-bar">
-                                <div className="progress-bar-fill" style={{ width: `${effectiveDocumentsCollectedProgress}%`, backgroundColor: 'var(--info-color)' }}></div>
-                            </div>
-                          )}
-                      </td>
-                      <td className="progress-cell">
-                          <span>{initialInterviews}{!progressPeriodOverride && ` / ${initialInterviewsTarget}`}</span>
-                          {!progressPeriodOverride && (
-                            <div className="mini-progress-bar">
-                                <div className="progress-bar-fill" style={{ width: `${initialInterviewsProgress}%` }}></div>
-                            </div>
-                          )}
-                      </td>
-                      <td>{effectiveInitialInterviews}</td>
-                      <td className="progress-cell">
-                        <span>{effectiveInterviewRate.toFixed(1)}%</span>
-                        <div className="mini-progress-bar">
-                          <div className="progress-bar-fill" style={{ width: `${Math.min(effectiveInterviewRate, 100)}%`, backgroundColor: 'var(--info-color)' }}></div>
-                        </div>
-                        <small>({effectiveInitialInterviews}/{initialInterviews})</small>
-                      </td>
-                      {generalKpis.map(({ key, value, target }) => {
-                          const progress = target > 0 ? Math.min((value / target) * 100, 100) : 0;
-                          return (
-                              <td key={key} className="progress-cell">
-                                  <span>{value}{!progressPeriodOverride && ` / ${target}`}</span>
-                                  {!progressPeriodOverride && (
-                                    <div className="mini-progress-bar">
-                                        <div className="progress-bar-fill" style={{ width: `${progress}%` }}></div>
-                                    </div>
-                                  )}
-                              </td>
-                          );
-                      })}
-                    </tr>
-                  );
+                  return renderProgressRow(stat.user, stat.displayName, stat);
                 })}
                  {users.length === 0 && (
                     <tr>
@@ -24711,6 +24783,7 @@ const App: React.FC = () => {
               </div>
               <AllUsersDashboard
                   users={comparisonUsers}
+                  teamGroups={comparisonTeamGroups.groups.map(g => ({ id: g.id, name: g.name, memberEmails: g.members.map(m => m.email) }))}
                   allUsersData={displayedAllUsersData}
                   allMedia={allMedia}
                   dayOfWeekReplyRateData={dayOfWeekReplyRateData}
